@@ -1573,6 +1573,219 @@ async function main() {
     const handAfterPlay = await evaluate(`document.querySelectorAll('.card--hand').length`)
     assert(handAfterPlay === 19, '界面上的手牌也少了 1 张', `${handAfterPlay} 张`)
 
+    // ---- 更换壁纸（预设 + 文件空间图片）----
+    console.log('\n【更换壁纸】')
+
+    // 先在共享空间放一张真实的小 PNG（1×1），壁纸选择器才有东西可选
+    const pngBytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    const wpName = `壁纸测试-${SUFFIX}.png`
+    const upInit = await apiAs(sessionCookie, '/api/uploads', {
+      method: 'POST',
+      json: { parentId: null, name: wpName, size: pngBytes.length, space: 'shared' },
+    })
+    assert(upInit.status === 200, '壁纸测试图片的上传会话已建立', `status ${upInit.status}`)
+    if (upInit.status === 200 && !upInit.body.instant) {
+      const putChunk = await apiAs(sessionCookie, `/api/uploads/${upInit.body.uploadId}/chunk?offset=0`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: pngBytes,
+      })
+      assert(putChunk.status === 200, '图片分片已送达')
+      const complete = await apiAs(sessionCookie, `/api/uploads/${upInit.body.uploadId}/complete`, {
+        method: 'POST',
+        json: {},
+      })
+      assert(complete.status === 200, '图片已入库（共享空间）')
+    }
+
+    // 桌面右键 → 更换壁纸…
+    await evaluate(`
+      document.querySelector('.desktop-icons').dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, clientX: 620, clientY: 300 }),
+      )
+    `)
+    await sleep(400)
+    const openPicker = await evaluate(`
+      (() => {
+        const it = [...document.querySelectorAll('.ctx__item')].find((x) => x.textContent.includes('更换壁纸'))
+        if (!it) return false
+        it.click()
+        return true
+      })()
+    `)
+    assert(openPicker === true, '桌面右键菜单能打开「更换壁纸」')
+    await sleep(1200)
+
+    const pickerInfo = JSON.parse(await evaluate(`JSON.stringify({
+      open: !!document.querySelector('.wp-picker'),
+      presets: document.querySelectorAll('.wp-picker__preset').length,
+      images: [...document.querySelectorAll('.wp-picker__img-name')].map((e) => e.textContent.trim()),
+    })`))
+    assert(pickerInfo.open, '壁纸选择器已打开')
+    assert(pickerInfo.presets === 4, '有 4 套预设壁纸', `${pickerInfo.presets} 套`)
+    assert(pickerInfo.images.includes(wpName), '文件空间里的图片出现在选择器中', pickerInfo.images.join('、'))
+
+    // 选第 3 套预设：立即生效，且图片壁纸被清掉
+    await evaluate(`document.querySelectorAll('.wp-picker__preset')[2].click()`)
+    await sleep(300)
+    const presetState = JSON.parse(await evaluate(`JSON.stringify({
+      wallpaper: localStorage.getItem('wl.wallpaper'),
+      image: localStorage.getItem('wl.wallpaper.image'),
+      photo: !!document.querySelector('.desktop__wallpaper-photo'),
+    })`))
+    assert(presetState.wallpaper === '2', '预设壁纸切换已持久化', `wl.wallpaper=${presetState.wallpaper}`)
+    assert(!presetState.image && !presetState.photo, '选预设会清掉图片壁纸')
+
+    // 选文件空间里的图片：写入偏好，桌面上出现图片层
+    const pickedImage = await evaluate(`
+      (() => {
+        const tile = [...document.querySelectorAll('.wp-picker__img')].find(
+          (t) => t.textContent.includes(${JSON.stringify(wpName)}),
+        )
+        if (!tile) return false
+        tile.click()
+        return true
+      })()
+    `)
+    assert(pickedImage === true, '点中了文件空间里的图片')
+    await sleep(500)
+    const imageState = JSON.parse(await evaluate(`JSON.stringify({
+      stored: localStorage.getItem('wl.wallpaper.image'),
+      photo: !!document.querySelector('.desktop__wallpaper-photo'),
+      src: document.querySelector('.desktop__wallpaper-photo')?.getAttribute('src') ?? '',
+    })`))
+    assert(!!imageState.stored, '图片壁纸已写入本地偏好', String(imageState.stored))
+    assert(
+      imageState.photo && imageState.src.includes('/api/files/'),
+      '桌面上渲染出了图片壁纸层',
+      imageState.src || '（没有图片层）',
+    )
+
+    // 清除图片壁纸 → 回到预设
+    await evaluate(`
+      (() => {
+        const btns = [...document.querySelectorAll('.wp-picker__foot-actions .wl-btn')]
+        btns.find((b) => b.textContent.includes('清除图片壁纸'))?.click()
+        return true
+      })()
+    `)
+    await sleep(300)
+    const cleared = JSON.parse(await evaluate(`JSON.stringify({
+      image: localStorage.getItem('wl.wallpaper.image'),
+      photo: !!document.querySelector('.desktop__wallpaper-photo'),
+    })`))
+    assert(!cleared.image && !cleared.photo, '清除图片壁纸后回到预设')
+
+    // 完成 → 弹层关闭
+    await evaluate(`
+      (() => {
+        const btns = [...document.querySelectorAll('.wp-picker__foot-actions .wl-btn')]
+        btns.find((b) => b.textContent.includes('完成'))?.click()
+        return true
+      })()
+    `)
+    await sleep(500)
+    assert((await evaluate(`!document.querySelector('.wp-picker')`)) === true, '「完成」关闭选择器')
+
+    // ---- 预览 = 独立窗口（和其他窗口同一套框架）----
+    console.log('\n【预览窗口】')
+
+    const windowsBefore = await evaluate(`document.querySelectorAll('.window').length`)
+    await evaluate(`
+      (() => {
+        const icon = [...document.querySelectorAll('.desktop-icons .icon')].find((i) => i.textContent.includes('文件'))
+        icon?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+        return true
+      })()
+    `)
+    await sleep(2000)
+
+    const wpOpened = await evaluate(`
+      (() => {
+        const names = [...document.querySelectorAll('.tile__name, .row__name')]
+        const el = names.find((x) => x.textContent.includes(${JSON.stringify(wpName)}))
+        if (!el) return 'no-file'
+        const target = el.closest('.tile, .row') ?? el
+        target.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+        return 'ok'
+      })()
+    `)
+    assert(wpOpened === 'ok', '文件列表里找到了测试图片', String(wpOpened))
+    await sleep(1500)
+
+    const pv = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const win = [...document.querySelectorAll('.window')].find(
+        (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(wpName)},
+      )
+      if (!win) return { found: false }
+      return {
+        found: true,
+        handles: win.querySelectorAll('.window__handle').length,
+        controls: win.querySelectorAll('.window__ctl').length,
+        imgSrc: win.querySelector('.pv__img')?.getAttribute('src') ?? '',
+        // 任务栏按钮按应用分组，title 是应用名「预览」（多窗口时另有数量角标）
+        taskbar: [...document.querySelectorAll('.taskbar__app')].some(
+          (b) => (b.getAttribute('title') ?? '').includes('预览'),
+        ),
+      }
+    })())`))
+    assert(pv.found === true, '预览以独立窗口打开（标题 = 文件名）')
+    assert(pv.handles === 8, '预览窗口有 8 向缩放手柄（可拖拽、可缩放）', `${pv.handles} 个`)
+    assert(pv.controls >= 2, '预览窗口有标题栏控制按钮', `${pv.controls} 个`)
+    assert((pv.imgSrc ?? '').includes('/api/files/'), '预览窗口里渲染了图片', pv.imgSrc || '（空）')
+    assert(pv.taskbar === true, '任务栏有该预览窗口的按钮')
+
+    // 双击标题栏 → 最大化（和其他窗口完全一致的行为）
+    const maximized = await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(wpName)},
+        )
+        const bar = win?.querySelector('.window__titlebar')
+        if (!bar) return false
+        bar.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+        return true
+      })()
+    `)
+    assert(maximized === true, '双击标题栏把预览窗口最大化')
+    await sleep(400)
+    const maxState = await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(wpName)},
+        )
+        return win?.querySelectorAll('.window__ctl')[1]?.getAttribute('title') ?? ''
+      })()
+    `)
+    assert(maxState === '还原', '最大化之后按钮变成「还原」', String(maxState))
+
+    // 关闭预览窗口：文件窗口还在
+    await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(wpName)},
+        )
+        win?.querySelector('.window__ctl--close')?.click()
+        return true
+      })()
+    `)
+    await sleep(500)
+    const closedPreview = JSON.parse(await evaluate(`JSON.stringify({
+      gone: ![...document.querySelectorAll('.window')].some(
+        (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(wpName)},
+      ),
+      windows: document.querySelectorAll('.window').length,
+    })`))
+    assert(closedPreview.gone, '预览窗口已关闭')
+    assert(
+      closedPreview.windows > windowsBefore,
+      '只关掉了预览，文件窗口还在',
+      `${closedPreview.windows} > ${windowsBefore}`,
+    )
+
     // ---- 控制台错误 ----
     console.log('\n【运行时错误检查】')
     const realConsole = cdp.consoleErrors.filter(
