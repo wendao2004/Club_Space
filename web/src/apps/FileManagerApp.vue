@@ -84,8 +84,6 @@ const showNewFolder = ref(false)
 const newFolderName = ref('')
 const renaming = ref<{ id: string; name: string } | null>(null)
 
-const previewing = ref<FileEntry | null>(null)
-
 // ---------------------------------------------------------------- 数据加载
 
 const filtered = computed(() => {
@@ -647,10 +645,29 @@ function openEntry(entry: FileEntry): void {
   if (entry.kind === 'folder') {
     enter(entry)
   } else if (canPreview(entry)) {
-    previewing.value = entry
+    openPreview(entry)
   } else {
     download(entry)
   }
+}
+
+/**
+ * 预览 = 打开一个独立的预览窗口。
+ *
+ * 和其他窗口同一套框架（拖拽 / 缩放 / 最大化 / 贴边 / 任务栏），
+ * 不再是从前那个钉在文件管理器里的浮层；每个文件开独立一个窗口，
+ * 方便两张图并排比较。
+ */
+function openPreview(entry: FileEntry): void {
+  windows.open({
+    appId: 'preview',
+    title: entry.name,
+    args: { node: entry },
+    w: 940,
+    h: 660,
+    minW: 420,
+    minH: 320,
+  })
 }
 
 // ---------------------------------------------------------------- 右键菜单
@@ -669,7 +686,7 @@ function entryContextMenu(event: MouseEvent, entry: FileEntry): void {
       items.push({ label: '打开', icon: 'folder-open', action: () => enter(entry) })
     } else {
       if (canPreview(entry)) {
-        items.push({ label: '预览', icon: 'eye', action: () => (previewing.value = entry) })
+        items.push({ label: '预览', icon: 'eye', action: () => openPreview(entry) })
       }
       items.push({ label: '下载', icon: 'download', action: () => download(entry) })
       items.push({
@@ -1130,48 +1147,6 @@ watch(
           <button class="wl-btn wl-btn--primary" :disabled="!moveChosen || moveBusy" @click="confirmMove">
             {{ moveBusy ? '移动中…' : '移动到此处' }}
           </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 预览 -->
-    <div v-if="previewing" class="fm__overlay" @click.self="previewing = null">
-      <div class="fm__preview">
-        <header class="fm__preview-head">
-          <Icon :name="fileKind(previewing).icon" :size="16" />
-          <span class="fm__preview-title">{{ previewing.name }}</span>
-          <span class="wl-badge">{{ formatBytes(previewing.size) }}</span>
-          <div class="fm__spacer" />
-          <button class="wl-btn wl-btn--ghost" @click="download(previewing)">
-            <Icon name="download" :size="14" />
-            下载
-          </button>
-          <button class="wl-icon-btn" title="关闭" @click="previewing = null">
-            <Icon name="close" :size="16" />
-          </button>
-        </header>
-        <div class="fm__preview-body">
-          <img
-            v-if="previewing.mime?.startsWith('image/')"
-            :src="api.previewUrl(previewing.id)"
-            :alt="previewing.name"
-          />
-          <video
-            v-else-if="previewing.mime?.startsWith('video/')"
-            :src="api.previewUrl(previewing.id)"
-            controls
-          />
-          <audio
-            v-else-if="previewing.mime?.startsWith('audio/')"
-            :src="api.previewUrl(previewing.id)"
-            controls
-          />
-          <iframe
-            v-else
-            :src="api.previewUrl(previewing.id)"
-            class="fm__preview-frame"
-            title="文件预览"
-          />
         </div>
       </div>
     </div>
@@ -1652,62 +1627,6 @@ watch(
   display: flex;
   justify-content: flex-end;
   gap: var(--space-2);
-}
-
-/* ---------------------------------------------------------------- 预览 */
-
-.fm__preview {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  border-radius: var(--radius);
-  border: 1px solid var(--border-strong);
-  background: var(--surface-raised);
-  overflow: hidden;
-  box-shadow: var(--shadow-window);
-}
-
-.fm__preview-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
-}
-
-.fm__preview-title {
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fm__preview-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-3);
-  overflow: auto;
-}
-
-.fm__preview-body img,
-.fm__preview-body video {
-  max-width: 100%;
-  max-height: 100%;
-  border-radius: var(--radius-sm);
-}
-
-.fm__preview-frame {
-  width: 100%;
-  height: 100%;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: #fff;
 }
 
 /* ---------------------------------------------------------------- 排序表头 */

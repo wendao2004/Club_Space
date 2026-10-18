@@ -199,6 +199,19 @@ export const APPS: AppDef[] = [
     defaultSize: { w: 760, h: 560 },
     component: () => import('@/apps/AboutApp.vue'),
   },
+  {
+    // 文件预览窗口：由文件管理器按需拉起（双击文件 / 右键「预览」）。
+    // 刻意不进桌面、不进开始菜单 —— 它不是"应用"，是文件的一个视图，
+    // 所以也不该出现在桌面图标和开始菜单的自动化断言里。
+    id: 'preview',
+    name: '预览',
+    icon: 'eye',
+    description: '文件预览窗口',
+    tint: '#5b6b7d',
+    defaultSize: { w: 940, h: 660 },
+    minSize: { w: 420, h: 320 },
+    component: () => import('@/apps/PreviewApp.vue'),
+  },
 ]
 
 export function findApp(id: string): AppDef | undefined {
