@@ -48,13 +48,14 @@ export const useUi = defineStore('ui', {
 
   actions: {
     initTheme(): void {
-      let theme: Theme = 'dark'
+      // 浅色是主角：没有存过偏好时默认浅色，只有系统明确偏好深色才跟随
+      let theme: Theme = 'light'
       try {
         const stored = localStorage.getItem(THEME_KEY)
         if (stored === 'light' || stored === 'dark') {
           theme = stored
-        } else if (window.matchMedia?.('(prefers-color-scheme: light)').matches) {
-          theme = 'light'
+        } else if (window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
+          theme = 'dark'
         }
         const wp = localStorage.getItem(WALLPAPER_KEY)
         if (wp !== null) this.wallpaper = Number(wp) || 0

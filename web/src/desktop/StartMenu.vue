@@ -112,10 +112,11 @@ async function signOut(): Promise<void> {
         <template v-else>
           <!-- 无搜索词时按"已固定"网格；有搜索词时是结果列表 -->
           <template v-if="!query.trim()">
+            <div class="start__section-title">已固定</div>
             <div class="start__grid">
               <button v-for="app in filtered" :key="app.id" class="start__tile" @click="launch(app)">
-                <span class="start__tile-icon" :style="app.tint ? { background: app.tint } : undefined">
-                  <Icon :name="app.icon" :size="22" />
+                <span class="start__tile-icon" :style="app.tint ? { '--tint': app.tint } : undefined">
+                  <Icon :name="app.icon" :size="24" />
                 </span>
                 <span class="start__tile-name">{{ app.name }}</span>
               </button>
@@ -126,8 +127,8 @@ async function signOut(): Promise<void> {
             <div v-for="[group, apps] in grouped" :key="group" class="start__group">
               <div class="start__group-title">{{ group }}</div>
               <button v-for="app in apps" :key="app.id" class="start__result" @click="launch(app)">
-                <span class="start__result-icon" :style="app.tint ? { background: app.tint } : undefined">
-                  <Icon :name="app.icon" :size="16" />
+                <span class="start__result-icon" :style="app.tint ? { '--tint': app.tint } : undefined">
+                  <Icon :name="app.icon" :size="18" />
                 </span>
                 <span class="start__result-text">
                   <span class="start__result-name">{{ app.name }}</span>
@@ -165,15 +166,15 @@ async function signOut(): Promise<void> {
   z-index: var(--z-startmenu);
   display: flex;
   flex-direction: column;
-  width: 480px;
+  width: 560px;
   max-width: calc(100vw - 24px);
   max-height: min(640px, calc(100vh - var(--taskbar-h) - 24px));
   transform: translateX(-50%);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
   background: var(--surface-raised);
-  backdrop-filter: blur(50px) saturate(180%);
-  box-shadow: var(--shadow-popup);
+  backdrop-filter: blur(50px) saturate(1.8);
+  box-shadow: var(--shadow-window);
   overflow: hidden;
 }
 
@@ -184,19 +185,19 @@ async function signOut(): Promise<void> {
   align-items: center;
   gap: var(--space-2);
   flex: none;
-  margin: var(--space-3);
+  margin: var(--space-4);
   padding: 0 var(--space-3);
   height: 34px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  border-bottom-color: var(--border-strong);
-  background: var(--surface-solid);
+  background: var(--surface-1);
   color: var(--text-tertiary);
 }
 
+/* 与全局输入框一致：焦点是底边一根 accent 线 */
 .start__search:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  border-color: var(--border-strong);
+  box-shadow: inset 0 -2px 0 0 var(--accent);
 }
 
 .start__search-input {
@@ -219,23 +220,30 @@ async function signOut(): Promise<void> {
 .start__body {
   flex: 1;
   min-height: 0;
-  padding: 0 var(--space-3) var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
   overflow-y: auto;
+}
+
+.start__section-title {
+  padding: 0 var(--space-1) var(--space-2);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  color: var(--text-tertiary);
 }
 
 .start__grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--space-1);
+  grid-template-columns: repeat(5, 1fr);
+  gap: 2px;
 }
 
 .start__tile {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-1);
-  border-radius: var(--radius);
+  gap: 6px;
+  padding: var(--space-2) var(--space-1) 10px;
+  border-radius: 6px;
   transition: background var(--dur-fast) var(--ease-out);
 }
 
@@ -243,19 +251,22 @@ async function signOut(): Promise<void> {
   background: var(--hover);
 }
 
+/* 瓦片不再坐色块：主色线性字形直接落在面板上（Windows 11 的做法） */
 .start__tile-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  background: var(--surface-3);
-  color: #fff;
+  width: 30px;
+  height: 30px;
+  color: var(--tint, var(--text-secondary));
+}
+
+[data-theme='dark'] .start__tile-icon {
+  color: color-mix(in srgb, var(--tint, #b7c0cd) 62%, #ffffff);
 }
 
 .start__tile-name {
-  font-size: 12px;
+  font-size: var(--fs-caption);
   color: var(--text-secondary);
   text-align: center;
   line-height: 1.2;
@@ -278,7 +289,7 @@ async function signOut(): Promise<void> {
   gap: var(--space-3);
   width: 100%;
   padding: var(--space-2);
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   text-align: left;
   transition: background var(--dur-fast) var(--ease-out);
 }
@@ -294,9 +305,11 @@ async function signOut(): Promise<void> {
   width: 30px;
   height: 30px;
   flex: none;
-  border-radius: 8px;
-  background: var(--surface-3);
-  color: #fff;
+  color: var(--tint, var(--text-secondary));
+}
+
+[data-theme='dark'] .start__result-icon {
+  color: color-mix(in srgb, var(--tint, #b7c0cd) 62%, #ffffff);
 }
 
 .start__result-text {
@@ -325,27 +338,26 @@ async function signOut(): Promise<void> {
   align-items: center;
   justify-content: space-between;
   flex: none;
-  padding: var(--space-2) var(--space-3);
-  border-top: 1px solid var(--border);
-  background: var(--surface-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line-hair);
 }
 
 .start__user {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
 }
 
 .start__avatar {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   background: var(--accent);
-  color: #fff;
-  font-size: 13px;
+  color: var(--accent-text);
+  font-size: 12px;
   font-weight: 600;
 }
 

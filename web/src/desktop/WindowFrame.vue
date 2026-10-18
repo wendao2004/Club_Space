@@ -286,10 +286,13 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow: hidden;
   border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: var(--surface-1);
-  backdrop-filter: blur(30px) saturate(160%);
-  box-shadow: var(--shadow-window);
+  border: 1px solid var(--window-ring);
+  background: var(--glass-window);
+  backdrop-filter: blur(40px) saturate(1.6);
+  /* 双层：一圈极淡的外轮廓（定义边界）+ 大而软的投影（纵深） */
+  box-shadow:
+    0 0 0 1px var(--window-outline),
+    var(--shadow-window);
   /* transform 走合成层；用 will-change 提示浏览器提前提升 */
   will-change: transform;
   transition:
@@ -299,12 +302,20 @@ onBeforeUnmount(() => {
 }
 
 .window--active {
-  border-color: var(--border-strong);
+  border-color: var(--window-ring-active);
 }
 
 .window:not(.window--active) {
   /* 非活动窗口压暗一点，层级关系一眼可辨 */
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  box-shadow:
+    0 0 0 1px var(--window-outline),
+    0 10px 30px rgba(16, 40, 72, 0.14);
+}
+
+[data-theme='dark'] .window:not(.window--active) {
+  box-shadow:
+    0 0 0 1px var(--window-outline),
+    0 10px 30px rgba(0, 0, 0, 0.45);
 }
 
 /* 拖动/缩放中关掉过渡，否则会跟手迟滞 */
@@ -325,18 +336,18 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  height: 36px;
+  height: 40px;
   padding-left: var(--space-3);
   flex: none;
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  border-bottom: 1px solid var(--line-hair);
   cursor: default;
   touch-action: none; /* 让 pointermove 不被浏览器的滚动手势吃掉 */
 }
 
 .window__icon {
   display: flex;
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
   flex: none;
 }
 
@@ -344,6 +355,7 @@ onBeforeUnmount(() => {
   flex: 1;
   min-width: 0;
   font-size: 12.5px;
+  font-weight: 600;
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -352,6 +364,10 @@ onBeforeUnmount(() => {
 
 .window--active .window__title {
   color: var(--text);
+}
+
+.window--active .window__icon {
+  color: var(--accent);
 }
 
 .window__controls {
@@ -367,7 +383,9 @@ onBeforeUnmount(() => {
   width: 46px;
   height: 100%;
   color: var(--text-secondary);
-  transition: background var(--dur-fast) var(--ease-out);
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .window__ctl:hover {
@@ -387,6 +405,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 内容画布：比窗口玻璃底再亮/再暗一档，卡片才能在它上面读出来 */
+  background: var(--surface-0);
 }
 
 /* ---------------------------------------------------------------- 缩放手柄 */

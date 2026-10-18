@@ -128,8 +128,8 @@ const today = computed(() => {
         :title="group.name"
         @click="onGroupClick(group)"
       >
-        <span class="taskbar__app-icon" :style="group.tint ? { background: group.tint } : undefined">
-          <Icon :name="group.icon" :size="16" />
+        <span class="taskbar__app-icon" :style="group.tint ? { '--tint': group.tint } : undefined">
+          <Icon :name="group.icon" :size="20" />
         </span>
         <!-- 聊天未读角标：直接读服务端算的 totalUnread，不在前端自己估算 -->
         <span
@@ -174,9 +174,9 @@ const today = computed(() => {
   align-items: center;
   height: var(--taskbar-h);
   padding: 0 var(--space-2);
-  background: var(--surface-1);
-  backdrop-filter: blur(40px) saturate(180%);
-  border-top: 1px solid var(--border);
+  background: var(--surface-raised);
+  backdrop-filter: blur(30px) saturate(1.8);
+  border-top: 1px solid var(--line-hair);
 }
 
 .taskbar__left,
@@ -208,7 +208,7 @@ const today = computed(() => {
   justify-content: center;
   width: 40px;
   height: 40px;
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   color: var(--accent);
   transition: background var(--dur-fast) var(--ease-out);
 }
@@ -218,17 +218,21 @@ const today = computed(() => {
   background: var(--hover);
 }
 
+.taskbar__start:active {
+  background: var(--pressed);
+}
+
 .taskbar__logo {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2px;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
 }
 
 .taskbar__logo-pane {
   background: currentColor;
-  border-radius: 1px;
+  border-radius: 1.5px;
 }
 
 /* ---------------------------------------------------------------- 应用按钮 */
@@ -238,9 +242,9 @@ const today = computed(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
+  width: 40px;
   height: 40px;
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   transition: background var(--dur-fast) var(--ease-out);
 }
 
@@ -249,47 +253,50 @@ const today = computed(() => {
 }
 
 .taskbar__app--active {
-  background: var(--surface-3);
+  background: var(--hover);
 }
 
+/* 图标不再坐色块：主色线性字形直接落在任务栏上 */
 .taskbar__app-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  background: var(--surface-3);
-  color: #fff;
+  width: 24px;
+  height: 24px;
+  color: var(--tint, var(--text-secondary));
+}
+
+[data-theme='dark'] .taskbar__app-icon {
+  color: color-mix(in srgb, var(--tint, #b7c0cd) 62%, #ffffff);
 }
 
 .taskbar__count {
   position: absolute;
-  top: 3px;
-  right: 3px;
+  top: 1px;
+  right: 1px;
   min-width: 14px;
   height: 14px;
   padding: 0 3px;
   border-radius: 7px;
-  background: var(--accent);
-  color: #fff;
+  background: var(--surface-3);
+  color: var(--text-secondary);
   font-size: 9px;
   line-height: 14px;
   text-align: center;
   font-weight: 600;
 }
 
-/* 未读角标比窗口数角标更醒目：用 danger 色并带一点描边，让它在深色底上也跳出来 */
+/* 未读角标：danger 底；暗色下 danger 是浅粉，改深字保证对比度 */
 .taskbar__badge {
   position: absolute;
-  top: 2px;
-  right: 2px;
+  top: 1px;
+  right: 1px;
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
   border-radius: 8px;
   background: var(--danger);
-  color: #fff;
+  color: #ffffff;
   font-size: 10px;
   line-height: 16px;
   text-align: center;
@@ -297,21 +304,29 @@ const today = computed(() => {
   box-shadow: 0 0 0 2px var(--surface-1);
 }
 
-/* 运行指示条：Windows 11 在图标下方一条短横线 */
+[data-theme='dark'] .taskbar__badge {
+  color: #3a1116;
+}
+
+/* 运行指示条：未激活=短点、激活=短胶囊（Windows 11 的双态） */
 .taskbar__indicator {
   position: absolute;
   bottom: 2px;
   left: 50%;
-  width: 0;
+  width: 6px;
   height: 3px;
-  border-radius: 2px;
+  border-radius: 999px;
   background: var(--accent);
+  opacity: 0.5;
   transform: translateX(-50%);
-  transition: width var(--dur) var(--ease-out);
+  transition:
+    width var(--dur) var(--ease-out),
+    opacity var(--dur) var(--ease-out);
 }
 
 .taskbar__indicator--on {
   width: 16px;
+  opacity: 1;
 }
 
 /* ---------------------------------------------------------------- 托盘 */
@@ -322,9 +337,11 @@ const today = computed(() => {
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   color: var(--text-secondary);
-  transition: background var(--dur-fast) var(--ease-out);
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .taskbar__tray:hover {
@@ -338,10 +355,10 @@ const today = computed(() => {
   align-items: flex-end;
   justify-content: center;
   padding: 0 var(--space-2);
-  height: 36px;
-  border-radius: var(--radius-sm);
-  font-size: 11.5px;
-  line-height: 1.25;
+  height: 40px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.3;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
   cursor: default;
@@ -362,8 +379,11 @@ const today = computed(() => {
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 50%;
-  overflow: hidden;
+  border-radius: 6px;
+}
+
+.taskbar__user:hover {
+  background: var(--hover);
 }
 
 .taskbar__avatar {
@@ -374,7 +394,7 @@ const today = computed(() => {
   height: 26px;
   border-radius: 50%;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-text);
   font-size: 12px;
   font-weight: 600;
 }

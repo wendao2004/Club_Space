@@ -94,12 +94,12 @@ onBeforeUnmount(() => {
 .ctx {
   position: fixed;
   z-index: var(--z-contextmenu);
-  min-width: 180px;
+  min-width: 184px;
   padding: var(--space-1);
   border-radius: var(--radius);
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   background: var(--surface-raised);
-  backdrop-filter: blur(40px) saturate(180%);
+  backdrop-filter: blur(40px) saturate(1.8);
   box-shadow: var(--shadow-popup);
   animation: ctx-in var(--dur-fast) var(--ease-out);
 }
@@ -116,10 +116,10 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  height: 30px;
+  height: 32px;
   padding: 0 var(--space-2);
   border-radius: var(--radius-sm);
-  font-size: 13px;
+  font-size: var(--fs-body);
   color: var(--text);
   text-align: left;
   transition: background var(--dur-fast) var(--ease-out);
@@ -149,8 +149,12 @@ onBeforeUnmount(() => {
   justify-content: center;
   width: 16px;
   flex: none;
+  color: var(--text-secondary);
+  opacity: 0.9;
+}
+
+.ctx__item--danger .ctx__icon {
   color: currentColor;
-  opacity: 0.85;
 }
 
 .ctx__label {
@@ -161,6 +165,6 @@ onBeforeUnmount(() => {
 .ctx__sep {
   height: 1px;
   margin: var(--space-1) var(--space-2);
-  background: var(--border);
+  background: var(--line-hair);
 }
 </style>

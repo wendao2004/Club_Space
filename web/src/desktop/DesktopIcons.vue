@@ -4,6 +4,11 @@
   Windows 的桌面图标是"网格吸附 + 自由摆放 + 双击打开 + 右键菜单"。
   这里实现到：网格排列、单击选中、双击打开、右键菜单（打开/新窗口）、
   以及键盘方向键导航（无障碍基本盘，也顺手支持了）。
+
+  视觉（评审团定稿）：不再是"高饱和色块 + 白字形"，而是
+  "主色 14% 淡底 + 主色线性字形"——底色是 tints，字形才是主角。
+  标签颜色跟随主题（浅色主题深字、深色主题白字），都带反向文字阴影，
+  保证在任何壁纸上可读。
 -->
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
@@ -136,12 +141,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       :key="app.id"
       class="icon"
       :class="{ 'icon--selected': selected === app.id }"
+      :style="app.tint ? { '--tint': app.tint } : undefined"
       @click.stop="selected = app.id"
       @dblclick="launch(app)"
       @contextmenu="onIconContextMenu($event, app)"
     >
-      <span class="icon__glyph" :style="app.tint ? { background: app.tint } : undefined">
-        <Icon :name="app.icon" :size="26" :stroke="1.4" />
+      <span class="icon__glyph">
+        <Icon :name="app.icon" :size="24" :stroke="1.5" />
       </span>
       <span class="icon__label">{{ app.name }}</span>
     </button>
@@ -155,12 +161,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   position: absolute;
   inset: 0;
   z-index: var(--z-desktop);
-  padding: var(--space-4);
+  padding: var(--space-3);
   display: flex;
   flex-direction: column;
   flex-wrap: wrap;
   align-content: flex-start;
-  gap: var(--space-1);
+  gap: 2px;
   height: calc(100% - var(--taskbar-h));
 }
 
@@ -168,53 +174,62 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-1);
+  gap: 6px;
   width: 84px;
   padding: var(--space-2) var(--space-1);
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   border: 1px solid transparent;
   transition:
     background var(--dur-fast) var(--ease-out),
     border-color var(--dur-fast) var(--ease-out);
 }
 
+/* 悬浮与选中都用"标签色的低透明度"——在明暗壁纸上都自然 */
 .icon:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.16);
-  backdrop-filter: blur(6px);
+  background: rgba(127, 140, 156, 0.16);
+  border-color: rgba(127, 140, 156, 0.2);
 }
 
 .icon--selected {
-  background: var(--selected);
-  border-color: var(--accent);
+  background: rgba(127, 140, 156, 0.24);
+  border-color: rgba(127, 140, 156, 0.34);
 }
 
 .icon__glyph {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 46px;
-  height: 46px;
+  width: 44px;
+  height: 44px;
   border-radius: 10px;
-  background: var(--surface-3);
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+  background: rgba(127, 140, 156, 0.14);
+  background: color-mix(in srgb, var(--tint, #6b7686) 15%, transparent);
+  color: var(--tint, #6b7686);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.4),
+    0 1px 3px rgba(16, 40, 72, 0.12);
 }
 
-/* 图标文字在壁纸上，必须自己带可读性保障：文字阴影比背景块更不打扰视觉 */
+[data-theme='dark'] .icon__glyph {
+  color: color-mix(in srgb, var(--tint, #9aa5b1) 62%, #ffffff);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+    0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* 图标文字在壁纸上，必须自己带可读性保障：文字颜色跟主题 + 反向阴影 */
 .icon__label {
   font-size: 12px;
   line-height: 1.25;
   text-align: center;
-  color: #fff;
-  text-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.85),
-    0 0 2px rgba(0, 0, 0, 0.7);
+  color: var(--desktop-label);
+  text-shadow: var(--desktop-label-shadow);
   word-break: break-all;
 }
 
 .desktop-icons__hint {
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--desktop-label);
+  opacity: 0.7;
   font-size: 13px;
 }
 </style>

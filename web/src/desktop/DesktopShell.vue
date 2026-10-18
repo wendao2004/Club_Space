@@ -145,35 +145,100 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-/* ---------------------------------------------------------------- 壁纸 */
+/* ---------------------------------------------------------------- 壁纸
+ *
+ * 全部用 CSS 绘制（层叠径向渐变模拟 Windows 11 的 Bloom 光斑），不引入图片：
+ * 内网部署不需要任何外部资源，也不会因为缺文件而"开天窗"。
+ * 四套壁纸在明暗两个主题下各有一版，浅色全部保持浅底，保证桌面标签可读。
+ */
 
 .desktop__wallpaper {
   position: absolute;
   inset: 0;
   z-index: 0;
-  background: linear-gradient(140deg, var(--wallpaper-1), var(--wallpaper-2) 45%, var(--wallpaper-3));
+  background: linear-gradient(158deg, #eaf3fc 0%, #d9e9f8 48%, #eef5fb 100%);
 }
 
-/* 换个层次感：叠一层极淡的径向高光，避免纯线性渐变显得平 */
+/* 一层柔和光晕 + 一层极淡暗角，让平铺渐变有纵深 */
 .desktop__wallpaper::after {
   content: '';
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(1200px 600px at 20% 10%, rgba(255, 255, 255, 0.1), transparent 60%),
-    radial-gradient(900px 500px at 90% 90%, rgba(0, 0, 0, 0.28), transparent 60%);
+    radial-gradient(1400px 900px at 50% -12%, rgba(255, 255, 255, 0.35), transparent 60%),
+    radial-gradient(1200px 800px at 50% 118%, rgba(16, 40, 72, 0.06), transparent 62%);
 }
 
+/* ---- 壁纸 0（默认）：晨雾蓝 ---- */
+.desktop__wallpaper--0 {
+  background:
+    radial-gradient(1100px 620px at 78% 14%, rgba(116, 178, 235, 0.5), transparent 62%),
+    radial-gradient(880px 520px at 12% 88%, rgba(150, 196, 240, 0.45), transparent 66%),
+    radial-gradient(700px 420px at 55% 62%, rgba(255, 255, 255, 0.65), transparent 70%),
+    linear-gradient(158deg, #eaf3fc 0%, #d9e9f8 48%, #eef5fb 100%);
+}
+
+/* ---- 壁纸 1：青澜 ---- */
 .desktop__wallpaper--1 {
-  background: linear-gradient(160deg, #2b1055 0%, #7597de 70%, #1b2a4a 100%);
+  background:
+    radial-gradient(1000px 600px at 22% 18%, rgba(96, 190, 196, 0.42), transparent 60%),
+    radial-gradient(900px 560px at 82% 78%, rgba(120, 170, 230, 0.4), transparent 64%),
+    radial-gradient(760px 460px at 50% 50%, rgba(255, 255, 255, 0.6), transparent 70%),
+    linear-gradient(160deg, #e9f6f6 0%, #d8ecf2 50%, #eef7f9 100%);
 }
 
+/* ---- 壁纸 2：暮山（克制的紫灰，给喜欢一点色彩的人） ---- */
 .desktop__wallpaper--2 {
-  background: linear-gradient(150deg, #0f2027 0%, #2c5364 55%, #203a43 100%);
+  background:
+    radial-gradient(1000px 600px at 80% 22%, rgba(186, 160, 226, 0.38), transparent 62%),
+    radial-gradient(860px 520px at 18% 82%, rgba(236, 178, 190, 0.35), transparent 66%),
+    radial-gradient(720px 440px at 48% 55%, rgba(255, 255, 255, 0.62), transparent 70%),
+    linear-gradient(158deg, #f3f0f9 0%, #e7e3f3 50%, #f7f4fa 100%);
 }
 
+/* ---- 壁纸 3：深湖（蓝调更重，但仍保持浅色系） ---- */
 .desktop__wallpaper--3 {
-  background: linear-gradient(140deg, #3a1c37 0%, #8b5a6b 50%, #2b1b2e 100%);
+  background:
+    radial-gradient(1000px 620px at 70% 18%, rgba(84, 150, 214, 0.5), transparent 62%),
+    radial-gradient(900px 560px at 20% 85%, rgba(60, 120, 190, 0.35), transparent 66%),
+    linear-gradient(160deg, #dfeaf6 0%, #c9dcf0 55%, #e3eef8 100%);
+}
+
+/* ---- 暗色版：四套壁纸的"夜航"变体 ---- */
+
+[data-theme='dark'] .desktop__wallpaper,
+[data-theme='dark'] .desktop__wallpaper--0 {
+  background:
+    radial-gradient(1100px 620px at 78% 12%, rgba(52, 104, 168, 0.55), transparent 62%),
+    radial-gradient(880px 520px at 14% 86%, rgba(30, 64, 110, 0.5), transparent 66%),
+    linear-gradient(158deg, #0d1420 0%, #101c2e 50%, #0c1119 100%);
+}
+
+[data-theme='dark'] .desktop__wallpaper--1 {
+  background:
+    radial-gradient(1000px 600px at 24% 16%, rgba(38, 120, 124, 0.45), transparent 60%),
+    radial-gradient(900px 560px at 80% 80%, rgba(44, 86, 150, 0.45), transparent 64%),
+    linear-gradient(160deg, #0b1518 0%, #0f1e26 52%, #0b1216 100%);
+}
+
+[data-theme='dark'] .desktop__wallpaper--2 {
+  background:
+    radial-gradient(1000px 600px at 78% 20%, rgba(96, 74, 150, 0.5), transparent 62%),
+    radial-gradient(860px 520px at 16% 82%, rgba(120, 70, 110, 0.4), transparent 66%),
+    linear-gradient(158deg, #120f1c 0%, #1a1426 52%, #100d18 100%);
+}
+
+[data-theme='dark'] .desktop__wallpaper--3 {
+  background:
+    radial-gradient(1000px 620px at 70% 16%, rgba(70, 96, 130, 0.4), transparent 62%),
+    radial-gradient(900px 560px at 22% 84%, rgba(40, 60, 90, 0.4), transparent 66%),
+    linear-gradient(160deg, #10141a 0%, #171d26 55%, #0e1218 100%);
+}
+
+[data-theme='dark'] .desktop__wallpaper::after {
+  background:
+    radial-gradient(1400px 900px at 50% -12%, rgba(255, 255, 255, 0.06), transparent 60%),
+    radial-gradient(1200px 800px at 50% 118%, rgba(0, 0, 0, 0.35), transparent 62%);
 }
 
 /* ---------------------------------------------------------------- 窗口层 */
