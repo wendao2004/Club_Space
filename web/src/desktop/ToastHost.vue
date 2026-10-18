@@ -14,7 +14,7 @@
 <script setup lang="ts">
 import { watch } from 'vue'
 import Icon from '@/components/Icon.vue'
-import { useUi } from '@/stores/ui'
+import { useUi, type Toast } from '@/stores/ui'
 
 const ui = useUi()
 
@@ -23,6 +23,17 @@ const icons: Record<string, string> = {
   success: 'check',
   warning: 'alert',
   error: 'alert',
+}
+
+/**
+ * 可点击的通知：点一下执行动作（比如"跳到那条消息"）并收起。
+ * 带 onClick 的通知在视觉上也是可点的（手型光标 + 悬浮边框）。
+ */
+function onToastClick(toast: Toast): void {
+  if (!toast.onClick) return
+  const action = toast.onClick
+  ui.dismiss(toast.id)
+  action()
 }
 
 // 有新通知且页面在后台时，尝试发一条系统级通知
@@ -49,7 +60,16 @@ watch(
   <Teleport to="body">
     <div class="toasts">
       <TransitionGroup name="toast">
-        <div v-for="toast in ui.toasts" :key="toast.id" class="toast" :class="`toast--${toast.kind}`">
+        <div
+          v-for="toast in ui.toasts"
+          :key="toast.id"
+          class="toast"
+          :class="[`toast--${toast.kind}`, { 'toast--clickable': !!toast.onClick }]"
+          :role="toast.onClick ? 'button' : undefined"
+          :tabindex="toast.onClick ? 0 : undefined"
+          @click="onToastClick(toast)"
+          @keydown.enter="onToastClick(toast)"
+        >
           <span class="toast__icon">
             <Icon :name="icons[toast.kind] ?? 'info'" :size="16" />
           </span>
@@ -57,7 +77,7 @@ watch(
             <div class="toast__title">{{ toast.title }}</div>
             <div v-if="toast.detail" class="toast__detail">{{ toast.detail }}</div>
           </div>
-          <button class="toast__close" title="关闭" @click="ui.dismiss(toast.id)">
+          <button class="toast__close" title="关闭" @click.stop="ui.dismiss(toast.id)">
             <Icon name="close" :size="13" />
           </button>
         </div>
@@ -91,6 +111,19 @@ watch(
   backdrop-filter: blur(40px) saturate(1.8);
   box-shadow: var(--shadow-popup);
   pointer-events: auto;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+/* 可点击的通知：手型光标 + 悬浮反馈，让它"看起来能点" */
+.toast--clickable {
+  cursor: pointer;
+}
+
+.toast--clickable:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
 }
 
 .toast__icon {

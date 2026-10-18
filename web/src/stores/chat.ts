@@ -20,6 +20,7 @@ import {
 import { useAuth } from '@/stores/auth'
 import { useRealtime } from '@/stores/realtime'
 import { useUi } from '@/stores/ui'
+import { useWindows } from '@/stores/windows'
 
 /** 每次拉取消息的条数。 */
 const PAGE_SIZE = 50
@@ -495,6 +496,63 @@ function applyMessageUpdate(store: ChatStore, msg: ChatMessage): void {
 
 // ---------------------------------------------------------------- SSE 事件处理
 
+/** 新消息提示的节流：同一会话 6 秒内只提示一次，避免一连串消息把屏幕刷满。 */
+let lastIncomingToastAt = 0
+let lastIncomingToastConv: string | null = null
+
+/** 聊天窗口是否开着（未最小化）。 */
+function chatWindowOpen(): boolean {
+  const windows = useWindows()
+  const win = windows.windows.find((w) => w.appId === 'chat')
+  return !!win && !win.minimized
+}
+
+/** 聊天窗口开着、处于焦点、而且显示的就是这个会话 —— 即"用户正在看着它"。 */
+function isActivelyViewing(conversationId: string): boolean {
+  const windows = useWindows()
+  const win = windows.windows.find((w) => w.appId === 'chat')
+  if (!win || win.minimized) return false
+  if (windows.activeId !== win.id) return false
+  return useChat().activeId === conversationId
+}
+
+/**
+ * 桌面反馈：别人发来的新消息 → 右下角提示（点一下直接跳到那条会话）。
+ *
+ * 三条规则：
+ *  1. 自己发的（多端同步进来的）不提示；
+ *  2. 正开着聊天窗口盯着这个会话时不提示 —— 那是打扰；
+ *  3. 同一会话 6 秒内只提示一次 —— 一串消息不刷屏。
+ *
+ * 未读红点不在这里管：它由服务端的 totalUnread 驱动（任务栏角标、
+ * 桌面图标、开始菜单共用同一份数），这里只负责"弹一下"。
+ */
+function notifyIncoming(msg: ChatMessage): void {
+  if (msg.senderId === selfUserId) return
+  if (isActivelyViewing(msg.conversationId)) return
+  const now = Date.now()
+  if (lastIncomingToastConv === msg.conversationId && now - lastIncomingToastAt < 6000) return
+  lastIncomingToastConv = msg.conversationId
+  lastIncomingToastAt = now
+  const ui = useUi()
+  ui.notify('info', msg.senderName ?? '新消息', previewOf(msg), 6000, {
+    onClick: () => openChatConversation(msg.conversationId),
+  })
+}
+
+/** 打开（或唤醒）聊天窗口并切到指定会话 —— 提示被点击时走这里。 */
+function openChatConversation(conversationId: string): void {
+  const windows = useWindows()
+  const win = windows.windows.find((w) => w.appId === 'chat')
+  if (win) {
+    win.minimized = false
+    windows.focus(win.id)
+  } else {
+    windows.open({ appId: 'chat', title: '聊天', w: 1000, h: 640, minW: 560, minH: 380 })
+  }
+  void useChat().openConversation(conversationId)
+}
+
 function handleIncoming(store: ChatStore, event: Event): void {
   const msg = parseEvent<ChatMessage>(event)
   if (!msg || !msg.conversationId || typeof msg.seq !== 'number') return
@@ -502,9 +560,22 @@ function handleIncoming(store: ChatStore, event: Event): void {
   const isNew = insertMessage(store, msg)
   if (isNew) bumpConversation(store, msg)
 
-  // 正在看这个会话，就立刻把已读位置推进，否则界面会一直挂着未读。
-  if (msg.conversationId === store.activeId && msg.senderId !== selfUserId) {
+  // "正在看这个会话" = 消息属于当前会话 **且聊天窗口真的开着**。
+  //
+  // ⚠️ 为什么必须带上窗口状态：关掉聊天窗口后 activeId 还挂着旧值。
+  // 只看 activeId 的话，窗口关着时进来的消息会被静默标成已读 ——
+  // 既没有红点也没有提示，用户完全不知道有人找他（这是用户实际报过的问题）。
+  if (chatWindowOpen() && msg.conversationId === store.activeId && msg.senderId !== selfUserId) {
     void store.markRead(msg.conversationId, msg.seq)
+    return
+  }
+
+  // 新消息 → 右下角给一个可点击的提示；红点在本条上先乐观 +1，
+  // 随后服务端的 unread 推送（同一连接、保序）会用精确值覆盖它。
+  // 这样即使推送偶发丢失，最坏只是数字短暂偏差，而不是"完全没有反馈"。
+  if (isNew) {
+    notifyIncoming(msg)
+    if (msg.senderId !== selfUserId) store.totalUnread += 1
   }
 }
 
@@ -562,12 +633,16 @@ function handlePresence(store: ChatStore, event: Event): void {
 }
 
 function handleUnread(store: ChatStore, event: Event): void {
-  const data = parseEvent<{ totalUnread?: number } | number>(event)
+  // ⚠️ 字段名必须和服务端 realtime.ts 的 `{ type: 'unread'; data: { total } }` 对齐。
+  // 曾经这里读的是 data.totalUnread —— 名字对不上，于是"实时未读数"从来没生效过：
+  // 红点要等下一次拉会话列表才更新（这正是用户报"收到消息没有任何反馈"的直接原因）。
+  const data = parseEvent<{ total?: number; totalUnread?: number } | number>(event)
   if (typeof data === 'number') {
     store.totalUnread = data
-  } else if (data && typeof data.totalUnread === 'number') {
-    store.totalUnread = data.totalUnread
+    return
   }
+  const total = typeof data?.total === 'number' ? data.total : data?.totalUnread
+  if (typeof total === 'number') store.totalUnread = total
 }
 
 /** 清掉超过 10 秒的输入状态。 */

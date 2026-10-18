@@ -9,6 +9,9 @@
   底座是"纸"，字形才是"墨"——比高饱和色块安静，比纯色字形更挺。
   标签颜色跟随主题（浅色主题深字、深色主题白字），都带反向文字阴影，
   保证在任何壁纸（含图片壁纸）上可读。
+
+  未读红点：聊天有未读时在底座右上角标数字（与任务栏角标、右下角提示
+  组成三层反馈；数字来自服务端 totalUnread，不在前端估算）。
 -->
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
@@ -16,12 +19,14 @@ import Icon from '@/components/Icon.vue'
 import { APPS, type AppDef } from '@/apps/registry'
 import { shouldYieldKeyboard } from '@/desktop/keyboard'
 import { useAuth } from '@/stores/auth'
+import { useChat } from '@/stores/chat'
 import { useUi } from '@/stores/ui'
 import { useWindows } from '@/stores/windows'
 
 const windows = useWindows()
 const auth = useAuth()
 const ui = useUi()
+const chat = useChat()
 
 const selected = ref<string | null>(null)
 
@@ -148,6 +153,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     >
       <span class="icon__glyph">
         <Icon :name="app.icon" :size="26" :stroke="1.6" />
+        <!-- 未读红点：聊天收到消息时最直观的一层反馈（任务栏角标 + 右下角提示另有两层） -->
+        <span
+          v-if="app.id === 'chat' && chat.totalUnread > 0"
+          class="icon__badge"
+          :title="`${chat.totalUnread} 条未读消息`"
+        >
+          {{ chat.totalUnread > 99 ? '99+' : chat.totalUnread }}
+        </span>
       </span>
       <span class="icon__label">{{ app.name }}</span>
     </button>
@@ -197,6 +210,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 /* 白玻璃底座 + 主色字形 */
 .icon__glyph {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -223,6 +237,29 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     inset 0 0 0 1px rgba(255, 255, 255, 0.08),
     0 1px 2px rgba(0, 0, 0, 0.4),
     0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+/* 未读红点：坐在底座右上角，带一圈描边让它从底座上"浮"出来 */
+.icon__badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85);
+}
+
+[data-theme='dark'] .icon__badge {
+  color: #3a1116;
+  box-shadow: 0 0 0 2px rgba(22, 26, 34, 0.85);
 }
 
 /* 图标文字在壁纸上，必须自己带可读性保障：文字颜色跟主题 + 反向阴影 */

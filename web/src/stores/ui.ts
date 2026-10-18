@@ -12,6 +12,8 @@ export interface Toast {
   detail?: string
   /** 毫秒；0 表示不自动消失 */
   duration: number
+  /** 可选：点击通知时执行（例如"跳到那条消息"），执行后通知自动收起 */
+  onClick?: () => void
 }
 
 /**
@@ -139,9 +141,15 @@ export const useUi = defineStore('ui', {
       this.wallpaperPickerOpen = false
     },
 
-    notify(kind: Toast['kind'], title: string, detail?: string, duration = 4000): number {
+    notify(
+      kind: Toast['kind'],
+      title: string,
+      detail?: string,
+      duration = 4000,
+      options?: { onClick?: () => void },
+    ): number {
       const id = ++toastSeq
-      this.toasts.push({ id, kind, title, detail, duration })
+      this.toasts.push({ id, kind, title, detail, duration, onClick: options?.onClick })
       if (duration > 0) {
         window.setTimeout(() => this.dismiss(id), duration)
       }
