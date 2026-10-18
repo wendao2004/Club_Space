@@ -16,6 +16,8 @@ import Taskbar from './Taskbar.vue'
 import WindowFrame from './WindowFrame.vue'
 import ContextMenu from './ContextMenu.vue'
 import ToastHost from './ToastHost.vue'
+import WallpaperPicker from './WallpaperPicker.vue'
+import { api } from '@/api'
 import { appComponents, findApp } from '@/apps/registry'
 import { shouldYieldKeyboard } from '@/desktop/keyboard'
 import { useUi } from '@/stores/ui'
@@ -35,6 +37,18 @@ function closeStart(): void {
 }
 
 /**
+ * 图片壁纸加载失败（文件被删 / 无权限）时回退。
+ *
+ * 壁纸只是装饰，不能因为一张图挂了就让用户对着空白桌面 —— 静默清掉引用，
+ * 底下那层预设渐变壁纸还在，再给一条通知说明原因。
+ */
+function onWallpaperImageError(): void {
+  if (!ui.wallpaperImage) return
+  ui.clearWallpaperImage()
+  ui.notify('warning', '壁纸图片已不可用', '文件可能已被删除或没有权限，已恢复预设壁纸')
+}
+
+/**
  * 平台内快捷键。
  *
  * 用 Ctrl+Alt 组合而不是 Win 键 / Alt+Tab：后两者浏览器不会交给我们，
@@ -46,6 +60,11 @@ function handleHotkey(event: KeyboardEvent): void {
   if (event.key === 'Escape') {
     if (startOpen.value) {
       closeStart()
+      event.preventDefault()
+      return
+    }
+    if (ui.wallpaperPickerOpen) {
+      ui.closeWallpaperPicker()
       event.preventDefault()
       return
     }
@@ -120,7 +139,20 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="desktop">
-    <div class="desktop__wallpaper" :class="`desktop__wallpaper--${ui.wallpaper}`" />
+    <!--
+      壁纸分两层：底是预设光斑（wl-wall-N 全局类，与设置里的缩略图同源），
+      上面可选叠一张来自文件空间的图片；图片加载失败时 @error 回退到预设。
+    -->
+    <div class="desktop__wallpaper" :class="`wl-wall-${ui.wallpaper}`">
+      <img
+        v-if="ui.wallpaperImage"
+        class="desktop__wallpaper-photo"
+        :src="api.previewUrl(ui.wallpaperImage.nodeId)"
+        :alt="ui.wallpaperImage.name"
+        draggable="false"
+        @error="onWallpaperImageError"
+      />
+    </div>
 
     <DesktopIcons />
 
@@ -133,6 +165,7 @@ onBeforeUnmount(() => {
 
     <Taskbar :start-open="startOpen" @toggle-start="toggleStart" />
     <StartMenu :open="startOpen" @close="closeStart" />
+    <WallpaperPicker v-if="ui.wallpaperPickerOpen" />
     <ContextMenu />
     <ToastHost />
   </div>
@@ -147,16 +180,27 @@ onBeforeUnmount(() => {
 
 /* ---------------------------------------------------------------- 壁纸
  *
- * 全部用 CSS 绘制（层叠径向渐变模拟 Windows 11 的 Bloom 光斑），不引入图片：
- * 内网部署不需要任何外部资源，也不会因为缺文件而"开天窗"。
- * 四套壁纸在明暗两个主题下各有一版，浅色全部保持浅底，保证桌面标签可读。
+ * 底色与光斑由全局类 wl-wall-N 提供（base.css，与设置/更换壁纸弹层共用）；
+ * 这里只管定位、图片壁纸的铺法、以及一层光晕 + 暗角。
  */
 
 .desktop__wallpaper {
   position: absolute;
   inset: 0;
   z-index: 0;
-  background: linear-gradient(158deg, #eaf3fc 0%, #d9e9f8 48%, #eef5fb 100%);
+  /* 图片没加载出来之前不至于"开天窗" */
+  background: linear-gradient(160deg, #dceafb 0%, #c6ddf5 45%, #e4effa 100%);
+}
+
+/* 图片壁纸：用户在文件空间里挑的那张，铺满裁剪 */
+.desktop__wallpaper-photo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+  pointer-events: none;
 }
 
 /* 一层柔和光晕 + 一层极淡暗角，让平铺渐变有纵深 */
@@ -165,80 +209,25 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(1400px 900px at 50% -12%, rgba(255, 255, 255, 0.35), transparent 60%),
-    radial-gradient(1200px 800px at 50% 118%, rgba(16, 40, 72, 0.06), transparent 62%);
+    radial-gradient(120% 80% at 50% -10%, rgba(255, 255, 255, 0.35), transparent 60%),
+    radial-gradient(110% 70% at 50% 115%, rgba(16, 40, 72, 0.08), transparent 62%);
 }
 
-/* ---- 壁纸 0（默认）：晨雾蓝 ---- */
-.desktop__wallpaper--0 {
+/* 图片壁纸时暗角稍重一点，保证桌面标签可读 */
+.desktop__wallpaper:has(.desktop__wallpaper-photo)::after {
   background:
-    radial-gradient(1100px 620px at 78% 14%, rgba(116, 178, 235, 0.5), transparent 62%),
-    radial-gradient(880px 520px at 12% 88%, rgba(150, 196, 240, 0.45), transparent 66%),
-    radial-gradient(700px 420px at 55% 62%, rgba(255, 255, 255, 0.65), transparent 70%),
-    linear-gradient(158deg, #eaf3fc 0%, #d9e9f8 48%, #eef5fb 100%);
+    radial-gradient(120% 80% at 50% -10%, rgba(255, 255, 255, 0.12), transparent 60%),
+    radial-gradient(110% 70% at 50% 115%, rgba(16, 40, 72, 0.18), transparent 62%);
 }
 
-/* ---- 壁纸 1：青澜 ---- */
-.desktop__wallpaper--1 {
-  background:
-    radial-gradient(1000px 600px at 22% 18%, rgba(96, 190, 196, 0.42), transparent 60%),
-    radial-gradient(900px 560px at 82% 78%, rgba(120, 170, 230, 0.4), transparent 64%),
-    radial-gradient(760px 460px at 50% 50%, rgba(255, 255, 255, 0.6), transparent 70%),
-    linear-gradient(160deg, #e9f6f6 0%, #d8ecf2 50%, #eef7f9 100%);
-}
-
-/* ---- 壁纸 2：暮山（克制的紫灰，给喜欢一点色彩的人） ---- */
-.desktop__wallpaper--2 {
-  background:
-    radial-gradient(1000px 600px at 80% 22%, rgba(186, 160, 226, 0.38), transparent 62%),
-    radial-gradient(860px 520px at 18% 82%, rgba(236, 178, 190, 0.35), transparent 66%),
-    radial-gradient(720px 440px at 48% 55%, rgba(255, 255, 255, 0.62), transparent 70%),
-    linear-gradient(158deg, #f3f0f9 0%, #e7e3f3 50%, #f7f4fa 100%);
-}
-
-/* ---- 壁纸 3：深湖（蓝调更重，但仍保持浅色系） ---- */
-.desktop__wallpaper--3 {
-  background:
-    radial-gradient(1000px 620px at 70% 18%, rgba(84, 150, 214, 0.5), transparent 62%),
-    radial-gradient(900px 560px at 20% 85%, rgba(60, 120, 190, 0.35), transparent 66%),
-    linear-gradient(160deg, #dfeaf6 0%, #c9dcf0 55%, #e3eef8 100%);
-}
-
-/* ---- 暗色版：四套壁纸的"夜航"变体 ---- */
-
-[data-theme='dark'] .desktop__wallpaper,
-[data-theme='dark'] .desktop__wallpaper--0 {
-  background:
-    radial-gradient(1100px 620px at 78% 12%, rgba(52, 104, 168, 0.55), transparent 62%),
-    radial-gradient(880px 520px at 14% 86%, rgba(30, 64, 110, 0.5), transparent 66%),
-    linear-gradient(158deg, #0d1420 0%, #101c2e 50%, #0c1119 100%);
-}
-
-[data-theme='dark'] .desktop__wallpaper--1 {
-  background:
-    radial-gradient(1000px 600px at 24% 16%, rgba(38, 120, 124, 0.45), transparent 60%),
-    radial-gradient(900px 560px at 80% 80%, rgba(44, 86, 150, 0.45), transparent 64%),
-    linear-gradient(160deg, #0b1518 0%, #0f1e26 52%, #0b1216 100%);
-}
-
-[data-theme='dark'] .desktop__wallpaper--2 {
-  background:
-    radial-gradient(1000px 600px at 78% 20%, rgba(96, 74, 150, 0.5), transparent 62%),
-    radial-gradient(860px 520px at 16% 82%, rgba(120, 70, 110, 0.4), transparent 66%),
-    linear-gradient(158deg, #120f1c 0%, #1a1426 52%, #100d18 100%);
-}
-
-[data-theme='dark'] .desktop__wallpaper--3 {
-  background:
-    radial-gradient(1000px 620px at 70% 16%, rgba(70, 96, 130, 0.4), transparent 62%),
-    radial-gradient(900px 560px at 22% 84%, rgba(40, 60, 90, 0.4), transparent 66%),
-    linear-gradient(160deg, #10141a 0%, #171d26 55%, #0e1218 100%);
+[data-theme='dark'] .desktop__wallpaper {
+  background: linear-gradient(160deg, #0c1220 0%, #101c30 50%, #0b1018 100%);
 }
 
 [data-theme='dark'] .desktop__wallpaper::after {
   background:
-    radial-gradient(1400px 900px at 50% -12%, rgba(255, 255, 255, 0.06), transparent 60%),
-    radial-gradient(1200px 800px at 50% 118%, rgba(0, 0, 0, 0.35), transparent 62%);
+    radial-gradient(120% 80% at 50% -10%, rgba(255, 255, 255, 0.06), transparent 60%),
+    radial-gradient(110% 70% at 50% 115%, rgba(0, 0, 0, 0.35), transparent 62%);
 }
 
 /* ---------------------------------------------------------------- 窗口层 */

@@ -14,14 +14,28 @@ export interface Toast {
   duration: number
 }
 
+/**
+ * 图片壁纸：只存引用（nodeId）与展示名，图片本体留在文件空间里。
+ * 换设备 / 换浏览器时各自独立 —— 与"主题与壁纸仅影响本机显示"的既有设定一致。
+ */
+export interface WallpaperImage {
+  nodeId: string
+  name: string
+}
+
 const THEME_KEY = 'wl.theme'
 const WALLPAPER_KEY = 'wl.wallpaper'
+const WALLPAPER_IMAGE_KEY = 'wl.wallpaper.image'
 
 let toastSeq = 0
 
 interface State {
   theme: Theme
+  /** 预设壁纸编号（0-3）；图片壁纸激活时它作为兜底背景仍在 */
   wallpaper: number
+  wallpaperImage: WallpaperImage | null
+  /** "更换壁纸"选择器是否打开（桌面右键 / 设置应用共用同一个） */
+  wallpaperPickerOpen: boolean
   toasts: Toast[]
   /** 移动端壳：窄屏时由 App.vue 设置 */
   mobile: boolean
@@ -41,6 +55,8 @@ export const useUi = defineStore('ui', {
   state: (): State => ({
     theme: 'dark',
     wallpaper: 0,
+    wallpaperImage: null,
+    wallpaperPickerOpen: false,
     toasts: [],
     mobile: false,
     contextMenu: null,
@@ -59,6 +75,17 @@ export const useUi = defineStore('ui', {
         }
         const wp = localStorage.getItem(WALLPAPER_KEY)
         if (wp !== null) this.wallpaper = Number(wp) || 0
+        const rawImage = localStorage.getItem(WALLPAPER_IMAGE_KEY)
+        if (rawImage) {
+          try {
+            const parsed = JSON.parse(rawImage) as Partial<WallpaperImage>
+            if (typeof parsed?.nodeId === 'string' && typeof parsed?.name === 'string') {
+              this.wallpaperImage = { nodeId: parsed.nodeId, name: parsed.name }
+            }
+          } catch {
+            // 坏数据当作没设过
+          }
+        }
       } catch {
         // localStorage 不可用时用默认值
       }
@@ -79,6 +106,7 @@ export const useUi = defineStore('ui', {
       this.setTheme(this.theme === 'dark' ? 'light' : 'dark')
     },
 
+    /** 选预设壁纸：图片壁纸同时被清掉（预设与图片互斥）。 */
     setWallpaper(index: number): void {
       this.wallpaper = index
       try {
@@ -86,6 +114,29 @@ export const useUi = defineStore('ui', {
       } catch {
         // 忽略
       }
+      this.setWallpaperImage(null)
+    },
+
+    setWallpaperImage(image: WallpaperImage | null): void {
+      this.wallpaperImage = image
+      try {
+        if (image) localStorage.setItem(WALLPAPER_IMAGE_KEY, JSON.stringify(image))
+        else localStorage.removeItem(WALLPAPER_IMAGE_KEY)
+      } catch {
+        // 忽略
+      }
+    },
+
+    clearWallpaperImage(): void {
+      this.setWallpaperImage(null)
+    },
+
+    openWallpaperPicker(): void {
+      this.wallpaperPickerOpen = true
+    },
+
+    closeWallpaperPicker(): void {
+      this.wallpaperPickerOpen = false
     },
 
     notify(kind: Toast['kind'], title: string, detail?: string, duration = 4000): number {

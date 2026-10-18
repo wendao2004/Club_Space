@@ -295,21 +295,37 @@ watch(
           <div class="wl-card settings__card">
             <div class="settings__card-head">
               <div class="settings__card-title">壁纸</div>
-              <div class="wl-hint">点击缩略图即可切换桌面背景。</div>
+              <div class="wl-hint">点击缩略图切换预设，或从文件空间挑一张自己的图片。</div>
             </div>
             <div class="wp-grid">
               <button
                 v-for="n in wallpapers"
                 :key="n"
                 class="wp-opt"
-                :class="[`wp-opt--${n}`, { 'wp-opt--active': ui.wallpaper === n }]"
+                :class="[`wl-wall-${n}`, { 'wp-opt--active': !ui.wallpaperImage && ui.wallpaper === n }]"
                 :title="`壁纸 ${n + 1}`"
                 @click="chooseWallpaper(n)"
               >
-                <span v-if="ui.wallpaper === n" class="wp-opt__check">
+                <span v-if="!ui.wallpaperImage && ui.wallpaper === n" class="wp-opt__check">
                   <Icon name="check" :size="12" />
                 </span>
               </button>
+            </div>
+
+            <div class="wp-custom">
+              <button v-if="!ui.mobile" class="wl-btn" @click="ui.openWallpaperPicker()">
+                <Icon name="image" :size="15" />
+                <span>从文件空间选择图片…</span>
+              </button>
+              <span v-if="ui.wallpaperImage" class="wp-custom__current">
+                <img class="wp-custom__thumb" :src="api.previewUrl(ui.wallpaperImage.nodeId)" alt="" />
+                <span class="wp-custom__name" :title="ui.wallpaperImage.name">
+                  {{ ui.wallpaperImage.name }}
+                </span>
+                <button class="wl-icon-btn" title="清除图片壁纸（恢复预设）" @click="ui.clearWallpaperImage()">
+                  <Icon name="close" :size="14" />
+                </button>
+              </span>
             </div>
           </div>
 
@@ -846,18 +862,7 @@ watch(
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
-.wp-opt--0 {
-  background: linear-gradient(140deg, var(--wallpaper-1), var(--wallpaper-2) 45%, var(--wallpaper-3));
-}
-.wp-opt--1 {
-  background: linear-gradient(160deg, var(--wallpaper-2), var(--wallpaper-1) 55%, var(--bg-desktop));
-}
-.wp-opt--2 {
-  background: linear-gradient(150deg, var(--bg-desktop), var(--wallpaper-2) 50%, var(--wallpaper-1));
-}
-.wp-opt--3 {
-  background: radial-gradient(130% 140% at 25% 15%, var(--wallpaper-2), var(--wallpaper-1) 50%, var(--bg-desktop));
-}
+/* 底色不再写在这里：预设缩略图与桌面壁纸共用全局类 wl-wall-N（base.css） */
 
 .wp-opt__check {
   position: absolute;
@@ -871,6 +876,44 @@ watch(
   border-radius: 50%;
   background: var(--accent);
   color: var(--accent-text);
+}
+
+/* ---- 自定义图片壁纸 ---- */
+
+.wp-custom {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.wp-custom__current {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 3px 4px 3px 3px;
+  border-radius: 999px;
+  background: var(--chip-bg);
+}
+
+.wp-custom__thumb {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: none;
+}
+
+.wp-custom__name {
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
 }
 
 /* ---------------------------------------------------------------- 账号 */

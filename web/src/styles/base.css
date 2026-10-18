@@ -295,6 +295,72 @@ a:hover {
   color: var(--text-tertiary);
 }
 
+/* ---------------------------------------------------------------- 壁纸
+ *
+ * 四套 CSS 光斑壁纸（Windows 11 Bloom 气质），**全局唯一定义**：
+ * 桌面、设置应用的缩略图、更换壁纸弹层共用同一套类，缩略图与全屏观感一致。
+ * 全用百分比径向渐变，任意尺寸下都成立；零图片资源，离线可用。
+ */
+
+.wl-wall-0 {
+  background:
+    radial-gradient(120% 90% at 78% 12%, rgba(84, 158, 232, 0.55), transparent 60%),
+    radial-gradient(90% 70% at 10% 90%, rgba(122, 186, 240, 0.5), transparent 62%),
+    radial-gradient(70% 55% at 58% 62%, rgba(255, 255, 255, 0.6), transparent 65%),
+    linear-gradient(160deg, #dceafb 0%, #c6ddf5 45%, #e4effa 100%);
+}
+
+.wl-wall-1 {
+  background:
+    radial-gradient(100% 85% at 22% 16%, rgba(60, 170, 180, 0.5), transparent 60%),
+    radial-gradient(95% 75% at 82% 80%, rgba(96, 156, 224, 0.45), transparent 62%),
+    radial-gradient(65% 55% at 52% 50%, rgba(255, 255, 255, 0.55), transparent 66%),
+    linear-gradient(160deg, #d8ecf0 0%, #c3e0e8 50%, #e6f3f5 100%);
+}
+
+.wl-wall-2 {
+  background:
+    radial-gradient(105% 85% at 80% 20%, rgba(158, 124, 214, 0.42), transparent 60%),
+    radial-gradient(90% 72% at 16% 84%, rgba(226, 150, 170, 0.4), transparent 62%),
+    radial-gradient(68% 55% at 48% 54%, rgba(255, 255, 255, 0.6), transparent 66%),
+    linear-gradient(160deg, #ece7f6 0%, #ddd4ee 50%, #f4f0fa 100%);
+}
+
+.wl-wall-3 {
+  background:
+    radial-gradient(110% 90% at 72% 16%, rgba(56, 124, 200, 0.55), transparent 60%),
+    radial-gradient(95% 75% at 18% 86%, rgba(80, 160, 220, 0.4), transparent 62%),
+    linear-gradient(160deg, #d3e2f3 0%, #b9d1ec 52%, #dcebf7 100%);
+}
+
+[data-theme='dark'] .wl-wall-0 {
+  background:
+    radial-gradient(120% 90% at 78% 12%, rgba(52, 104, 168, 0.6), transparent 60%),
+    radial-gradient(90% 70% at 12% 88%, rgba(28, 60, 104, 0.55), transparent 62%),
+    linear-gradient(160deg, #0c1220 0%, #101c30 50%, #0b1018 100%);
+}
+
+[data-theme='dark'] .wl-wall-1 {
+  background:
+    radial-gradient(105% 85% at 24% 16%, rgba(34, 116, 120, 0.5), transparent 60%),
+    radial-gradient(95% 75% at 80% 82%, rgba(40, 80, 142, 0.5), transparent 62%),
+    linear-gradient(160deg, #0a1416 0%, #0e1e26 52%, #0a1114 100%);
+}
+
+[data-theme='dark'] .wl-wall-2 {
+  background:
+    radial-gradient(105% 85% at 78% 20%, rgba(92, 70, 146, 0.55), transparent 60%),
+    radial-gradient(90% 72% at 16% 84%, rgba(114, 64, 104, 0.45), transparent 62%),
+    linear-gradient(160deg, #110e1c 0%, #191326 52%, #0f0c17 100%);
+}
+
+[data-theme='dark'] .wl-wall-3 {
+  background:
+    radial-gradient(110% 90% at 70% 16%, rgba(64, 90, 124, 0.45), transparent 60%),
+    radial-gradient(95% 75% at 22% 86%, rgba(36, 54, 82, 0.45), transparent 62%),
+    linear-gradient(160deg, #0f1319 0%, #161c25 52%, #0d1116 100%);
+}
+
 /* ---------------------------------------------------------------- 其他原语 */
 
 .wl-card {

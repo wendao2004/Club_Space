@@ -5,10 +5,10 @@
   这里实现到：网格排列、单击选中、双击打开、右键菜单（打开/新窗口）、
   以及键盘方向键导航（无障碍基本盘，也顺手支持了）。
 
-  视觉（评审团定稿）：不再是"高饱和色块 + 白字形"，而是
-  "主色 14% 淡底 + 主色线性字形"——底色是 tints，字形才是主角。
+  视觉（评审团定稿 + 二轮打磨）：白玻璃底座 + 主色线性字形。
+  底座是"纸"，字形才是"墨"——比高饱和色块安静，比纯色字形更挺。
   标签颜色跟随主题（浅色主题深字、深色主题白字），都带反向文字阴影，
-  保证在任何壁纸上可读。
+  保证在任何壁纸（含图片壁纸）上可读。
 -->
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
@@ -70,9 +70,9 @@ function onDesktopContextMenu(event: MouseEvent): void {
       action: () => ui.toggleTheme(),
     },
     {
-      label: '更换壁纸',
+      label: '更换壁纸…',
       icon: 'image',
-      action: () => ui.setWallpaper((ui.wallpaper + 1) % 4),
+      action: () => ui.openWallpaperPicker(),
     },
     { separator: true, label: '' },
     {
@@ -147,7 +147,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       @contextmenu="onIconContextMenu($event, app)"
     >
       <span class="icon__glyph">
-        <Icon :name="app.icon" :size="24" :stroke="1.5" />
+        <Icon :name="app.icon" :size="26" :stroke="1.6" />
       </span>
       <span class="icon__label">{{ app.name }}</span>
     </button>
@@ -174,17 +174,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  width: 84px;
-  padding: var(--space-2) var(--space-1);
-  border-radius: 6px;
+  gap: 7px;
+  width: 88px;
+  padding: 10px var(--space-1) var(--space-2);
+  border-radius: 8px;
   border: 1px solid transparent;
   transition:
     background var(--dur-fast) var(--ease-out),
     border-color var(--dur-fast) var(--ease-out);
 }
 
-/* 悬浮与选中都用"标签色的低透明度"——在明暗壁纸上都自然 */
+/* 悬浮与选中都用"中性色的低透明度"——在明暗壁纸、图片壁纸上都自然 */
 .icon:hover {
   background: rgba(127, 140, 156, 0.16);
   border-color: rgba(127, 140, 156, 0.2);
@@ -195,31 +195,40 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
   border-color: rgba(127, 140, 156, 0.34);
 }
 
+/* 白玻璃底座 + 主色字形 */
 .icon__glyph {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-  background: rgba(127, 140, 156, 0.14);
-  background: color-mix(in srgb, var(--tint, #6b7686) 15%, transparent);
+  width: 48px;
+  height: 48px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.66);
   color: var(--tint, #6b7686);
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.4),
-    0 1px 3px rgba(16, 40, 72, 0.12);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.75),
+    0 1px 2px rgba(16, 40, 72, 0.12),
+    0 4px 14px rgba(16, 40, 72, 0.14);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.icon:hover .icon__glyph {
+  transform: translateY(-1px);
 }
 
 [data-theme='dark'] .icon__glyph {
+  background: rgba(255, 255, 255, 0.08);
   color: color-mix(in srgb, var(--tint, #9aa5b1) 62%, #ffffff);
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.07),
-    0 1px 3px rgba(0, 0, 0, 0.4);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 4px 14px rgba(0, 0, 0, 0.35);
 }
 
 /* 图标文字在壁纸上，必须自己带可读性保障：文字颜色跟主题 + 反向阴影 */
 .icon__label {
   font-size: 12px;
+  font-weight: 500;
   line-height: 1.25;
   text-align: center;
   color: var(--desktop-label);
