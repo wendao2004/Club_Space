@@ -273,6 +273,48 @@ async function main() {
   await sleep(1200)
   assert(!(await onlineNow()), '断开 SSE 后立刻显示离线（不再靠 60 秒窗口挂在那里）')
 
+  // ---------------------------------------------------------------- 未读推送的载荷契约
+  //
+  // 防的是"事件名对了、载荷字段名不对"这类静默失效：前端 handleUnread 曾经读的是
+  // data.totalUnread，而服务端推的是 data.total —— 名字对不上，于是"实时未读红点"
+  // 从来没有生效过（用户报"收到消息没有任何反馈"的直接原因）。
+  // 下面这条把字段名钉死在线上，以后谁改载荷都能当场变红。
+  console.log('\n【聊天未读推送的载荷契约】')
+  {
+    const direct = await a.api('/api/chat/conversations/direct', {
+      method: 'POST',
+      json: { peerId: idB },
+    })
+    assert(direct.status === 200, '甲和乙建立单聊')
+    const convId = direct.body.conversation.id
+
+    const sinkU = []
+    const closeU = await openStream(b, sinkU)
+    await sleep(900)
+
+    const sent = await a.api(`/api/chat/conversations/${convId}/messages`, {
+      method: 'POST',
+      json: { kind: 'text', body: '未读契约测试' },
+    })
+    assert(sent.status === 200, '甲发一条消息')
+
+    const unreadEv = await waitFor(sinkU, (e) => e.type === 'unread' && typeof e.data?.total === 'number')
+    assert(
+      unreadEv !== null,
+      '乙收到 unread 推送，且字段名是 data.total（与前端解析一致）',
+      `收到的事件：${sinkU.map((e) => e.type).join('、') || '（空）'}`,
+    )
+    if (unreadEv) {
+      assert(
+        unreadEv.data.total >= 1,
+        'unread.total ≥ 1（确实把这条新消息数进去了）',
+        `total=${unreadEv.data.total}`,
+      )
+    }
+    closeU()
+    await sleep(300)
+  }
+
   // ---------------------------------------------------------------- 事件名接线
   //
   // 这一节防的是一类**静默失效**：共享的 realtime store 是遍历 KNOWN_EVENTS

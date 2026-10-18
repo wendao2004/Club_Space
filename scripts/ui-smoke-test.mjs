@@ -727,6 +727,68 @@ async function main() {
       assert(gp.inputCleared, '回车确实被聊天框用掉了（消息发出、输入框清空）')
     }
 
+    // ---- 收消息反馈：右下角提示 + 桌面红点（点提示直接跳会话）----
+    //
+    // 用户报过：关掉聊天窗口后收到消息"什么反馈都没有"。根因是"自动已读"只看了
+    // activeId —— 窗口关了它还在，于是消息被静默标已读、红点永远不出现。
+    // 这一节把三层反馈（提示 / 桌面红点 / 点提示跳转）全部钉进回归。
+    console.log('\n【聊天收到消息的反馈】')
+
+    await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__titlebar')?.textContent.includes('聊天'),
+        )
+        win?.querySelector('.window__ctl--close')?.click()
+        return true
+      })()
+    `)
+    await sleep(600)
+    const chatClosed = await evaluate(
+      `![...document.querySelectorAll('.window')].some((w) => w.querySelector('.window__titlebar')?.textContent.includes('聊天'))`,
+    )
+    assert(chatClosed === true, '前置：聊天窗口已关闭')
+
+    const FB_TEXT = '第二条：这条应该让右下角冒提示'
+    const peerSend2 = await apiAs(peerCookie, `/api/chat/conversations/${convId}/messages`, {
+      method: 'POST',
+      json: { kind: 'text', body: FB_TEXT },
+    })
+    assert(peerSend2.status === 200, '对方又发了一条消息')
+    await sleep(2200)
+
+    const fb = JSON.parse(await evaluate(`JSON.stringify({
+      toastText: [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes(${JSON.stringify(FB_TEXT)})),
+      toastSender: [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes('聊天对象')),
+      badge: document.querySelector('.icon__badge')?.textContent?.trim() ?? '',
+    })`))
+    assert(fb.toastText, '右下角出现新消息提示（含消息内容）')
+    assert(fb.toastSender, '提示里带发送者名字')
+    assert(fb.badge !== '', '聊天桌面图标出现未读红点', `badge=${fb.badge || '（无）'}`)
+
+    // 点提示：打开聊天窗口 + 切到那条会话 + 提示收起
+    await evaluate(`
+      (() => {
+        const t = [...document.querySelectorAll('.toast')].find((x) => x.textContent.includes(${JSON.stringify(FB_TEXT)}))
+        t?.click()
+        return true
+      })()
+    `)
+    await sleep(2500)
+    const fbOpen = JSON.parse(await evaluate(`JSON.stringify({
+      windowOpen: [...document.querySelectorAll('.window')].some(
+        (w) => w.querySelector('.window__titlebar')?.textContent.includes('聊天'),
+      ),
+      seesMessage: document.body.innerText.includes(${JSON.stringify(FB_TEXT)}),
+      toastGone: ![...document.querySelectorAll('.toast')].some((x) => x.textContent.includes(${JSON.stringify(FB_TEXT)})),
+    })`))
+    assert(fbOpen.windowOpen, '点提示后聊天窗口被打开')
+    assert(fbOpen.seesMessage, '窗口里已经切到那条消息所在的会话')
+    assert(fbOpen.toastGone, '点过的提示自动收起')
+    await sleep(800)
+    const fbBadgeAfter = await evaluate(`document.querySelector('.icon__badge')?.textContent?.trim() ?? ''`)
+    assert(fbBadgeAfter === '', '读过之后未读红点消失', `badge=${fbBadgeAfter || '（无）'}`)
+
     // ---- 财物管理应用能真的打开 ----
     //
     // 这一节的目的是验证**接线**：注册表里加了一个应用条目、写了组件、
@@ -1638,6 +1700,23 @@ async function main() {
     })`))
     assert(presetState.wallpaper === '2', '预设壁纸切换已持久化', `wl.wallpaper=${presetState.wallpaper}`)
     assert(!presetState.image && !presetState.photo, '选预设会清掉图片壁纸')
+
+    // 关键回归：预设必须真的换掉**画面**，而不只是换个数字。
+    // （第十轮曾埋过一个 CSS 层叠 bug：作用域样式的"兜底背景"特异性压过全局壁纸类，
+    //   localStorage 变了、桌面纹丝不动 —— 只断言 localStorage 的测试抓不到这种。）
+    await evaluate(`document.querySelectorAll('.wp-picker__preset')[1].click()`)
+    await sleep(250)
+    const bgTeal = await evaluate(`
+      getComputedStyle(document.querySelector('.desktop__wallpaper')).backgroundImage.includes('60, 170, 180')
+    `)
+    assert(bgTeal === true, '选「青澜」后桌面背景真的换成了青色光斑（不只是数字变了）')
+
+    await evaluate(`document.querySelectorAll('.wp-picker__preset')[3].click()`)
+    await sleep(250)
+    const bgLake = await evaluate(`
+      getComputedStyle(document.querySelector('.desktop__wallpaper')).backgroundImage.includes('56, 124, 200')
+    `)
+    assert(bgLake === true, '再切「深湖」背景也跟着变（连续切换有效）')
 
     // 选文件空间里的图片：写入偏好，桌面上出现图片层
     const pickedImage = await evaluate(`
