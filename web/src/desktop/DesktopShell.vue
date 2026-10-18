@@ -188,8 +188,11 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: 0;
   z-index: 0;
-  /* 图片没加载出来之前不至于"开天窗" */
-  background: linear-gradient(160deg, #dceafb 0%, #c6ddf5 45%, #e4effa 100%);
+  /* ⚠️ 这里**不能**写 background：
+   * 底色与光斑由全局类 wl-wall-N（base.css）提供，而作用域样式会给选择器
+   * 加上 [data-v-xxx]，特异性永远高于全局类 —— 一旦在这里补"兜底背景"，
+   * 它就会把四套预设壁纸全部盖住（localStorage 变了、画面不变）。
+   * 曾经的兜底需求由 body 的 --bg-desktop 承担。 */
 }
 
 /* 图片壁纸：用户在文件空间里挑的那张，铺满裁剪 */
@@ -218,10 +221,6 @@ onBeforeUnmount(() => {
   background:
     radial-gradient(120% 80% at 50% -10%, rgba(255, 255, 255, 0.12), transparent 60%),
     radial-gradient(110% 70% at 50% 115%, rgba(16, 40, 72, 0.18), transparent 62%);
-}
-
-[data-theme='dark'] .desktop__wallpaper {
-  background: linear-gradient(160deg, #0c1220 0%, #101c30 50%, #0b1018 100%);
 }
 
 [data-theme='dark'] .desktop__wallpaper::after {
