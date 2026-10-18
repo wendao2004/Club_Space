@@ -1,0 +1,44 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+
+# 运行时数据（SQLite 库、上传的文件）绝不入库
+data/
+storage/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# 测试专用的数据目录（与开发用的 data/ 隔离，见 scripts/run-all-tests.mjs）
+# 目录名带测试端口后缀，所以并行跑几套测试时互不干扰
+.test-data/
+.test-data-*/
+.test-server.log
+
+# 内网 CA 与服务器证书。
+#
+# ⚠️ 这条是安全相关的，不是"保持仓库干净"。
+# deploy/ca/gen-certs.sh 生成的 ca.key 是**整个内网信任链的根私钥**：
+# 拿到它就能签发任意证书，对全体成员做中间人替换。而部署流程要求在 NAS 上
+# 对同一份工作树执行 git pull，跑完脚本后这些文件就躺在工作区里 ——
+# 只要有一次 git add -A，根私钥就永久留在 git 历史里了。
+deploy/ca/*.key
+deploy/ca/*.crt
+deploy/ca/*.csr
+deploy/ca/*.ext
+deploy/ca/*.srl
+deploy/ca/*.mobileconfig
+# 脚本会把证书与安装包复制到这里分发给成员
+deploy/onboard/certs/
+
+# 构建产物
+web/dist/
+server/dist/
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

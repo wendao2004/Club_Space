@@ -1,0 +1,22 @@
+{
+  "name": "weblearning",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "社团内网协作平台 —— 桌面式 Web 界面，部署于飞牛 NAS（Docker）",
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"pnpm -F @wl/server dev\" \"pnpm -F @wl/web dev\"",
+    "build": "pnpm -F @wl/web build",
+    "start": "pnpm -F @wl/server start",
+    "typecheck": "pnpm -F @wl/server typecheck && pnpm -F @wl/web typecheck",
+    "test": "node scripts/run-all-tests.mjs",
+    "test:fast": "node scripts/run-all-tests.mjs --skip-ui"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,51 @@
+# ============================================================================
+# 构建上下文排除清单
+#
+# 为什么必须有这个文件：构建上下文是仓库根目录，没有排除清单时 Docker 会把
+# 仓库里的一切都打包发给守护进程 —— 包括 170MB 的 node_modules。
+#
+# 更要命的是 Dockerfile 里的 `COPY web ./web` / `COPY server ./server` 发生在
+# `pnpm install` **之后**：如果宿主机上装着 node_modules，它们会被一起拷进去，
+# 覆盖掉容器里刚装好的 Linux 版依赖。而 sharp 是原生模块（含编译好的
+# .node 二进制），Windows 版的二进制在 Linux 容器里加载会直接抛错，
+# 表现为容器一起来就崩。这个坑在开发机上永远看不出来。
+# ============================================================================
+
+# ---- 依赖：容器里自己装 ----
+node_modules
+**/node_modules/
+.pnpm-store/
+
+# ---- 运行时数据：绝不进镜像 ----
+data/
+.test-data/
+storage/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# ---- 构建产物：前端在容器内重新构建，本地的不需要 ----
+web/dist/
+server/dist/
+
+# ---- 密钥与证书：永远不该出现在镜像层里 ----
+#
+# 注意这两条的作用范围：.dockerignore 只影响**构建上下文**，
+# 也就是说它挡的是"这些文件被复制进镜像"，而不是"这些文件不能用"。
+# CA 私钥（ca/ca.key）由 compose 以只读卷挂给 Caddy，走的不是构建路径。
+**/ca.key
+**/ca.srl
+**/*.key
+**/*.pem
+.env
+.env.*
+!.env.example
+
+# ---- 杂项 ----
+.git/
+.gitignore
+.vscode/
+.idea/
+*.log
+.DS_Store
+Thumbs.db
