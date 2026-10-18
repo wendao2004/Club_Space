@@ -1,0 +1,110 @@
+<!--
+  内联 SVG 图标集。
+
+  刻意不引入图标库：一来本项目可获取的依赖越少越好（开发机拿不到 GitHub，
+  很多图标库的安装脚本会走 github），二来图标库动辄几十万个小图标，
+  而桌面外壳真正用到的只有这一小撮。用 currentColor 描边，跟随主题变色。
+-->
+<script setup lang="ts">
+const props = withDefaults(
+  defineProps<{
+    name: string
+    size?: number | string
+    /** 线宽，16px 尺寸下 1.5 更清晰 */
+    stroke?: number
+  }>(),
+  { size: 20, stroke: 1.6 },
+)
+
+const paths: Record<string, string> = {
+  // 通用
+  close: 'M6 6l12 12M18 6L6 18',
+  minimize: 'M5 12h14',
+  maximize: 'M6 6h12v12H6z',
+  restore: 'M8 8h10v10H8zM6 16V6h10',
+  check: 'M4 12.5l5 5L20 6.5',
+  plus: 'M12 5v14M5 12h14',
+  minus: 'M5 12h14',
+  search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
+  refresh: 'M20 11a8 8 0 1 0-2.3 6.3M20 5v6h-6',
+  more: 'M6 12h.01M12 12h.01M18 12h.01',
+  'chevron-down': 'M6 9l6 6 6-6',
+  'chevron-right': 'M9 6l6 6-6 6',
+  'chevron-left': 'M15 6l-6 6 6 6',
+  'arrow-up': 'M12 19V5M6 11l6-6 6 6',
+  'arrow-down': 'M12 5v14M6 13l6 6 6-6',
+  'arrow-left': 'M19 12H5M11 6l-6 6 6 6',
+  external: 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
+  menu: 'M4 7h16M4 12h16M4 17h16',
+
+  // 文件与目录
+  folder: 'M3 7a1 1 0 0 1 1-1h4.5l2 2.5H20a1 1 0 0 1 1 1V18a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z',
+  'folder-open': 'M3 7a1 1 0 0 1 1-1h4.5l2 2.5H20a1 1 0 0 1 1 1v1H3zM3 11h18l-2.2 7.2a1 1 0 0 1-1 .8H4a1 1 0 0 1-1-1z',
+  file: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7zM14 3v4h4',
+  pdf: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7zM14 3v4h4M8.5 17v-4h1.2a1.2 1.2 0 0 1 0 2.4H8.5M13 13h1a1.5 1.5 0 0 1 1.5 1.5v1A1.5 1.5 0 0 1 14 17h-1z',
+  doc: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7zM14 3v4h4M8.5 12h7M8.5 15.5h7',
+  sheet: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7zM14 3v4h4M8 12h8M8 15.5h8M11 10v9',
+  slide: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7zM14 3v4h4M9 12h6v4H9z',
+  image: 'M4 5h16v14H4zM4 15l4-4 3 3 3-3 6 5M15.5 9.5h.01',
+  video: 'M4 6h11v12H4zM15 10l4.5-2.5v9L15 14z',
+  audio: 'M9 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM11.5 15.5V5l7-1.5v11M18.5 17a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z',
+  archive: 'M4 5h16v4H4zM5.5 9v10h13V9M10 13h4',
+  text: 'M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7zM14 3v4h4M8.5 12h7M8.5 15.5h4',
+
+  // 操作
+  upload: 'M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3',
+  download: 'M12 4v12M7 11l5 5 5-5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3',
+  trash: 'M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M10 11v6M14 11v6',
+  rename: 'M4 20h6M6 16l9.5-9.5a2.1 2.1 0 0 1 3 3L9 19l-4 1z',
+  copy: 'M9 9h10v10H9zM5 15V5h10',
+  move: 'M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3',
+  share: 'M12 3v12M8 7l4-4 4 4M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5',
+  pin: 'M12 17v4M8 3h8l-1 6 3 3v2H6v-2l3-3z',
+  lock: 'M6 11h12v9H6zM8.5 11V8a3.5 3.5 0 0 1 7 0v3',
+  logout: 'M15 4h3a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-3M10 16l-4-4 4-4M6 12h9',
+  settings:
+    'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.1a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z',
+  sun: 'M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4',
+  moon: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z',
+  info: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v5M12 8h.01',
+  alert: 'M12 3l9 16H3zM12 10v4M12 17h.01',
+  shield: 'M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z',
+  users: 'M16 20v-1.5a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4V20M9 10.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM22 20v-1.5a4 4 0 0 0-3-3.9M16.5 4a3.5 3.5 0 0 1 0 7',
+  user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4.5 20.5a7.5 7.5 0 0 1 15 0',
+  home: 'M3 10.5L12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H10v6H4a1 1 0 0 1-1-1z',
+  grid: 'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z',
+  list: 'M4 6h16M4 12h16M4 18h16',
+  tools: 'M14.7 6.3a4.5 4.5 0 0 0 6 6L21 21H3l9.3-9.3a4.5 4.5 0 0 0-6-6z',
+  terminal: 'M5 5h14v14H5zM8 10l2.5 2L8 14M13 14h3',
+  chart: 'M4 20V10M10 20V4M16 20v-7M22 20H2',
+  clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3.5 2',
+  qr: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z',
+  merge: 'M8 3v5a3 3 0 0 0 3 3h5M8 21v-5a3 3 0 0 1 3-3M16 8l3 3-3 3',
+  split: 'M16 3v5a3 3 0 0 1-3 3H8M16 21v-5a3 3 0 0 0-3-3M5 8l3 3-3 3',
+  rotate: 'M20 11a8 8 0 1 0-2.7 6M20 5v6h-6',
+  scissors: 'M6 7a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM6 22a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM8 8.5L20 20M20 4L8 15.5',
+  wifi: 'M5 12.5a10 10 0 0 1 14 0M8 16a6 6 0 0 1 8 0M12 19.5h.01',
+  cloud: 'M6.5 19a4.5 4.5 0 0 1 .5-9 6 6 0 0 1 11.5 1.5A4 4 0 0 1 18 19z',
+  star: 'M12 3l2.7 5.7 6.3.8-4.6 4.3 1.2 6.2-5.6-3-5.6 3 1.2-6.2L3 9.5l6.3-.8z',
+  layout: 'M4 4h16v16H4zM10 4v16M10 12h10',
+  eye: 'M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+  db: 'M12 7c4.4 0 8-1.1 8-2.5S16.4 2 12 2 4 3.1 4 4.5 7.6 7 12 7zM4 4.5v15C4 20.9 7.6 22 12 22s8-1.1 8-2.5v-15M4 12c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5',
+}
+</script>
+
+<template>
+  <svg
+    :width="props.size"
+    :height="props.size"
+    viewBox="0 0 24 24"
+    fill="none"
+    :stroke-width="props.stroke"
+    stroke="currentColor"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+    focusable="false"
+  >
+    <path :d="paths[props.name] ?? paths.file!" />
+  </svg>
+</template>
