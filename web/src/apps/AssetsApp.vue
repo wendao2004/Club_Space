@@ -1581,4 +1581,153 @@ const editing = computed(() => editOpen.value)
 .loans__actions .wl-btn + .wl-btn {
   margin-left: 4px;
 }
+
+/* ================================================================
+   整体 UI 升级（评审团定稿）· 降噪覆盖层
+   ================================================================ */
+
+/* 顶栏页签 → 分段控件（选中 = 白底卡片，不再是"带框按钮"） */
+.assets .assets__tabs {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  gap: 2px;
+}
+
+.assets .tab {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 3px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.assets .tab:hover {
+  background: var(--hover);
+}
+
+.assets .tab--active {
+  background: var(--surface-1);
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+  font-weight: 600;
+}
+
+.assets .tab--sm {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* 逾期提醒：软底 + 无描边 */
+.assets .assets__alert {
+  background: var(--danger-soft);
+  border: none;
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+
+.assets .assets__alert-list {
+  color: var(--text-secondary);
+}
+
+/* 概览卡：8px 圆角 + 发丝描边 + 轻阴影 */
+.assets .stat {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 10px 14px;
+}
+
+.assets .stat__num {
+  font-size: var(--fs-num);
+  font-weight: 600;
+}
+
+.assets .stat__label {
+  font-size: var(--fs-caption);
+  color: var(--text-tertiary);
+}
+
+/* 筛选行：搜索框限宽、下拉不再撑满整行 */
+.assets .filters {
+  gap: var(--space-2);
+}
+
+.assets .filters__search {
+  flex: 1 1 240px;
+  max-width: 360px;
+  min-width: 200px;
+}
+
+.assets .filters .wl-select {
+  width: auto;
+  min-width: 128px;
+}
+
+.assets .filters__check {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+}
+
+.assets .filters__check input {
+  accent-color: var(--accent);
+}
+
+/* 物品卡片：发丝描边 + 悬浮抬起 */
+.assets .item {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 12px 14px;
+}
+
+.assets .item:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-popup);
+}
+
+.assets .item__name {
+  font-size: var(--fs-subtitle);
+}
+
+.assets .item__meta {
+  font-size: var(--fs-caption);
+  color: var(--text-tertiary);
+}
+
+.assets .item__avail {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.assets .item__loan-badge {
+  border-radius: var(--radius-sm);
+}
+
+/* 状态标签：统一 4px 圆角 */
+.assets .tag {
+  border-radius: var(--radius-sm);
+}
+
+/* 借还表格：发丝线 */
+.assets .loans th {
+  background: var(--surface-1);
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--line-hair);
+}
+
+.assets .loans td {
+  border-bottom: 1px solid var(--line-hair);
+}
+
+.assets .loans__purpose,
+.assets .loans__sub {
+  color: var(--text-tertiary);
+}
 </style>

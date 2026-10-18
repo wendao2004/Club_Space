@@ -3393,8 +3393,208 @@ onBeforeUnmount(() => {
 }
 
 .evtable__clip {
-  color: var(--fg-dim);
+  color: var(--text-tertiary);
   margin-left: 4px;
+}
+
+/* ================================================================
+   整体 UI 升级（评审团定稿）· 降噪覆盖层
+   ----------------------------------------------------------------
+   记账是数据最密的页面：把"颜色噪声"换成"层次噪声"——
+   分类/分摊降为纯文字，状态只在异常时着色；行操作默认隐身、
+   悬浮/键盘聚焦才出现（触屏常显）；列表从"一行一卡"变成"一张卡多行"。
+   ================================================================ */
+
+.ledger .toolbar {
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--line-hair);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  gap: var(--space-3);
+}
+
+.ledger .toolbar__title {
+  font-size: 14px;
+}
+
+/* 视图分段：选中 = 白底卡片，不再整块实心蓝 */
+.ledger .seg {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+}
+
+.ledger .seg__btn {
+  height: 26px;
+  padding: 0 var(--space-3);
+  font-size: 12.5px;
+  border-radius: 4px;
+}
+
+.ledger .seg__btn--active {
+  background: var(--surface-1);
+  color: var(--text);
+  box-shadow: var(--shadow-card);
+}
+
+.ledger .seg__count {
+  opacity: 0.55;
+}
+
+/* 筛选行：控件统一 32px，搜索框与其他控件同高同圆角 */
+.ledger .filter--search {
+  height: var(--ctl-h);
+  border-radius: var(--radius-sm);
+  min-width: 220px;
+  flex: 1 1 220px;
+  max-width: 340px;
+}
+
+.ledger .filter__search {
+  font-size: var(--fs-body);
+}
+
+.ledger .rchips {
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+}
+
+.ledger .rchip {
+  height: 26px;
+  border-radius: 3px;
+  color: var(--text-secondary);
+}
+
+.ledger .rchip--on {
+  background: var(--surface-1);
+  color: var(--accent);
+  box-shadow: var(--shadow-card);
+}
+
+.ledger .filtersep {
+  background: var(--line-hair);
+}
+
+/* 列表：一张卡、行间发丝线、悬浮整行着色 */
+.ledger .entries {
+  gap: 0;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.ledger .entry {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: var(--space-2) var(--space-4);
+  min-height: 54px;
+}
+
+.ledger .entries > .entry + .entry {
+  border-top: 1px solid var(--line-hair);
+}
+
+.ledger .entry:hover {
+  background: var(--surface-2);
+}
+
+.ledger .entry--active,
+.ledger .entry--active:hover {
+  background: var(--accent-soft);
+}
+
+/* 标签降噪：分类与分摊是辅助信息，纯文字；"已通过"这类默认状态不再着色 */
+.ledger .entry__cat,
+.ledger .entry__split {
+  background: none;
+  padding: 0;
+  height: auto;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  gap: 4px;
+}
+
+.ledger .entry .wl-badge--accent {
+  background: none;
+  padding: 0;
+  height: auto;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+
+/* 行内操作：默认隐身，悬浮 / 键盘聚焦 / 已选中行才出现；触屏常显 */
+.ledger .entry__action {
+  height: 28px;
+  padding: 0 10px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.ledger .entry__action:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+  border-color: transparent;
+}
+
+/* 主操作（标记已支付）：软底强调，不再是一排实心蓝 */
+.ledger .entry__action.wl-btn--primary {
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: none;
+}
+
+.ledger .entry__action.wl-btn--primary:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.ledger .entry__action.wl-btn--danger {
+  color: var(--danger);
+  background: transparent;
+}
+
+.ledger .entry__action.wl-btn--danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ledger .entry__actions {
+    opacity: 0;
+    transition: opacity var(--dur) var(--ease-out);
+  }
+
+  .ledger .entry:hover .entry__actions,
+  .ledger .entry:focus-within .entry__actions,
+  .ledger .entry--active .entry__actions {
+    opacity: 1;
+  }
+}
+
+/* 底部汇总条与统计栏：发丝线，不再有灰带 */
+.ledger .main__foot {
+  background: transparent;
+  border-top: 1px solid var(--line-hair);
+  padding: var(--space-2) var(--space-4);
+}
+
+.ledger .stats {
+  border-left: 1px solid var(--line-hair);
+}
+
+.ledger .main__scroll {
+  padding: var(--space-4);
+}
+
+/* 活动视图的小标签：统一 4px 圆角软标签 */
+.ledger .tag {
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
 }
 
 </style>

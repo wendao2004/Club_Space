@@ -632,4 +632,21 @@ function isMine(debt: LedgerDebt): boolean {
   font-size: 13px;
   color: var(--text-secondary);
 }
+
+/* ---------------------------------------------------------------- 降噪覆盖层 */
+
+/* 欠款条目：去掉描边，用底色分层（卡里的小块不该再各自带框） */
+.sum .debt {
+  border: none;
+  background: var(--surface-2);
+}
+
+.sum .debt--mine {
+  background: var(--accent-soft);
+}
+
+.sum .stat__label {
+  font-size: var(--fs-caption);
+  color: var(--text-tertiary);
+}
 </style>

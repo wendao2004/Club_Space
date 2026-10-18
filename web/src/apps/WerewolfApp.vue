@@ -1373,4 +1373,43 @@ function chatTime(at: number): string {
     background: rgba(8, 10, 20, 0.8);
   }
 }
+
+/* ================================================================
+   整体 UI 升级（评审团定稿）· 降噪覆盖层
+   ================================================================ */
+
+/* 房间卡：发丝描边 + 轻阴影；座位点改小圆点 */
+.room {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 14px;
+  gap: 10px;
+}
+
+.room__title {
+  font-size: var(--fs-subtitle);
+  font-weight: 600;
+}
+
+.room__meta {
+  font-size: var(--fs-caption);
+  color: var(--text-tertiary);
+}
+
+.room__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.room__dot--empty {
+  background: var(--surface-3);
+}
+
+/* 座位卡：统一 8px 圆角与发丝描边 */
+.seat {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
 </style>

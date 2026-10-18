@@ -1844,4 +1844,33 @@ watch(
   color: var(--text-secondary);
   align-self: center;
 }
+
+/* ================================================================
+   整体 UI 升级（评审团定稿）· 降噪覆盖层
+   ================================================================ */
+
+.fm .fm__toolbar {
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--line-hair);
+}
+
+.fm .fm__crumbs {
+  border-bottom: 1px solid var(--line-hair);
+}
+
+/* 网格图标：底色跟随图标自身的颜色做 10% 淡染，
+   文件夹是琥珀、文档是中性灰、图片/视频各随其色——不再是一排同色方块 */
+.fm .tile__glyph {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  border-radius: 12px;
+}
+
+.fm .tile__name {
+  font-size: var(--fs-caption);
+}
+
+.fm .tile__meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
 </style>
