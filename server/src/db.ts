@@ -539,6 +539,24 @@ function migrate(database: DatabaseSync): void {
         CREATE INDEX ix_asset_loans_voided ON asset_loans(item_id) WHERE voided_at IS NULL;
       `)
     },
+
+    // ---- v10: 上传会话记住自己的空间（并修复存量错位数据）----
+    (d) => {
+      d.exec(`
+        -- 上传会话原来不存 space：complete 时靠调用方从 query string 里取，
+        -- 而前端完成上传时从不带 ?space= —— 于是**往个人空间上传的文件会被建成
+        -- 共享空间的节点**：传进私人子目录的，两个空间里都列不出来（用户报的"看不到"）。
+        -- 让会话自己记住空间，complete 以会话为准，调用方再怎么传都改不了归属。
+        ALTER TABLE uploads ADD COLUMN space TEXT NOT NULL DEFAULT 'shared';
+
+        -- 存量修复：子节点的空间必须与父节点一致（空间是树，不允许跨树挂）。
+        -- 被错位成 shared 的私人文件在这一步回到私人空间、重新可见。
+        UPDATE nodes
+           SET space = (SELECT p.space FROM nodes p WHERE p.id = nodes.parent_id)
+         WHERE parent_id IS NOT NULL
+           AND space != (SELECT p.space FROM nodes p WHERE p.id = nodes.parent_id);
+      `)
+    },
   ]
 
   if (version < migrations.length) {

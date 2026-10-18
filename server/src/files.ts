@@ -369,6 +369,8 @@ export interface UploadSession {
   received: number
   status: string
   error: string | null
+  /** v10 起：这次上传选定的空间。complete 以它为准，不再信调用方传进来的值。 */
+  space: Space
   created_at: number
   updated_at: number
 }
@@ -466,6 +468,9 @@ export async function initUpload(input: {
     const parent = getNode(input.parentId)
     if (!parent) throw new HttpError(404, '目标目录不存在')
     if (parent.kind !== 'folder') throw new HttpError(400, '目标不是目录')
+    // 空间是树：目录属于哪个空间，文件就传进哪个空间。
+    // （这个不变量以前没人守着，正是"私人目录里冒出共享文件"的另一半原因。）
+    if (parent.space !== input.space) throw new HttpError(400, '目标目录不在这个空间里')
   }
 
   const existing = findSibling(input.parentId, name, input.space)
@@ -515,19 +520,21 @@ export async function initUpload(input: {
     }
   }
 
-  // 复用同一用户对同一目标的未完成上传（刷新页面后续传）
+  // 复用同一用户对同一目标的未完成上传（刷新页面后续传）。
+  // 空间也必须一致 —— 同名同大小但换了空间，那是另一次上传。
   const pending = getDb()
     .prepare(
       `SELECT * FROM uploads
         WHERE user_id = ? AND status = 'open' AND name = ?
           AND parent_id IS ${input.parentId === null ? 'NULL' : '?'}
           AND declared_size = ?
+          AND space = ?
         ORDER BY created_at DESC LIMIT 1`,
     )
     .get(
       ...(input.parentId === null
-        ? [input.userId, name, input.size]
-        : [input.userId, name, input.parentId, input.size]),
+        ? [input.userId, name, input.size, input.space]
+        : [input.userId, name, input.parentId, input.size, input.space]),
     ) as UploadSession | undefined
 
   // ⚠️ 磁盘余量守卫放在这里，而不是在第 837 行的路由里。
@@ -552,8 +559,8 @@ export async function initUpload(input: {
   getDb()
     .prepare(
       `INSERT INTO uploads (id, user_id, parent_id, name, declared_size, declared_sha256, tmp_path,
-                            received, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'open', ?, ?)`,
+                            received, status, space, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'open', ?, ?, ?)`,
     )
     .run(
       id,
@@ -563,6 +570,7 @@ export async function initUpload(input: {
       input.size,
       input.sha256 ?? null,
       tmpPath,
+      input.space,
       now(),
       now(),
     )
@@ -677,12 +685,16 @@ export interface CompleteUploadResult {
 export async function completeUpload(
   uploadId: string,
   userId: string,
-  space: Space,
 ): Promise<CompleteUploadResult> {
   const upload = getUpload(uploadId)
   if (!upload) throw new HttpError(404, '上传会话不存在')
   if (upload.user_id !== userId) throw new HttpError(403, '无权操作该上传')
   if (upload.status !== 'open') throw new HttpError(409, `上传已 ${upload.status}`)
+
+  // ⚠️ 空间以**上传会话**为准（v10 起会话自己记着 space），绝不从调用方/query 取。
+  // 曾经这里信调用方传进来的 space，而前端完成上传时不带 ?space= —— 于是
+  // 往个人空间传的文件被建成共享空间节点：传进私人子目录的，两个空间里都列不出来。
+  const space: Space = upload.space
 
   const actualSize = await fileSize(upload.tmp_path)
   if (actualSize !== upload.declared_size) {

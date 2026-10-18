@@ -991,9 +991,9 @@ app.post('/api/uploads/:id/complete', async (req) => {
   const { id } = req.params as { id: string }
   const upload = getUpload(id)
   if (!upload) throw new HttpError(404, '上传会话不存在')
-  const space: Space = spaceOf(req)
 
-  const result = await completeUpload(id, user.id, space)
+  // 空间跟着上传会话走（v10 起会话自己记着 space）：?space= 一律忽略。
+  const result = await completeUpload(id, user.id)
 
   audit({
     actorId: user.id,
