@@ -1,0 +1,514 @@
+/**
+ * 记账 store。
+ *
+ * 三条不能违背的规则，贯穿整个文件：
+ *  1. 金额永远是字符串。求和一律走整数分，绝不用浮点，否则几十笔之后账就对不上。
+ *  2. 状态机由服务端说了算。任何写操作成功后都重新拉列表和统计，不做本地乐观更新 ——
+ *     统计只算「已通过 / 已支付」，本地改一改就会和真实账目漂移。
+ *  3. 错误不抛给组件（需要返回值的创建/更新除外），统一落到 error 并弹通知。
+ */
+import { defineStore } from 'pinia'
+import { api, ApiError } from '@/api'
+import type {
+  LedgerCategory,
+  LedgerDebt,
+  LedgerEntry,
+  LedgerEntryInput,
+  LedgerEvent,
+  LedgerEventInput,
+  LedgerEventSummary,
+  LedgerKind,
+  LedgerStatus,
+  LedgerSummary,
+} from '@/api'
+import { useUi } from '@/stores/ui'
+
+export interface LedgerFilters {
+  from: string | null
+  to: string | null
+  kind: LedgerKind | null
+  categoryId: string | null
+  status: LedgerStatus | null
+  /** 只看某个活动（比赛/一次活动）下的账目 */
+  eventId: string | null
+  /** 标题 / 备注模糊搜索 */
+  search: string
+  mine: boolean
+  pending: boolean
+}
+
+interface State {
+  entries: LedgerEntry[]
+  total: number
+  categories: LedgerCategory[]
+  summary: LedgerSummary | null
+  debts: LedgerDebt[]
+  events: LedgerEvent[]
+  eventSummary: LedgerEventSummary | null
+  loading: boolean
+  saving: boolean
+  error: string | null
+  filters: LedgerFilters
+}
+
+function emptyFilters(): LedgerFilters {
+  return {
+    from: null,
+    to: null,
+    kind: null,
+    categoryId: null,
+    status: null,
+    eventId: null,
+    search: '',
+    mine: false,
+    pending: false,
+  }
+}
+
+/** 把未知异常转成可直接展示的文案；后端返回的真实 message 优先。 */
+function describe(err: unknown): string {
+  if (err instanceof ApiError) return err.message
+  if (err instanceof Error) return err.message
+  return String(err)
+}
+
+/** 由筛选条件拼出列表查询参数。 */
+function entryQuery(filters: LedgerFilters): {
+  from?: string
+  to?: string
+  kind?: LedgerKind
+  categoryId?: string
+  status?: LedgerStatus
+  eventId?: string
+  search?: string
+  mine: boolean
+  pending: boolean
+} {
+  return {
+    from: filters.from ?? undefined,
+    to: filters.to ?? undefined,
+    kind: filters.kind ?? undefined,
+    categoryId: filters.categoryId ?? undefined,
+    status: filters.status ?? undefined,
+    eventId: filters.eventId ?? undefined,
+    search: filters.search.trim() || undefined,
+    mine: filters.mine,
+    pending: filters.pending,
+  }
+}
+
+export const useLedger = defineStore('ledger', {
+  state: (): State => ({
+    entries: [],
+    total: 0,
+    categories: [],
+    summary: null,
+    debts: [],
+    events: [],
+    eventSummary: null,
+    loading: false,
+    saving: false,
+    error: null,
+    filters: emptyFilters(),
+  }),
+
+  getters: {
+    /** 未归档的收入分类 */
+    incomeCategories: (state): LedgerCategory[] =>
+      state.categories.filter((category) => category.kind === 'income' && !category.archived),
+
+    /** 未归档的支出分类 */
+    expenseCategories: (state): LedgerCategory[] =>
+      state.categories.filter((category) => category.kind === 'expense' && !category.archived),
+
+    /** 当前列表里「待审批」的条数 */
+    pendingCount: (state): number =>
+      state.entries.filter((entry) => entry.status === 'submitted').length,
+
+    /** 当前列表的收入合计（整数分相加，金额字段本身就是整数分） */
+    totalIncomeCents: (state): number =>
+      state.entries.reduce((sum, entry) => (entry.kind === 'income' ? sum + entry.amountCents : sum), 0),
+
+    /** 当前列表的支出合计（整数分相加） */
+    totalExpenseCents: (state): number =>
+      state.entries.reduce((sum, entry) => (entry.kind === 'expense' ? sum + entry.amountCents : sum), 0),
+  },
+
+  actions: {
+    /**
+     * 把一行金额字符串转成整数分（用于本地求和）。绝不用 parseFloat。
+     * "12" → 1200，"12.5" → 1250，"12.50" → 1250，"1,234.56" → 123456。非法输入返回 0。
+     */
+    amountToCents(amount: string): number {
+      if (typeof amount !== 'string') return 0
+      // 去掉千分位分隔符与首尾空白，负数在金额里视为非法
+      const cleaned = amount.trim().replace(/,/g, '')
+      if (!/^\d+(\.\d*)?$|^\.\d+$/.test(cleaned)) return 0
+      const [wholeRaw = '0', fractionRaw = ''] = cleaned.split('.')
+      const whole = wholeRaw === '' ? 0 : Number(wholeRaw)
+      if (!Number.isSafeInteger(whole)) return 0
+      // 小数部分补齐/截断到两位，得到整数分
+      const fraction = Number(`${fractionRaw}00`.slice(0, 2))
+      return whole * 100 + fraction
+    },
+
+    async loadCategories(includeArchived = false): Promise<void> {
+      this.loading = true
+      this.error = null
+      try {
+        const result = await api.ledger.categories(includeArchived)
+        this.categories = result.categories
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '加载分类失败', message)
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async loadEntries(): Promise<void> {
+      this.loading = true
+      this.error = null
+      try {
+        const result = await api.ledger.entries(entryQuery(this.filters))
+        this.entries = result.entries
+        this.total = result.total
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '加载账目失败', message)
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async loadSummary(): Promise<void> {
+      this.loading = true
+      this.error = null
+      try {
+        const result = await api.ledger.summary({
+          from: this.filters.from ?? undefined,
+          to: this.filters.to ?? undefined,
+        })
+        this.summary = result.summary
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '加载统计失败', message)
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async loadDebts(): Promise<void> {
+      this.loading = true
+      this.error = null
+      try {
+        const result = await api.ledger.debts(this.filters.eventId ?? undefined)
+        this.debts = result.debts
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '加载待结算失败', message)
+      } finally {
+        this.loading = false
+      }
+    },
+
+    /** 加载活动列表（含每个活动的收支合计与笔数）。 */
+    async loadEvents(openOnly = false): Promise<void> {
+      this.loading = true
+      this.error = null
+      try {
+        const result = await api.ledger.events({ openOnly })
+        this.events = result.events
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '加载活动失败', message)
+      } finally {
+        this.loading = false
+      }
+    },
+
+    /** 加载某个活动的完整汇总（收支合计 + 按分类 + 按人 + 逐笔明细）。 */
+    async loadEventSummary(eventId: string): Promise<void> {
+      this.loading = true
+      this.error = null
+      try {
+        this.eventSummary = await api.ledger.eventSummary(eventId)
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '加载活动汇总失败', message)
+      } finally {
+        this.loading = false
+      }
+    },
+
+    async createEvent(input: LedgerEventInput): Promise<LedgerEvent | null> {
+      this.saving = true
+      this.error = null
+      try {
+        const { event } = await api.ledger.createEvent(input)
+        useUi().notify('success', '活动已创建', event.name)
+        await this.loadEvents()
+        return event
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '创建活动失败', message)
+        return null
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async updateEvent(id: string, input: Partial<LedgerEventInput>): Promise<LedgerEvent | null> {
+      this.saving = true
+      this.error = null
+      try {
+        const { event } = await api.ledger.updateEvent(id, input)
+        useUi().notify('success', '活动已更新', event.name)
+        await this.loadEvents()
+        if (this.eventSummary?.event.id === id) await this.loadEventSummary(id)
+        return event
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '更新活动失败', message)
+        return null
+      } finally {
+        this.saving = false
+      }
+    },
+
+    /** 封账 / 解封。封账后该活动不能再新增或修改账目（历史不受影响）。 */
+    async closeEvent(id: string, closed: boolean): Promise<LedgerEvent | null> {
+      this.saving = true
+      this.error = null
+      try {
+        const { event } = await api.ledger.closeEvent(id, closed)
+        useUi().notify('success', closed ? '活动已封账' : '活动已解封', event.name)
+        await this.loadEvents()
+        return event
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', closed ? '封账失败' : '解封失败', message)
+        return null
+      } finally {
+        this.saving = false
+      }
+    },
+
+    /** 顺序刷新所有数据源，避免并发把后端打爆。 */
+    async reload(): Promise<void> {
+      await this.loadCategories()
+      await this.loadEvents()
+      await this.loadEntries()
+      await this.loadSummary()
+      await this.loadDebts()
+      // 正在看某个活动的汇总时必须重拉它 —— 活动汇总页整页都由 eventSummary
+      // 渲染，漏掉这一步就会出现"刚加了收入，数字不动"（用户报的 bug）。
+      if (this.eventSummary) await this.loadEventSummary(this.eventSummary.event.id)
+    },
+
+    async createEntry(input: LedgerEntryInput): Promise<LedgerEntry> {
+      this.saving = true
+      this.error = null
+      try {
+        const { entry } = await api.ledger.createEntry(input)
+        useUi().notify('success', '账目已创建', entry.title)
+        await this.loadEntries()
+        await this.loadSummary()
+        // 正在看某个活动的汇总时，顺手把它刷新，免得列表变了汇总还是旧的
+        if (this.eventSummary) await this.loadEventSummary(this.eventSummary.event.id)
+        return entry
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '创建账目失败', message)
+        throw err
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async updateEntry(id: string, input: Partial<LedgerEntryInput>): Promise<LedgerEntry> {
+      this.saving = true
+      this.error = null
+      try {
+        const { entry } = await api.ledger.updateEntry(id, input)
+        useUi().notify('success', '账目已更新', entry.title)
+        await this.loadEntries()
+        await this.loadSummary()
+        if (this.eventSummary) await this.loadEventSummary(this.eventSummary.event.id)
+        return entry
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '更新账目失败', message)
+        throw err
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async deleteEntry(id: string): Promise<void> {
+      this.saving = true
+      this.error = null
+      try {
+        await api.ledger.deleteEntry(id)
+        useUi().notify('success', '账目已删除')
+        await this.loadEntries()
+        await this.loadSummary()
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '删除账目失败', message)
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async submitEntry(id: string): Promise<void> {
+      this.saving = true
+      this.error = null
+      try {
+        await api.ledger.submitEntry(id)
+        useUi().notify('success', '已提交审批')
+        await this.loadEntries()
+        await this.loadSummary()
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '提交失败', message)
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async withdrawEntry(id: string): Promise<void> {
+      this.saving = true
+      this.error = null
+      try {
+        await api.ledger.withdrawEntry(id)
+        useUi().notify('success', '已撤回为草稿')
+        await this.loadEntries()
+        await this.loadSummary()
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '撤回失败', message)
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async decideEntry(id: string, decision: 'approve' | 'reject', note?: string): Promise<void> {
+      this.saving = true
+      this.error = null
+      try {
+        await api.ledger.decideEntry(id, decision, note)
+        useUi().notify('success', decision === 'approve' ? '已通过' : '已驳回')
+        await this.loadEntries()
+        await this.loadSummary()
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', decision === 'approve' ? '审批失败' : '驳回失败', message)
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async payEntry(id: string): Promise<void> {
+      this.saving = true
+      this.error = null
+      try {
+        await api.ledger.payEntry(id)
+        useUi().notify('success', '已标记支付')
+        await this.loadEntries()
+        await this.loadSummary()
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '标记支付失败', message)
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async settleSplit(entryId: string, userId: string, settled: boolean): Promise<void> {
+      this.saving = true
+      this.error = null
+      try {
+        await api.ledger.settleSplit(entryId, userId, settled)
+        useUi().notify('success', settled ? '已标记结清' : '已取消结清')
+        await this.loadEntries()
+        await this.loadDebts()
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '结算操作失败', message)
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async createCategory(input: { name: string; kind: LedgerKind; icon?: string }): Promise<void> {
+      this.saving = true
+      this.error = null
+      try {
+        const { category } = await api.ledger.createCategory(input)
+        useUi().notify('success', '分类已创建', category.name)
+        await this.loadCategories()
+        await this.loadEntries()
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '创建分类失败', message)
+      } finally {
+        this.saving = false
+      }
+    },
+
+    async archiveCategory(id: string, archived: boolean): Promise<void> {
+      this.saving = true
+      this.error = null
+      try {
+        await api.ledger.archiveCategory(id, archived)
+        useUi().notify('success', archived ? '分类已归档' : '分类已恢复')
+        await this.loadCategories()
+        await this.loadEntries()
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', archived ? '归档失败' : '恢复失败', message)
+      } finally {
+        this.saving = false
+      }
+    },
+
+    /**
+     * 合并筛选条件后自动重新拉数据。
+     * 区间（from/to）影响统计，变动时要连统计一起刷新；其余条件只影响列表。
+     */
+    setFilters(patch: Partial<LedgerFilters>): void {
+      const prevFrom = this.filters.from
+      const prevTo = this.filters.to
+      this.filters = { ...this.filters, ...patch }
+      const rangeChanged = prevFrom !== this.filters.from || prevTo !== this.filters.to
+      void this.loadEntries()
+      if (rangeChanged) void this.loadSummary()
+    },
+
+    resetFilters(): void {
+      this.filters = emptyFilters()
+      void this.loadEntries()
+      void this.loadSummary()
+    },
+  },
+})
