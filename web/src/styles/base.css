@@ -1,0 +1,317 @@
+/**
+ * 基础样式与通用原语。
+ *
+ * 这里只放"全站都一样的规则"，组件私有的样式一律写在组件里（scoped）。
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg-desktop);
+  /* 桌面外壳里不该出现整页滚动 */
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 桌面外壳里禁用文本选择；需要选中的地方（输入框、文件列表）单独开启 */
+#app {
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable],
+.selectable {
+  user-select: text;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* ---------------------------------------------------------------- 滚动条 */
+
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ---------------------------------------------------------------- 通用按钮 */
+
+.wl-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.wl-btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+.wl-btn:active:not(:disabled) {
+  background: var(--pressed);
+}
+
+.wl-btn:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.wl-btn--primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.wl-btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.wl-btn--primary:active:not(:disabled) {
+  background: var(--accent-pressed);
+}
+
+.wl-btn--danger {
+  color: var(--danger);
+  border-color: transparent;
+  background: var(--danger-soft);
+  font-weight: 600;
+}
+
+.wl-btn--danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: #fff;
+}
+
+.wl-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.wl-btn--ghost:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.wl-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.wl-icon-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.wl-icon-btn:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+
+/* ---------------------------------------------------------------- 表单 */
+
+.wl-input,
+.wl-select,
+.wl-textarea {
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  border-bottom-color: var(--border-strong);
+  background: var(--surface-solid);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.wl-textarea {
+  height: auto;
+  min-height: 80px;
+  padding: var(--space-2) var(--space-3);
+  resize: vertical;
+}
+
+.wl-input:focus,
+.wl-select:focus,
+.wl-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.wl-input::placeholder,
+.wl-textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+.wl-label {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.wl-field {
+  margin-bottom: var(--space-3);
+}
+
+.wl-hint {
+  margin-top: var(--space-1);
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* ---------------------------------------------------------------- 其他原语 */
+
+.wl-card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.wl-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--surface-3);
+  color: var(--text-secondary);
+}
+
+.wl-badge--accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.wl-badge--success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.wl-badge--warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.wl-badge--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.wl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-6);
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+.wl-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: wl-spin 0.7s linear infinite;
+}
+
+@keyframes wl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.wl-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* 尊重用户的减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
