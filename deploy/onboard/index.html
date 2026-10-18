@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>首次设置 · 社团空间</title>
+    <style>
+      :root {
+        --bg: #0b1220;
+        --card: #151b28;
+        --line: #262e3d;
+        --text: #e8ecf2;
+        --dim: #93a0b4;
+        --accent: #4a9eff;
+        --danger: #ff6b6b;
+        --ok: #4ade80;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 20px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, -apple-system, "Microsoft YaHei", sans-serif;
+        line-height: 1.6;
+        -webkit-text-size-adjust: 100%;
+      }
+      .wrap { max-width: 620px; margin: 0 auto; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      .sub { color: var(--dim); font-size: 14px; margin: 0 0 20px; }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 14px;
+      }
+      .status { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); flex: none; }
+      .dot.ok { background: var(--ok); }
+      .status.ok { color: var(--ok); }
+      .status b { color: var(--text); }
+      h2 { font-size: 15px; margin: 0 0 10px; }
+      ol { margin: 0; padding-left: 20px; }
+      li { margin-bottom: 8px; font-size: 14px; }
+      .warn {
+        background: rgba(255, 107, 107, 0.1);
+        border: 1px solid rgba(255, 107, 107, 0.35);
+        border-radius: 10px;
+        padding: 12px 14px;
+        font-size: 13.5px;
+        margin-top: 12px;
+      }
+      .warn strong { color: var(--danger); }
+      .btn {
+        display: block;
+        text-align: center;
+        background: var(--accent);
+        color: #04121f;
+        font-weight: 600;
+        padding: 13px 16px;
+        border-radius: 10px;
+        text-decoration: none;
+        margin-top: 10px;
+        font-size: 15px;
+      }
+      .btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+      code {
+        background: #0d1420;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 12.5px;
+        font-family: Consolas, "Cascadia Code", monospace;
+      }
+      .fp {
+        font-family: Consolas, monospace;
+        font-size: 11.5px;
+        word-break: break-all;
+        color: var(--dim);
+        background: #0d1420;
+        padding: 8px 10px;
+        border-radius: 6px;
+        margin-top: 8px;
+      }
+      .hidden { display: none; }
+      .muted { color: var(--dim); font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>首次设置</h1>
+      <p class="sub">装好这一步，手机上也能用摄像头、通知和剪贴板。</p>
+
+      <div class="card">
+        <div class="status" id="status">
+          <span class="dot" id="dot"></span>
+          <span id="status-text">正在检测证书状态…</span>
+        </div>
+        <div class="warn hidden" id="why">
+          <strong>为什么要装证书：</strong>
+          局域网里用 <code>http://192.168.x.x</code> 访问时，浏览器不认为这是"安全上下文"，
+          摄像头、麦克风、屏幕共享、系统通知、剪贴板、安装为桌面应用这些能力会**直接不可用**；
+          如果证书不受信任还点了"继续访问"，Chrome 会**禁止注册 Service Worker**——那不是体验差，
+          是功能没有。装好根证书后这些才能用。
+          <div class="fp" id="fingerprint">正在读取证书指纹…</div>
+          <div class="muted" style="margin-top: 8px">
+            安装前请把上面的指纹与社团群里公布的核对一致，防止有人在内网里替换证书。
+          </div>
+        </div>
+        <a class="btn hidden" id="recheck" href="#">我已安装，重新检测</a>
+      </div>
+
+      <div class="card" id="steps-card">
+        <h2 id="steps-title">安装步骤</h2>
+        <div id="steps"></div>
+      </div>
+
+      <div class="card">
+        <h2>按平台查看步骤</h2>
+        <div id="manual"></div>
+      </div>
+
+      <p class="muted" style="text-align:center;margin-top:20px">
+        本页通过明文 HTTP 提供，只用于分发证书与查看说明；装好证书后请回到
+        <code>https://</code> 地址使用平台。
+      </p>
+    </div>
+
+    <!--
+      地址配置由 deploy/ca/gen-certs.sh 在部署时生成到这里。
+      文件不存在时下面的默认值兜底，页面不会崩。
+    -->
+    <script src="certs/deploy-config.js"></script>
+    <script>
+      // ---- 地址配置 ----
+      //
+      // 这几个值取决于部署时选的端口，所以由 gen-certs.sh 写成静态文件，
+      // 页面不自己猜。为什么不能猜：
+      //
+      // 1. 这个页面本身跑在**明文 HTTP** 上，它和主站是**两个不同的端口**，
+      //    所以不能用 location.port 推断主站端口。
+      // 2. 早先这里写的是 'https://' + location.hostname + '/'，而
+      //    location.hostname **会丢掉端口** —— 于是探针永远打到 443。
+      //    在 80/443 被系统 Web 界面占用的 NAS 上，443 是**别人的服务**，
+      //    探针必然失败：成员明明装好了证书，状态点却永远是红的，
+      //    而且装完会被自动跳转到系统界面而不是本平台。
+      var CFG = window.WL_DEPLOY_CONFIG || {}
+      var HOST = location.hostname
+      var ONBOARD_PORT = CFG.onboardPort || 8080
+      var HTTPS_PORT = CFG.httpsPort || 8443
+      var HTTPS_ORIGIN = 'https://' + HOST + (HTTPS_PORT === 443 ? '' : ':' + HTTPS_PORT)
+      var CA_BASE = 'http://' + HOST + (ONBOARD_PORT === 80 ? '' : ':' + ONBOARD_PORT) + '/certs/'
+      var PROBE = HTTPS_ORIGIN + '/healthz'
+
+      var ua = navigator.userAgent
+      var isIOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+      var isAndroid = /Android/.test(ua)
+      var isMac = /Macintosh/.test(ua) && !isIOS
+      var isWindows = /Windows/.test(ua)
+
+      var PLATFORM = isIOS ? 'ios' : isAndroid ? 'android' : isMac ? 'mac' : isWindows ? 'windows' : 'other'
+
+      var STEPS = {
+        ios: {
+          title: 'iPhone / iPad —— 两步，缺一不可',
+          html:
+            '<ol>' +
+            '<li><a class="btn" href="' + CA_BASE + 'ca.mobileconfig">下载并安装描述文件</a>' +
+            '<div class="muted">点开后选"允许"，然后到「设置」顶部会看到「已下载描述文件」</div></li>' +
+            '<li>设置 → 通用 → VPN 与设备管理 → 安装该描述文件（需输入锁屏密码）</li>' +
+            '<li><b>设置 → 通用 → 关于本机 → 证书信任设置 → 打开「社团内网根证书」的完全信任</b></li>' +
+            '</ol>' +
+            '<div class="warn"><strong>第 3 步是最容易漏掉的：</strong>' +
+            '只做前两步，证书装上了但"不被信任"，浏览器仍然会报不安全、功能仍然不可用。' +
+            '很多人卡在这里，以为装失败了。一定要去「证书信任设置」里手动打开开关。</div>',
+        },
+        android: {
+          title: 'Android —— 请用系统浏览器（Chrome / Edge），不要用 Firefox',
+          html:
+            '<ol>' +
+            '<li><a class="btn" href="' + CA_BASE + 'ca.crt">下载 ca.crt</a></li>' +
+            '<li>设置 → 安全 → 加密与凭据 → 安装证书 → <b>CA 证书</b> → 选择刚下载的 ca.crt</li>' +
+            '<li>系统会提示"你的数据不再私密"之类的警告，确认继续</li>' +
+            '</ol>' +
+            '<div class="warn"><strong>注意两点：</strong><br>' +
+            '① 移动版 Firefox 使用自带信任库，不认系统安装的证书，必须换 Chrome / Edge / 系统浏览器。<br>' +
+            '② 部分手机厂商把「安装证书」入口藏在「设置 → 密码与安全 → 系统安全」里，找不到时搜索"证书"。</div>',
+        },
+        mac: {
+          title: 'macOS',
+          html:
+            '<ol>' +
+            '<li><a class="btn" href="' + CA_BASE + 'ca.crt">下载 ca.crt</a></li>' +
+            '<li>双击打开 → 加入「系统」钥匙串</li>' +
+            '<li>在钥匙串里找到「社团内网根证书」→ 双击 → 展开「信任」→ 把「使用此证书时」设为 <b>始终信任</b></li>' +
+            '</ol>',
+        },
+        windows: {
+          title: 'Windows',
+          html:
+            '<ol>' +
+            '<li><a class="btn" href="' + CA_BASE + 'install-windows.cmd">下载一键安装脚本</a></li>' +
+            '<li><b>右键 → 以管理员身份运行</b>（不加管理员会有权限错误）</li>' +
+            '<li>看到"完成"后，<b>完全关闭并重新打开浏览器</b>（只刷新页面不够，证书信任是在进程启动时加载的）</li>' +
+            '</ol>' +
+            '<div class="muted">不想用脚本的话，也可以下载 ca.crt 后手动导入到「受信任的根证书颁发机构」存储区。</div>',
+        },
+        other: {
+          title: '安装根证书',
+          html:
+            '<p>未能识别你的系统。请下载 <a href="' + CA_BASE + 'ca.crt">ca.crt</a>，' +
+            '导入到系统的"受信任的根证书颁发机构"存储区。</p>',
+        },
+      }
+
+      function render() {
+        var s = STEPS[PLATFORM]
+        document.getElementById('steps-title').textContent = s.title
+        document.getElementById('steps').innerHTML = s.html
+
+        // 底部的手动切换，方便管理员帮别人排查
+        var all = Object.keys(STEPS)
+        var html = ''
+        all.forEach(function (k) {
+          html +=
+            '<p style="margin:0 0 10px"><b>' +
+            STEPS[k].title +
+            '</b></p>' +
+            STEPS[k].html +
+            '<hr style="border:none;border-top:1px solid var(--line);margin:14px 0">'
+        })
+        document.getElementById('manual').innerHTML = html
+      }
+
+      async function probe() {
+        try {
+          // no-cors：我们不需要读响应内容，只需要"请求能不能成功发出"。
+          // 证书不被信任时这里会抛错。
+          await fetch(PROBE, { mode: 'no-cors', cache: 'no-store' })
+          return true
+        } catch (e) {
+          return false
+        }
+      }
+
+      async function check() {
+        var trusted = await probe()
+        var dot = document.getElementById('dot')
+        var statusEl = document.getElementById('status')
+        var text = document.getElementById('status-text')
+        var why = document.getElementById('why')
+        var recheck = document.getElementById('recheck')
+
+        if (trusted) {
+          dot.className = 'dot ok'
+          statusEl.className = 'status ok'
+          text.innerHTML = '<b>证书已信任，正在进入…</b>'
+          why.className = 'warn hidden'
+          recheck.className = 'btn hidden'
+          setTimeout(function () {
+            location.href = HTTPS_ORIGIN + '/'
+          }, 800)
+        } else {
+          dot.className = 'dot'
+          statusEl.className = 'status'
+          text.textContent = '证书尚未安装或尚未被信任'
+          why.className = 'warn'
+          recheck.className = 'btn ghost'
+        }
+      }
+
+      document.getElementById('recheck').addEventListener('click', function (e) {
+        e.preventDefault()
+        check()
+      })
+
+      // 证书指纹：优先读 gen-certs.sh 预先算好的静态文件。
+      //
+      // 为什么不在页面里现算：这个页面走**明文 HTTP**，而 crypto.subtle 只在
+      // 安全上下文（https / localhost）里存在。没有它，现算必然抛
+      // TypeError，被 catch 吞掉后页面永远显示"无法读取"，而这个恰好是页面上
+      // 唯一防中间人调包的功能 —— 成员照文档想核对指纹，永远核不上。
+      var fpEl = document.getElementById('fingerprint')
+
+      function showFingerprint(text) {
+        fpEl.textContent = 'SHA-256 指纹：' + text
+      }
+
+      fetch(CA_BASE + 'ca.sha256', { cache: 'no-store' })
+        .then(function (r) {
+          if (!r.ok) throw new Error('没有预生成的指纹文件')
+          return r.text()
+        })
+        .then(function (t) {
+          var v = t.trim()
+          if (!v) throw new Error('指纹文件是空的')
+          showFingerprint(v)
+        })
+        .catch(function () {
+          // 兜底：万一没有预生成的文件，再试着现算一次（只在安全上下文里可用）
+          if (!window.crypto || !window.crypto.subtle) {
+            fpEl.textContent = '（无法读取证书指纹，请向管理员索取）'
+            return
+          }
+          fetch(CA_BASE + 'ca.crt')
+            .then(function (r) { return r.text() })
+            .then(function (pem) {
+              var b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '')
+              var bin = atob(b64)
+              var bytes = new Uint8Array(bin.length)
+              for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+              return crypto.subtle.digest('SHA-256', bytes)
+            })
+            .then(function (hash) {
+              showFingerprint(
+                [].map
+                  .call(new Uint8Array(hash), function (b) {
+                    return b.toString(16).padStart(2, '0').toUpperCase()
+                  })
+                  .join(':'),
+              )
+            })
+            .catch(function () {
+              fpEl.textContent = '（无法读取证书指纹，请向管理员索取）'
+            })
+        })
+
+      render()
+      check()
+      // 用户装完证书切回来时自动重测一次
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) check()
+      })
+    </script>
+  </body>
+</html>

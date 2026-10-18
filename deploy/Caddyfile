@@ -1,0 +1,152 @@
+# ============================================================================
+# Caddy 配置：唯一的 TLS 终点与反向代理
+#
+# 三条与常见做法不同的决定，都是被真实网络约束逼出来的：
+#
+# 1. **不用子域，改单一 origin + 路径路由。**
+#    子域方案（office.xxx / pdf.xxx）在局域网里根本解析不了 —— 家用路由器
+#    不会替你解析自定义域名，除非每台设备改 DNS。而"每台设备改 DNS"在执行上
+#    必然失败。收敛到一个名字后，顺带拿到同源（无 CORS 问题）、单张证书、
+#    Service Worker 作用域在根这三件事。
+#
+# 2. **证书用 OpenSSL 签的多 SAN 证书，而不是 Caddy 的 tls internal。**
+#    因为需要**把 IP 也放进 SAN**：mDNS(.local) 在家用 AP 上经常被多播过滤
+#    拦掉，Android 又本来就不走 mDNS，所以 IP 是最终的兜底访问方式，
+#    而 IP 访问要能通过证书校验就必须有 IP SAN。tls internal 给不了这个控制力。
+#
+# 3. **站点跑在高位端口，不绑 80/443。**
+#    很多 NAS 系统把 80/443 留给自己的 Web 管理界面（飞牛 fnOS 就是如此，
+#    它的 nginx 同时占着 80、443、5666）。绑上去会直接 "address already in use"
+#    起不来。容器里监听什么端口、宿主机映射到什么端口，都在 .env 里配。
+#
+# 站的地址与引导页地址来自环境变量（Caddy 的 {$VAR:默认值} 语法），
+# 所以**不需要改这个文件**，改 .env 就行 —— 这样升级时 git pull 不会冲突。
+# ============================================================================
+
+{
+	# 无公网域名，ACME 的 HTTP-01 验证不可用，关掉自动 HTTPS
+	auto_https off
+	# 管理接口只监听本机
+	admin 127.0.0.1:2019
+	# 内网访问，日志不需要记全量
+	log {
+		output stderr
+		level ERROR
+	}
+}
+
+# ---------------------------------------------------------------------------
+# 主站
+#
+# 这里**故意不写主机名**，只写 `:<端口>`。
+#
+# 为什么：Caddy 是按 Host 头匹配站点地址的，写成 `https://192.168.1.112:9443`
+# 就意味着请求的 Host 头必须**逐字**等于 192.168.1.112:9443 —— 换成主机名、
+# 换台设备、端口写错一位，得到的都是一个 404，而错误信息完全不提"Host 不匹配"。
+# 内网平台只有一个入口、一张证书，根本不需要按名字分流，所以直接绑端口：
+# 任何 Host 都进同一个站。少一个必须保持同步的配置项，就少一类"改了一处忘了另一处"。
+#
+# 端口来自 .env 的 WL_HTTPS_PORT，与 docker-compose.yml 里的映射是同一个变量。
+# 证书仍然必须有 IP SAN（见 deploy/ca/gen-certs.sh）—— 那是浏览器校验 TLS 用的，
+# 和这里按不按 Host 匹配无关。
+# ---------------------------------------------------------------------------
+:{$WL_HTTPS_PORT:8443} {
+	# 一张多 SAN 证书同时覆盖主机名、mDNS 名和 IP
+	tls /certs/server.crt /certs/server.key
+
+	encode zstd gzip
+
+	# 探针：onboarding 页用它判断"证书是否已被信任"。走 no-cors，
+	# 请求能成功发出且不报错就说明证书链被接受了。
+	respond /healthz "ok" 200
+
+	# 明文引导页（证书未装时的唯一入口）
+	#
+	# ⚠️ 这里**不能**用 {host} 占位符。{host} 会带上端口，主站一旦跑在
+	# 非标准端口上，拼出来就是 http://192.168.1.112:8443:8080/onboard
+	# 这种坏地址（浏览器会直接当成非法 URL）。所以用一个完整前缀，
+	# 由 .env 提供，默认值与默认的引导页端口一致。
+	redir /onboard {$WL_ONBOARD_BASE:http://192.168.1.100:8080}/onboard 302
+
+	# API 与下载：交给应用容器。
+	# flush_interval -1 关掉响应缓冲，让大文件下载与上传立即可见地流动，
+	# 而不是先被 Caddy 攒在内存里 —— 这是内网大文件场景的关键一行。
+	handle /api/* {
+		reverse_proxy app:3000 {
+			flush_interval -1
+			# **覆写** X-Forwarded-For，而不是追加。
+			#
+			# Caddy 默认会把客户端 IP 追加到已有的 XFF 之后。如果后端信任
+			# 这个头（trustProxy），那么客户端自带的伪造值就有机会被采纳。
+			# 后端已经改成只信任 docker 网段了，这里是第二道防线：
+			# 直接把客户端传来的那个头丢掉，只写真实来源。
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+			transport http {
+				read_timeout 3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
+	# 其余路径全部交给前端外壳（SPA）
+	handle {
+		reverse_proxy app:3000 {
+			flush_interval -1
+		}
+	}
+
+	# 安全响应头。内网也需要：任何一台被感染的终端都在同一个广播域里。
+	header {
+		# 站点只在内网，不需要被搜索引擎收录
+		X-Robots-Tag "noindex, nofollow"
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy same-origin
+		# 明确允许的内容源：本站 + blob（预览）+ data（内联小图）
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+	}
+}
+
+# ---------------------------------------------------------------------------
+# 明文引导页
+#
+# 为什么保留明文：根证书得先通过某种方式送到设备上，而"送证书"这件事本身
+# 不可能依赖该证书。这是先有鸡还是先有蛋。所以这个端口只提供引导页与证书下载，
+# 明文期间没有任何业务数据经过。
+#
+# 它必须**在宿主机上发布**（见 docker-compose.yml 的 WL_ONBOARD_PORT）——
+# 早先这个文件里监听 :8080 但 compose 从没发布过它，
+# 于是文档里让成员访问的 http://<IP>:8080/onboard 根本打不开。
+# ---------------------------------------------------------------------------
+http://:8080 {
+	root * /srv/onboard
+
+	# ⚠️ 这一行不能省。
+	#
+	# 站点根目录是 /srv/onboard，所以请求 /onboard 会被解析成磁盘上的
+	# /srv/onboard/onboard —— 那个目录不存在，直接 404。
+	# 而**所有**分发给成员的链接都写的是 :8080/onboard：gen-certs.sh 打印的、
+	# 部署指南里的、证书分发指南里的、引导页自己给出的、网页里提示的。
+	# 没有这一行，成员打开引导页只会看到 404，装证书这条路整个走不通。
+	redir /onboard / 302
+
+	# iOS 安装描述文件要求这个 MIME 类型。
+	#
+	# .mobileconfig 不在 Caddy 内置的类型表里，默认会以 text/xml 或
+	# application/octet-stream 发出，那样 Safari 只会把 plist 当文本渲染出来，
+	# **不会弹出"此网站正尝试下载一个配置描述文件"的安装流程**。
+	# 成员会以为下载成功了，实际什么都没装上 —— 而 iOS 的证书安装本来就
+	# 是全平台里最容易卡住的一步。
+	header /certs/*.mobileconfig Content-Type "application/x-apple-aspen-config"
+	# 一键脚本按二进制下载，避免某些浏览器给它追加 .txt 后缀
+	header /certs/*.cmd Content-Type "application/octet-stream"
+
+	file_server
+	encode gzip
+	header {
+		Cache-Control "no-store"
+		-Server
+	}
+}

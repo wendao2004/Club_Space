@@ -1,0 +1,80 @@
+# ============================================================================
+# 按需重任务：格式转换与视频转码
+#
+# 这个文件**默认不启动**。它和主 docker-compose.yml 是两套编排，用 profiles
+# 控制，理由来自评审团对内存结论的强制要求：
+#
+#   Gotenberg 官方口径至少 2GB/2核（镜像里同时是 LibreOffice + Chromium）；
+#   Stirling-PDF 是 Java/Spring Boot，单次转换真实 0.8-1.5GB；
+#   ffmpeg 软转码会吃满所有核。
+#
+# 而 NAS 整机 8GB 里，fnOS 自己 + Samba + 相册索引 + 影视转码长期占 2-5GB，
+# 留给业务容器的只有 2-4GB。把这些服务常驻进去，必然 OOM，而且会连带把
+# smbd / btrfs 一起杀掉（那是整机级故障，不只是应用崩了）。
+#
+# 所以：**按需拉起、用完即停**，且同一时刻只跑一个重任务。
+#
+# 用法（在 deploy/ 目录下）：
+#   docker compose -f docker-compose.yml -f heavy-tools.compose.yml --profile convert up -d
+#   ...转换完...
+#   docker compose -f docker-compose.yml -f heavy-tools.compose.yml --profile convert stop
+#
+# 启动后在主 .env 里设置：
+#   WL_CONVERT_SERVICE_URL=http://wl-convert:3000
+# 重启 app 容器，工具集里的"转为 PDF"就会从"未启用"变成可用。
+# ============================================================================
+
+name: wl-club
+
+services:
+  # --------------------------------------------------------------------------
+  # 文档转换：Word / Excel / PPT / HTML / Markdown → PDF
+  #
+  # 选 Gotenberg 而不是自己包 LibreOffice：它已经把并发控制、超时、
+  # 临时文件清理这些容易做错的事做好了。
+  #
+  # ⚠️ **中文字体必须烤进镜像**：基础镜像里没有 CJK 字体，转换出来的中文
+  #    会变成方框或直接丢字。这是"Word 转 PDF"这个需求第一项能否可用的命门，
+  #    也是这类部署最常见的翻车点。
+  # --------------------------------------------------------------------------
+  convert:
+    build:
+      context: ./convert
+      dockerfile: Dockerfile
+    image: wl-club/convert:1
+    container_name: wl-convert
+    profiles: ["convert"]
+    restart: "no"
+    expose:
+      - "3000"
+    # ⚠️ 这行不能省：没有它，convert 会被塞进自动创建的默认网络
+    # （wl-club_default），而 app 在 edge 上 —— 两个容器没有任何共同网络，
+    # app 里 fetch('http://wl-convert:3000') 会在 DNS 阶段就报
+    # getaddrinfo ENOTFOUND wl-convert。容器看起来 Up、health 也正常，
+    # 只有"转为 PDF"永远失败，极难排查。
+    # 重任务不发布端口，只让 app 容器在**内部网络上**访问。
+    networks:
+      - edge
+    mem_limit: 2048m
+    # memswap 与 mem 相等 = 禁用 swap。
+    # 这是刻意的：超限时让内核只杀掉这个容器，而不是把整机拖进交换风暴。
+    memswap_limit: 2048m
+    cpus: "2"
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    # 相对权重调低，让 NAS 自己的存储服务在争抢时优先
+    cpu_shares: 256
+    blkio_config:
+      weight: 200
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    environment:
+      # 并发固定为 1：配合内存上限，保证"同一时刻只有一个转换在跑"
+      GOTENBERG_LIBREOFFICE_RESTART_AFTER: "20"
+      GOTENBERG_API_TIMEOUT: "120s"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

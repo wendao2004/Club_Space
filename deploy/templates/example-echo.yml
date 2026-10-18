@@ -1,0 +1,56 @@
+# 示例模板：一个最小的扩展
+#
+# 这不是实用功能，只用来演示格式。真实的扩展可以照这个结构写。
+#
+# 命名规则：文件名只能用字母、数字、下划线、连字符，扩展名必须是 .yml
+# 在「运维 → 安装扩展」里填的名字就是文件名去掉 .yml（这里是 example-echo）
+
+name: wl-extension-example
+
+services:
+  example-echo:
+    # 用一个极小的镜像演示。真实扩展请钉住具体版本，不要用 latest ——
+    # latest 会在某次重启后悄悄变成别的版本，而你无法回滚到之前的状态。
+    image: alpine:3.20
+    container_name: wl-extension-example
+
+    # 这个示例本身什么都不做，只是定期打印一行日志
+    command: ["sh", "-c", "while true; do echo '扩展正在运行'; sleep 60; done"]
+
+    # 不要对外发布端口：任何需要被访问的扩展都应该通过 Caddy 按路径转发，
+    # 或者干脆只作为内部服务供主栈调用
+    expose:
+      - "8080"
+
+    # ⚠️ NAS 的内存预算很紧（业务容器总共只有 2-4GB）。
+    # 每个扩展都必须设上限，否则一个写错的容器会把整机拖死。
+    mem_limit: 32m
+    memswap_limit: 32m
+    cpus: "0.2"
+    pids_limit: 64
+
+    # 安全加固：这几条对"以宿主机权限运行的容器"尤其重要
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m
+    cap_drop:
+      - ALL
+
+    # 用 unless-stopped 而不是 always：手动停掉之后不会自己爬起来，
+    # 方便在它出问题时彻底停住排查
+    restart: unless-stopped
+
+    # 日志轮转：不配的话日志会写满与 NAS 存储共用的盘
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
+
+    # 刻意不做的几件事（写成注释是为了让后来的扩展作者看到）：
+    #   - 不挂 /var/run/docker.sock（那是宿主机 root）
+    #   - 不挂宿主根目录（/:/host 这类）
+    #   - 不用 privileged: true
+    #   - 不挂网络模式为 host

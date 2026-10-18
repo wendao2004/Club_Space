@@ -1,0 +1,258 @@
+# ============================================================================
+# 社团内网平台 · 部署编排
+#
+# 设计依据来自 AI 评审团的强制收敛，三条不能破的线：
+#
+#   1. **入口只留一个。** 整个栈只有 caddy 对外发布端口（443/80）。
+#      评审发现多个方案各自起了 Caddy/nginx 当入口，职责重叠且多占内存。
+#
+#   2. **只在局域网、单一主机名 + 路径路由，不用子域。**
+#      评审的 blocker 级发现：家用路由器不会替局域网客户端解析 *.nas.lan，
+#      子域方案在真实网络里根本解析不了。所以这里全部收敛到同一个 origin
+#      下按路径分流 —— 顺带还拿到了同源（无 CORS）、单证书、
+#      Service Worker 作用域在根这三个好处。
+#
+#   3. **每个容器都有内存硬上限，且 forgo swap。**
+#      整机 8GB，fnOS 自身 + Samba + 相册索引 + 影视转码长期占 2-5GB，
+#      留给业务容器的只有 2-4GB。没有上限的容器会把 NAS 拖死，
+#      连带 smbd/btrfs 一起被 OOM 杀掉。
+#
+# 重任务（LibreOffice 转换、ffmpeg 转码）**不在这个文件里常驻** ——
+# 它们单实例就要 1-2GB，见 deploy/heavy-tools.compose.yml，由管理员按需拉起。
+# ============================================================================
+
+name: wl-club
+
+services:
+  # --------------------------------------------------------------------------
+  # 唯一的对外入口：TLS 终点 + 反向代理 + 前端静态资源
+  # 稳态内存约 20-40MB（Go 写的，且默认流式转发，不把请求体读进内存）
+  # --------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: wl-caddy
+    restart: unless-stopped
+    ports:
+      # ⚠️ 宿主机端口刻意避开 80/443。
+      #
+      # 很多 NAS 系统把 80/443 留给自己的 Web 管理界面 —— 飞牛 fnOS 就是如此
+      # （它的 nginx 同时占着 80、443、5666）。绑上去 compose 直接报
+      # "address already in use" 起不来，而报错信息不会告诉你"是系统占的"。
+      #
+      # ⚠️ 而且在同一台机器上跑别的东西时，8443 之类的"常用替代端口"也可能被占
+      # （本机实测就被一个 code-server 占了）。部署前先 `ss -tln` 看一眼。
+      #
+      # 映射两侧用**同一个变量**：Caddyfile 里的站点地址是 `:{$WL_HTTPS_PORT}`，
+      # 也就是 Caddy 在容器内监听的端口就是它。写死成 `:8443` 的话，
+      # 把 WL_HTTPS_PORT 改成 9443 之后就会变成宿主机 9443 → 容器 8443，
+      # 而 Caddy 在容器里听的是 9443 —— 端口通、服务不通，表现为连接被拒。
+      - "${WL_HTTPS_PORT:-8443}:${WL_HTTPS_PORT:-8443}"
+      # 明文引导页端口。**必须发布**：证书还没装到成员设备上时，
+      # 这是唯一能打开这个站点的入口。这里原来漏了发布，
+      # 导致文档里让成员访问的 http://<IP>:8080/onboard 打不开。
+      - "${WL_ONBOARD_PORT:-8080}:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 内部 CA 签发的证书（由 ca/gen-certs.sh 生成，不进 git）
+      - ./ca:/certs:ro
+      # 成员进场用的明文引导页（在证书被信任之前，这是唯一能打开的页面）
+      - ./onboard:/srv/onboard:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      # Caddyfile 里的 {$WL_HTTPS_PORT} / {$WL_ONBOARD_BASE} 从这里取值，
+      # 所以换端口**不需要改 Caddyfile**，改 .env 就行。
+      WL_HTTPS_PORT: ${WL_HTTPS_PORT:-8443}
+      WL_ONBOARD_BASE: ${WL_ONBOARD_BASE:-http://192.168.1.100:8080}
+      # 软上限，让 Go 的 GC 提前收敛，避免它跟着峰值一路涨上去
+      GOMEMLIMIT: 128MiB
+      GOMAXPROCS: "2"
+    # 与 app 同在 edge 网络上，这样 Caddy 才能反代到它
+    networks:
+      - edge
+    mem_limit: 192m
+    memswap_limit: 192m
+    logging: &logging
+      driver: json-file
+      options:
+        # 不配日志轮转会写满与 NAS 存储共用的盘 —— 这是典型的"跑三个月才炸"
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # --------------------------------------------------------------------------
+  # 应用：前端外壳 + 文件/工具 API + 任务队列 + 聊天 + 记账 + 象棋
+  # 稳态约 150-250MB（Node + SQLite 页缓存）
+  # --------------------------------------------------------------------------
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: wl-club/app:1
+    container_name: wl-app
+    restart: unless-stopped
+    # 不发布端口：只有 Caddy 能看到它
+    expose:
+      - "3000"
+    volumes:
+      # 全部运行时数据落在一个绑定目录里。
+      # 这样做是为了让备份能用**一次原子快照**覆盖数据库 + 上传文件 + 配置，
+      # 避免"先 dump 库还是先拷文件"那个经典的一致性缺口。
+      - ${WL_DATA_DIR:-/vol1/docker/wl-club/data}:/data
+      # 管理员运维操作需要读 compose 文件与模板目录。
+      #
+      # 这里**只挂这两个具体路径**，而不是 `./:/compose:ro`。原因是后者会把整个
+      # deploy 目录暴露给应用容器 —— 包括 ca/ca.key（内网根证书的私钥）和 .env。
+      # 虽然容器本来就能通过环境变量拿到 .env 里的值，但把私钥交给一个
+      # 每天处理用户上传文件的进程是没必要的风险扩大。
+      #
+      # ⚠️ **刻意不挂 /var/run/docker.sock。** 挂上它等于把这个容器的权限
+      # 提升到宿主机 root —— 而这个容器每天在解析用户上传的文件
+      # （转换服务是经典的 RCE 温床）。持有 socket 的是下面独立的 ops-runner 容器。
+      - ./docker-compose.yml:/compose/docker-compose.yml:ro
+      - ./templates:/compose/templates:ro
+    environment:
+      NODE_ENV: production
+      WL_DATA_DIR: /data
+      WL_HOST: 0.0.0.0
+      WL_PORT: "3000"
+      WL_SITE_NAME: ${WL_SITE_NAME:-社团空间}
+      # 会话签名密钥。**缺失时生产环境会拒绝启动** —— 这是刻意的：
+      # 用一个每次重启都换的随机密钥会让所有人反复掉线，而且没人会注意到配置缺失。
+      WL_SESSION_SECRET: ${WL_SESSION_SECRET:?必须在 .env 中设置 WL_SESSION_SECRET}
+      # 单文件上传上限。**0 = 不限，也是默认值。**
+      WL_MAX_UPLOAD_BYTES: ${WL_MAX_UPLOAD_BYTES:-0}
+      # ⚠️ 这一行不能漏。写在 .env 里的变量**不会自动进容器** ——
+      # compose 只把 environment 段里列出的传进去。漏了它的表现是：
+      # .env 里改了没反应，服务端悄悄用内置默认值，而你以为配上了。
+      # （这个文件里每一个 ${...} 都是这个道理。）
+      WL_MIN_FREE_BYTES: ${WL_MIN_FREE_BYTES:-2147483648}
+      # 重任务服务的地址。留空时相关工具在界面上显示为"未启用"而不是静默失败。
+      WL_CONVERT_SERVICE_URL: ${WL_CONVERT_SERVICE_URL:-}
+      WL_TOOLS_ENABLED: ${WL_TOOLS_ENABLED:-true}
+
+      # 只信任真实反向代理的地址。
+      # 不设的话 req.ip 会是 Caddy 容器的地址（所有人共用一个限流桶）；
+      # 设成 `true` 又会让 X-Forwarded-For 可伪造（限流与 IP 白名单同时失效）。
+      # 所以这里给 docker 网络的网段。
+      WL_TRUSTED_PROXIES: ${WL_TRUSTED_PROXIES:-172.16.0.0/12}
+
+      # ---- 管理员运维管控（默认关闭）----
+      # 打开它之前请先读完 docs/部署指南.md 的「启用管理员运维」一节。
+      # 关键点：能操作 Docker = 能拿到宿主机 root，所以这里要求 TOTP 二次验证，
+      # 且只暴露枚举好的固定操作（没有任意命令终端）。
+      WL_ADMIN_DOCKER_ENABLED: ${WL_ADMIN_DOCKER_ENABLED:-0}
+      WL_ADMIN_COMPOSE_FILE: /compose/docker-compose.yml
+      WL_ADMIN_TEMPLATES_DIR: /compose/templates
+      # 允许操作的服务白名单。**只列你确实需要从网页上启停的服务**，
+      # 尤其不要把承载这个应用自身的服务列进来（停了自己就访问不了了）。
+      WL_ADMIN_ALLOWED_SERVICES: ${WL_ADMIN_ALLOWED_SERVICES:-convert}
+      # 可选：限制来源 IP（逗号分隔）。内网平台建议填管理员的固定 IP。
+      WL_ADMIN_ALLOWED_IPS: ${WL_ADMIN_ALLOWED_IPS:-}
+      WL_ADMIN_TIMEOUT_MS: ${WL_ADMIN_TIMEOUT_MS:-30000}
+      # 命令转发给独立的执行器容器，而不是在本容器里执行。
+      # 这是让"应用容器没有 docker.sock"成为默认形态的关键一行。
+      WL_ADMIN_RUNNER_URL: ${WL_ADMIN_RUNNER_URL:-http://ops-runner:9119}
+      WL_ADMIN_RUNNER_TOKEN: ${WL_ADMIN_RUNNER_TOKEN:-}
+    mem_limit: ${WL_APP_MEMORY:-512m}
+    memswap_limit: ${WL_APP_MEMORY:-512m}
+    cpus: "${WL_APP_CPUS:-1.5}"
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - edge
+      - ops
+    logging: *logging
+
+  # --------------------------------------------------------------------------
+  # 独立的运维执行器
+  #
+  # 只有这个容器持有 /var/run/docker.sock（也就是宿主机 root 等价权限）。
+  # 它不处理任何用户上传的内容、不提供任何业务接口、只接受一个来源
+  # （应用容器，通过 internal 网络），并且**自己再校验一遍 argv 白名单** ——
+  # 不信任调用方。
+  #
+  # 常驻内存约 15-25MB（一个朴素的 node:http 服务）。
+  # --------------------------------------------------------------------------
+  ops-runner:
+    build:
+      context: ./ops-runner
+      dockerfile: Dockerfile
+    image: wl-club/ops-runner:1
+    container_name: wl-ops-runner
+    restart: unless-stopped
+    # 默认**不启动**。运维管控是可选功能，`docker compose up -d` 不应该
+    # 顺手把一个持有 docker.sock 的容器拉起来 —— 那就不是"默认关闭"了。
+    # 要用的时候：docker compose --profile admin up -d
+    profiles: ["admin"]
+    # 不发布端口：只在 internal 网络上可见
+    expose:
+      - "9119"
+    volumes:
+      # 唯一一个挂 socket 的地方，也是这个服务存在的全部理由
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker-compose.yml:/compose/docker-compose.yml:ro
+      - ./templates:/compose/templates:ro
+      # ⚠️ 这一行是为了让 `docker compose -f /compose/docker-compose.yml ...` 能跑通。
+      #
+      # 执行器是在**它自己的容器里**执行 docker compose 的，而 compose 会对
+      # 整份文件做变量插值。主文件里有 ${WL_SESSION_SECRET:?...}，缺值即报错 ——
+      # 执行器环境里没有这个变量，于是"查看服务清单/日志/启停服务"全部在
+      # 插值阶段就退出，只有 docker ps 能用。
+      #
+      # 用占位值糊弄过去是不行的：一旦管理员通过网页重启 app，compose 会拿
+      # 那些占位值重建容器，app 的会话密钥就被换成了假的。所以必须给真值。
+      # 这不是新的风险敞口 —— 持有 docker.sock 本来就等于宿主机 root。
+      - ./.env:/compose/.env:ro
+    environment:
+      # 这里**不能**写成 ${WL_ADMIN_RUNNER_TOKEN:?...}。compose 会在解析阶段
+      # 就替换整份文件里的变量，`:?` 的语义是"没设置就让整份文件报错退出" ——
+      # 于是哪怕部署者根本不打算启用运维管控，`docker compose up` 也会直接失败，
+      # 而 .env.example 里当时压根没列这个变量。改成 `:-` 之后，
+      # 令牌为空时执行器自己会拒绝启动（runner.mjs 里有这道闸门），
+      # 且它本来就在 admin profile 里 —— 不启用就根本不会起。
+      OPS_TOKEN: ${WL_ADMIN_RUNNER_TOKEN:-}
+      OPS_COMPOSE_FILE: /compose/docker-compose.yml
+      OPS_TEMPLATES_DIR: /compose/templates
+      # 执行器侧的服务白名单（与应用的清单保持一致，两边都要校验）
+      OPS_ALLOWED_SERVICES: ${WL_ADMIN_ALLOWED_SERVICES:-convert}
+    # ⚠️ 执行器里的进程以非 root 用户运行（见 ops-runner/Dockerfile 的 USER ops），
+    # 而宿主机的 /var/run/docker.sock 是 root:docker 权限 0660 的 bind mount ——
+    # 不把宿主机的 docker 组 GID 附加进来，进程根本打不开 socket，
+    # 每个运维操作都会报 permission denied while trying to connect to the Docker daemon。
+    #
+    # 取值：在 NAS 上跑 `getent group docker | cut -d: -f3`（常见是 999/994/998）。
+    # 填错的表现是"运维页面里每个操作都报 permission denied"，而那看起来
+    # 像是平台 bug 而不像是配置问题。
+    group_add:
+      - "${WL_DOCKER_GID:-994}"
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.5"
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      # 只挂在 ops 网络上：这个网络是 internal 的，没有默认路由，
+      # 因此即使执行器被攻破也无法主动外联
+      - ops
+    logging: *logging
+
+networks:
+  # 面向局域网的前端网络（Caddy 与 app 用）
+  edge:
+    driver: bridge
+  # 内部控制网络：无默认路由，只有 app 与 ops-runner 在上面
+  ops:
+    driver: bridge
+    internal: true
+
+volumes:
+  caddy_data:
+  caddy_config:
