@@ -2,6 +2,12 @@
  * 基础样式与通用原语。
  *
  * 这里只放"全站都一样的规则"，组件私有的样式一律写在组件里（scoped）。
+ *
+ * 工艺约定（评审团定稿）：
+ *  - 控件一律 32px 高、4px 圆角；卡片/窗口 8px 圆角；
+ *  - 焦点可见：键盘焦点统一 accent 描边（输入类用 Win11 的下划线式）；
+ *  - 标签（chip）只有"底色 + 文字"两个要素，永远没有描边；
+ *  - 颜色只在语义处出现（金额、状态、危险），装饰一律用中性色。
  */
 
 *,
@@ -16,6 +22,14 @@ body,
   height: 100%;
   margin: 0;
   padding: 0;
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
 }
 
 body {
@@ -42,6 +56,16 @@ textarea,
   user-select: text;
 }
 
+/* 浏览器自己画的部分也要跟着设计系统走：选中、光标 */
+::selection {
+  background: var(--selection-bg);
+}
+
+input,
+textarea {
+  caret-color: var(--accent);
+}
+
 button {
   font: inherit;
   color: inherit;
@@ -58,6 +82,19 @@ a {
 
 a:hover {
   text-decoration: underline;
+}
+
+/* 键盘焦点：统一 accent 描边；输入类有自己的下划线式，单独豁免 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wl-input:focus-visible,
+.wl-select:focus-visible,
+.wl-textarea:focus-visible,
+.start__search-input:focus-visible {
+  outline: none;
 }
 
 /* ---------------------------------------------------------------- 滚动条 */
@@ -94,26 +131,28 @@ a:hover {
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  height: 32px;
-  padding: 0 var(--space-3);
+  height: var(--ctl-h);
+  padding: 0 14px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: var(--surface-2);
+  background: var(--surface-1);
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--fs-body);
   white-space: nowrap;
   transition:
     background var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out);
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .wl-btn:hover:not(:disabled) {
-  background: var(--surface-3);
+  background: var(--surface-2);
   border-color: var(--border-strong);
 }
 
 .wl-btn:active:not(:disabled) {
   background: var(--pressed);
+  color: var(--text-secondary);
 }
 
 .wl-btn:disabled {
@@ -127,6 +166,7 @@ a:hover {
   border-color: transparent;
   color: var(--accent-text);
   font-weight: 600;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .wl-btn--primary:hover:not(:disabled) {
@@ -135,6 +175,8 @@ a:hover {
 
 .wl-btn--primary:active:not(:disabled) {
   background: var(--accent-pressed);
+  color: var(--accent-text);
+  box-shadow: none;
 }
 
 .wl-btn--danger {
@@ -146,6 +188,7 @@ a:hover {
 
 .wl-btn--danger:hover:not(:disabled) {
   background: var(--danger);
+  border-color: transparent;
   color: #fff;
 }
 
@@ -156,17 +199,20 @@ a:hover {
 
 .wl-btn--ghost:hover:not(:disabled) {
   background: var(--hover);
+  border-color: transparent;
 }
 
 .wl-icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
-  transition: background var(--dur-fast) var(--ease-out);
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .wl-icon-btn:hover:not(:disabled) {
@@ -185,17 +231,18 @@ a:hover {
 .wl-select,
 .wl-textarea {
   width: 100%;
-  height: 32px;
+  height: var(--ctl-h);
   padding: 0 var(--space-3);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  border-bottom-color: var(--border-strong);
-  background: var(--surface-solid);
+  background: var(--surface-1);
   color: var(--text);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-body);
   outline: none;
-  transition: border-color var(--dur-fast) var(--ease-out);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
 }
 
 .wl-textarea {
@@ -205,11 +252,18 @@ a:hover {
   resize: vertical;
 }
 
+.wl-input:hover:not(:disabled),
+.wl-select:hover:not(:disabled),
+.wl-textarea:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+/* Win11 的焦点是"底边一根 accent 线"，不是整圈描边 */
 .wl-input:focus,
 .wl-select:focus,
 .wl-textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  border-color: var(--border-strong);
+  box-shadow: inset 0 -2px 0 0 var(--accent);
 }
 
 .wl-input::placeholder,
@@ -217,10 +271,17 @@ a:hover {
   color: var(--text-tertiary);
 }
 
+.wl-input:disabled,
+.wl-select:disabled,
+.wl-textarea:disabled {
+  background: var(--surface-2);
+  color: var(--text-disabled);
+}
+
 .wl-label {
   display: block;
   margin-bottom: var(--space-1);
-  font-size: 12px;
+  font-size: var(--fs-caption);
   color: var(--text-secondary);
 }
 
@@ -230,7 +291,7 @@ a:hover {
 
 .wl-hint {
   margin-top: var(--space-1);
-  font-size: 12px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
 }
 
@@ -238,20 +299,23 @@ a:hover {
 
 .wl-card {
   background: var(--surface-1);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
 }
 
+/* 标签（chip）：只有底色和文字，没有描边 */
 .wl-badge {
   display: inline-flex;
   align-items: center;
-  height: 20px;
+  height: var(--chip-h);
   padding: 0 var(--space-2);
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
-  background: var(--surface-3);
+  background: var(--chip-bg);
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .wl-badge--accent {
@@ -283,6 +347,11 @@ a:hover {
   padding: var(--space-6);
   color: var(--text-tertiary);
   text-align: center;
+  font-size: var(--fs-body);
+}
+
+.wl-empty svg {
+  opacity: 0.65;
 }
 
 .wl-spinner {
