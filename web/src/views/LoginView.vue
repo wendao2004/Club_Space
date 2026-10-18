@@ -301,29 +301,49 @@ function switchMode(): void {
   overflow: auto;
 }
 
+/* 与桌面壁纸同源的"晨雾光斑"：登录页也是这套系统的一部分 */
 .login__bg {
   position: absolute;
   inset: 0;
-  background: linear-gradient(150deg, var(--wallpaper-1), var(--wallpaper-2) 45%, var(--wallpaper-3));
+  background:
+    radial-gradient(1100px 620px at 78% 14%, rgba(116, 178, 235, 0.5), transparent 62%),
+    radial-gradient(880px 520px at 12% 88%, rgba(150, 196, 240, 0.45), transparent 66%),
+    radial-gradient(700px 420px at 55% 62%, rgba(255, 255, 255, 0.65), transparent 70%),
+    linear-gradient(158deg, #eaf3fc 0%, #d9e9f8 48%, #eef5fb 100%);
 }
 
 .login__bg::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: radial-gradient(900px 500px at 25% 15%, rgba(255, 255, 255, 0.12), transparent 60%);
+  background:
+    radial-gradient(1400px 900px at 50% -12%, rgba(255, 255, 255, 0.35), transparent 60%),
+    radial-gradient(1200px 800px at 50% 118%, rgba(16, 40, 72, 0.06), transparent 62%);
+}
+
+[data-theme='dark'] .login__bg {
+  background:
+    radial-gradient(1100px 620px at 78% 12%, rgba(52, 104, 168, 0.55), transparent 62%),
+    radial-gradient(880px 520px at 14% 86%, rgba(30, 64, 110, 0.5), transparent 66%),
+    linear-gradient(158deg, #0d1420 0%, #101c2e 50%, #0c1119 100%);
+}
+
+[data-theme='dark'] .login__bg::after {
+  background:
+    radial-gradient(1400px 900px at 50% -12%, rgba(255, 255, 255, 0.06), transparent 60%),
+    radial-gradient(1200px 800px at 50% 118%, rgba(0, 0, 0, 0.35), transparent 62%);
 }
 
 .login__card {
   position: relative;
   z-index: 1;
   width: 100%;
-  max-width: 400px;
-  padding: var(--space-5);
+  max-width: 380px;
+  padding: var(--space-6) var(--space-5) var(--space-5);
   border-radius: var(--radius-lg);
-  border: 1px solid var(--border-strong);
-  background: var(--surface-1);
-  backdrop-filter: blur(40px) saturate(180%);
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  backdrop-filter: blur(40px) saturate(1.6);
   box-shadow: var(--shadow-window);
 }
 
@@ -336,9 +356,9 @@ function switchMode(): void {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 3px;
-  width: 32px;
-  height: 32px;
-  margin: 0 auto var(--space-3);
+  width: 36px;
+  height: 36px;
+  margin: 0 auto var(--space-4);
 }
 
 .login__logo span {
@@ -348,21 +368,22 @@ function switchMode(): void {
 
 .login__title {
   margin: 0;
-  font-size: 21px;
+  font-size: 24px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
+  line-height: var(--lh-tight);
 }
 
 .login__subtitle {
   margin: var(--space-1) 0 0;
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   color: var(--text-secondary);
   line-height: 1.5;
 }
 
 .login__error {
   margin: var(--space-1) 0 0;
-  font-size: 12px;
+  font-size: var(--fs-caption);
   color: var(--danger);
 }
 
@@ -383,7 +404,7 @@ function switchMode(): void {
   border-radius: var(--radius-sm);
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   line-height: 1.45;
 }
 
@@ -391,14 +412,14 @@ function switchMode(): void {
   width: 100%;
   height: 38px;
   margin-top: var(--space-4);
-  font-size: 14px;
+  font-size: var(--fs-subtitle);
 }
 
 .login__switch {
   display: block;
   width: 100%;
   margin-top: var(--space-3);
-  font-size: 12.5px;
+  font-size: var(--fs-body);
   color: var(--accent);
   text-align: center;
 }
@@ -410,8 +431,8 @@ function switchMode(): void {
 .login__note {
   margin: var(--space-4) 0 0;
   padding-top: var(--space-3);
-  border-top: 1px solid var(--border-subtle);
-  font-size: 11.5px;
+  border-top: 1px solid var(--line-hair);
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   text-align: center;
   line-height: 1.5;

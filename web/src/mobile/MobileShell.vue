@@ -218,6 +218,7 @@ watch(activeTab, (tab) => {
     <main class="m__body wl-scroll">
       <!-- 应用 -->
       <section v-if="activeTab === 'apps'" class="pane">
+        <h1 class="pane__title">应用</h1>
         <div v-if="visibleApps.length" class="apps">
           <button
             v-for="app in visibleApps"
@@ -225,8 +226,8 @@ watch(activeTab, (tab) => {
             class="apps__tile"
             @click="launchApp(app)"
           >
-            <span class="apps__icon" :style="app.tint ? { background: app.tint } : undefined">
-              <Icon :name="app.icon" :size="26" />
+            <span class="apps__icon" :style="app.tint ? { '--tint': app.tint } : undefined">
+              <Icon :name="app.icon" :size="24" />
             </span>
             <span class="apps__name">{{ app.name }}</span>
           </button>
@@ -448,7 +449,7 @@ watch(activeTab, (tab) => {
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-  background: var(--surface-solid);
+  background: var(--surface-0);
   color: var(--text);
   font-family: var(--font-ui);
 }
@@ -464,7 +465,15 @@ watch(activeTab, (tab) => {
   display: flex;
   flex-direction: column;
   min-height: 100%;
-  padding: var(--space-3);
+  padding: var(--space-4);
+}
+
+.pane__title {
+  margin: 0 0 var(--space-4);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: var(--lh-tight);
 }
 
 /* ---------------------------------------------------------------- 应用抽屉 */
@@ -472,8 +481,7 @@ watch(activeTab, (tab) => {
 .apps {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-3);
-  padding: var(--space-2) 0;
+  gap: var(--space-2);
 }
 
 .apps__tile {
@@ -491,19 +499,25 @@ watch(activeTab, (tab) => {
   background: var(--hover);
 }
 
+/* 与桌面同源的图标语言：主色 15% 淡底 + 主色线性字形 */
 .apps__icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 52px;
-  height: 52px;
+  width: 50px;
+  height: 50px;
   border-radius: var(--radius-lg);
-  background: var(--surface-3);
-  color: var(--accent-text);
+  background: rgba(127, 140, 156, 0.14);
+  background: color-mix(in srgb, var(--tint, #6b7686) 15%, transparent);
+  color: var(--tint, #6b7686);
+}
+
+[data-theme='dark'] .apps__icon {
+  color: color-mix(in srgb, var(--tint, #9aa5b1) 62%, #ffffff);
 }
 
 .apps__name {
-  font-size: 12.5px;
+  font-size: var(--fs-caption);
   color: var(--text-secondary);
   text-align: center;
   line-height: 1.3;
@@ -517,12 +531,12 @@ watch(activeTab, (tab) => {
   justify-content: space-between;
   gap: var(--space-2);
   flex: none;
-  min-height: 44px;
-  margin-bottom: var(--space-2);
+  min-height: 40px;
+  margin-bottom: var(--space-3);
 }
 
 .bar__title {
-  font-size: 15px;
+  font-size: var(--fs-title);
   font-weight: 600;
 }
 
@@ -546,23 +560,24 @@ watch(activeTab, (tab) => {
 .seg {
   display: inline-flex;
   padding: 2px;
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
 }
 
 .seg__btn {
   min-width: 68px;
-  height: 44px;
+  height: 36px;
   padding: 0 var(--space-3);
-  border-radius: var(--radius-sm);
-  font-size: 13px;
+  border-radius: 3px;
+  font-size: var(--fs-body);
   color: var(--text-secondary);
   transition: background var(--dur-fast) var(--ease-out);
 }
 
 .seg__btn--on {
-  background: var(--surface-raised);
+  background: var(--surface-3);
   color: var(--text);
   font-weight: 600;
 }
@@ -627,10 +642,20 @@ watch(activeTab, (tab) => {
 
 /* ---------------------------------------------------------------- 文件列表 */
 
+/* 一张分组卡：行间发丝线分隔，不再每行各自带框 */
 .frows {
   list-style: none;
   margin: 0;
   padding: 0;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.frows > li + li {
+  border-top: 1px solid var(--line-hair);
 }
 
 .frow {
@@ -639,8 +664,7 @@ watch(activeTab, (tab) => {
   gap: var(--space-3);
   width: 100%;
   min-height: 56px;
-  padding: var(--space-2) var(--space-1);
-  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
   text-align: left;
   transition: background var(--dur-fast) var(--ease-out);
 }
@@ -653,11 +677,9 @@ watch(activeTab, (tab) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   flex: none;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
   color: var(--text-secondary);
 }
 
@@ -678,7 +700,7 @@ watch(activeTab, (tab) => {
 
 .frow__meta {
   margin-top: 2px;
-  font-size: 12px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -702,10 +724,11 @@ watch(activeTab, (tab) => {
 }
 
 .jrow {
-  padding: var(--space-3);
-  border: 1px solid var(--border);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
   background: var(--surface-1);
+  box-shadow: var(--shadow-card);
 }
 
 .jrow__head {
@@ -763,9 +786,10 @@ watch(activeTab, (tab) => {
   gap: var(--space-3);
   padding: var(--space-4);
   margin-bottom: var(--space-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
   background: var(--surface-1);
+  box-shadow: var(--shadow-card);
 }
 
 .me__avatar {
@@ -799,7 +823,7 @@ watch(activeTab, (tab) => {
 
 .me__username {
   margin-top: 2px;
-  font-size: 12.5px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
 }
 
@@ -809,14 +833,15 @@ watch(activeTab, (tab) => {
   list-style: none;
   margin: 0 0 var(--space-3);
   padding: 0;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
   background: var(--surface-1);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 }
 
 .rows > li + li {
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--line-hair);
 }
 
 .row {
@@ -850,7 +875,7 @@ watch(activeTab, (tab) => {
 }
 
 .row__value {
-  font-size: 13px;
+  font-size: var(--fs-body);
   color: var(--text-tertiary);
 }
 
@@ -867,7 +892,7 @@ watch(activeTab, (tab) => {
 .me__site {
   margin: auto 0 var(--space-2);
   padding-top: var(--space-3);
-  font-size: 12px;
+  font-size: var(--fs-caption);
   color: var(--text-tertiary);
   text-align: center;
 }
@@ -880,8 +905,9 @@ watch(activeTab, (tab) => {
   align-items: stretch;
   height: calc(56px + env(safe-area-inset-bottom));
   padding-bottom: env(safe-area-inset-bottom);
-  border-top: 1px solid var(--border);
-  background: var(--surface-2);
+  border-top: 1px solid var(--line-hair);
+  background: var(--surface-raised);
+  backdrop-filter: blur(30px) saturate(1.8);
 }
 
 .tabs__item {
@@ -904,6 +930,10 @@ watch(activeTab, (tab) => {
   font-size: 12px;
 }
 
+.tabs__item--on .tabs__label {
+  font-weight: 600;
+}
+
 /* ---------------------------------------------------------------- 应用全屏层 */
 
 .app {
@@ -912,7 +942,7 @@ watch(activeTab, (tab) => {
   z-index: 10;
   display: flex;
   flex-direction: column;
-  background: var(--surface-solid);
+  background: var(--surface-0);
 }
 
 .app__bar {
@@ -922,8 +952,9 @@ watch(activeTab, (tab) => {
   flex: none;
   min-height: calc(56px + env(safe-area-inset-top));
   padding: env(safe-area-inset-top) var(--space-2) 0;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
+  border-bottom: 1px solid var(--line-hair);
+  background: var(--surface-raised);
+  backdrop-filter: blur(30px) saturate(1.8);
 }
 
 .app__back {
