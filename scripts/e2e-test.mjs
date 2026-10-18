@@ -499,6 +499,12 @@ async function testInstantUploadPrivacy() {
   const otherCookie = cookie
 
   // --- 乙把自己的文件传到**个人空间** ---
+  //
+  // ⚠️ 完成上传刻意**不带 ?space=** —— 这正是前端 api.ts uploadFile 的真实调用形态。
+  // 曾经服务端在 complete 时从 query 取 space（缺省 shared），于是个人空间的上传
+  // 被错建到共享空间：传进私人子目录的，两个空间里都列不出来（用户报的"看不到"）。
+  // 当年这条回归漏掉它，就是因为测试自作主张带了 ?space=private —— 测试写成了
+  // "迁就实现"，而不是"模仿用户"。
   const initPrivate = await api('/api/uploads', {
     method: 'POST',
     json: {
@@ -517,10 +523,49 @@ async function testInstantUploadPrivacy() {
       headers: { 'content-type': 'application/octet-stream' },
       body: secret,
     })
-    const donePrivate = await api(`/api/uploads/${initPrivate.body.uploadId}/complete?space=private`, {
+    const donePrivate = await api(`/api/uploads/${initPrivate.body.uploadId}/complete`, { method: 'POST' })
+    assert(donePrivate.status === 200, '乙的私密文件上传完成（完成请求不带 ?space=）')
+
+    // 落在**个人空间**根目录，而不是共享空间
+    const privateList = await api('/api/files?space=private')
+    const privateNames = (privateList.body.entries ?? []).map((e) => e.name)
+    assert(
+      privateNames.includes('乙的私密文件.txt'),
+      '上传的文件出现在乙的个人空间里',
+      privateNames.join('、') || '（空）',
+    )
+    const sharedListAfter = await api('/api/files?space=shared')
+    const sharedNamesAfter = (sharedListAfter.body.entries ?? []).map((e) => e.name)
+    assert(!sharedNamesAfter.includes('乙的私密文件.txt'), '它没有跑到共享空间去')
+
+    // ---- 再传进**个人空间里的子目录**（最狠的一条：错位后两个空间都列不出来）----
+    const pf = await api('/api/files/folder', {
       method: 'POST',
+      json: { parentId: null, name: '乙的私人目录', space: 'private' },
     })
-    assert(donePrivate.status === 200, '乙的私密文件上传完成')
+    assert(pf.status === 200, '乙在个人空间建了一个子目录')
+    const pfId = pf.body.node.id
+
+    const initInFolder = await api('/api/uploads', {
+      method: 'POST',
+      json: { parentId: pfId, name: '乙的目录内文件.txt', size: secret.byteLength, space: 'private' },
+    })
+    assert(initInFolder.status === 200, '往私人子目录开启上传')
+    await api(`/api/uploads/${initInFolder.body.uploadId}/chunk?offset=0`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: secret,
+    })
+    const doneInFolder = await api(`/api/uploads/${initInFolder.body.uploadId}/complete`, { method: 'POST' })
+    assert(doneInFolder.status === 200, '目录内的文件上传完成')
+
+    const insideList = await api(`/api/files?parent=${pfId}&space=private`)
+    const insideNames = (insideList.body.entries ?? []).map((e) => e.name)
+    assert(
+      insideNames.includes('乙的目录内文件.txt'),
+      '私人子目录里能看到刚传的文件（防"两个空间都列不出来"）',
+      insideNames.join('、') || '（空）',
+    )
   } else {
     bad('乙的私密文件上传', `instant=${JSON.stringify(initPrivate.body)}`)
   }
