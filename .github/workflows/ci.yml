@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+# 同一分支连续推送时，取消上一次还没跑完的，省 runner
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: 类型检查 + 构建 + 测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查（server tsc + web vue-tsc）
+        run: pnpm typecheck
+
+      - name: 构建前端
+        run: pnpm build
+
+      # --skip-ui：ui-smoke-test 需要一个真实的 Chrome（本仓库是在 Windows 上
+      # 用 CDP 驱动本机 Chrome 写的，Chromium 路径是写死的），CI 里跑不了。
+      # 其余 25 个套件全部在 CI 里跑，任何一条断言失败都会亮红。
+      - name: 测试（跳过需要真实浏览器的套件）
+        run: pnpm test:fast
+        env:
+          # 测试自己会起服务端与临时数据库，这里只是显式声明，便于排错
+          CI: 'true'
