@@ -184,6 +184,9 @@ services:
     build:
       context: ./ops-runner
       dockerfile: Dockerfile
+      # apk 源。留空用官方源（Fastly），国内网络常常慢到构建卡住，见 Dockerfile 里的说明。
+      args:
+        APK_MIRROR: ${WL_APK_MIRROR:-}
     image: wl-club/ops-runner:1
     container_name: wl-ops-runner
     restart: unless-stopped

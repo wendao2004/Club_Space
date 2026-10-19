@@ -9,8 +9,21 @@
 # 用 alpine 的 docker-cli 包（约 50MB），不需要完整 dockerd。
 FROM node:24-alpine
 
-# docker-cli 提供 docker 与 docker compose 两个命令
-RUN apk add --no-cache docker-cli docker-cli-compose \
+# apk 源（可选构建参数）。
+#
+# 默认走官方的 dl-cdn.alpinelinux.org（Fastly）。在国内网络上它可能慢到不可用 ——
+# 本项目实测：下一个小索引文件要 **1 分 45 秒**，装 docker-cli 会一直卡在 RUN 里，
+# 表现是 `docker compose build ops-runner` 十几分钟没有任何输出。
+# 换成国内镜像后同一文件 0.25 秒。
+#
+#   WL_APK_MIRROR=https://mirrors.aliyun.com
+#
+# （compose 里已把 build arg 接好，填进 .env 即可，不用改这个文件。）
+ARG APK_MIRROR=
+RUN if [ -n "$APK_MIRROR" ]; then \
+      sed -i "s|https://dl-cdn.alpinelinux.org|${APK_MIRROR}|g" /etc/apk/repositories; \
+    fi \
+    && apk add --no-cache docker-cli docker-cli-compose \
     && rm -rf /var/cache/apk/*
 
 WORKDIR /app

@@ -86,6 +86,8 @@ async function main() {
 
   const enabled = loadAdminConfig({
     WL_ADMIN_DOCKER_ENABLED: '1',
+    // 故意传进来：这个变量是早期设计的残留，现在必须被完全忽略
+    // （真正的秘密在 users.totp_secret，按人各存一份）
     WL_ADMIN_TOTP_SECRET: 'ABC',
     WL_ADMIN_ALLOWED_SERVICES: 'a, b ,c',
     WL_ADMIN_ALLOWED_IPS: '192.168.1.5, 10.0.0.2',

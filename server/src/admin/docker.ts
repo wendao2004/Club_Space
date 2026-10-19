@@ -432,7 +432,12 @@ export async function executeOperation(
   const config = deps.config
 
   if (!config.enabled) {
-    throw new AdminError(503, '管理员 Docker 管控未启用（需要设置 WL_ADMIN_DOCKER_ENABLED=1 与 WL_ADMIN_TOTP_SECRET）')
+    throw new AdminError(
+      503,
+      '管理员 Docker 管控未启用：需要在 deploy/.env 里设置 WL_ADMIN_DOCKER_ENABLED=1，' +
+        '并用 docker compose --profile admin up -d 启动 ops-runner 执行器' +
+        '（没有服务器级的 TOTP 秘密，两步验证由每位管理员在「运维 → 两步验证」各自绑定）',
+    )
   }
 
   const operation = findOperation(operationId)

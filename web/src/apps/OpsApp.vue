@@ -702,7 +702,13 @@ onMounted(() => {
             <div>
               <div class="ops__alert-title">运维管控未启用</div>
               <p class="ops__alert-text">
-                需要在 NAS 上设置环境变量 WL_ADMIN_DOCKER_ENABLED=1 与 WL_ADMIN_TOTP_SECRET，并重启应用容器。
+                需要在 NAS 的 <code>deploy/.env</code> 里设置 <code>WL_ADMIN_DOCKER_ENABLED=1</code>，
+                再用 <code>docker compose --profile admin up -d</code> 启动
+                <code>ops-runner</code> 执行器（它默认不启动）。
+              </p>
+              <p class="ops__alert-text">
+                两步验证不需要环境变量：每位管理员在「运维 → 两步验证」里各自绑定。
+                注意 <code>docker compose restart</code> 不会重读 <code>.env</code>，必须 <code>up -d</code> 重建容器。
               </p>
             </div>
           </div>
@@ -961,6 +967,20 @@ onMounted(() => {
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-secondary);
+}
+
+/* 两段说明之间留一点空，避免读成一坨 */
+.ops__alert-text + .ops__alert-text {
+  margin-top: var(--space-2);
+}
+
+.ops__alert-text code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-sunken, rgba(127, 127, 127, 0.14));
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-size: 12px;
+  color: var(--text);
 }
 
 /* ---------------------------------------------------------------- 状态卡片 */
