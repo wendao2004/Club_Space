@@ -2,6 +2,7 @@
  * 界面偏好与通知。
  */
 import { defineStore } from 'pinia'
+import { playSystem, type SystemSound } from '@/lib/sfx'
 
 export type Theme = 'dark' | 'light'
 
@@ -30,6 +31,29 @@ const WALLPAPER_KEY = 'wl.wallpaper'
 const WALLPAPER_IMAGE_KEY = 'wl.wallpaper.image'
 
 let toastSeq = 0
+
+/**
+ * 通知默认配什么声音。
+ *
+ * 按 Toast 的类型走，而不是让 162 个调用点各自决定 —— 那样必然有人漏写、
+ * 有人写错，最后听起来像随手乱响。需要特别指定的（比如聊天消息比普通通知
+ * 更轻），在 options.sound 里单独覆盖。
+ */
+const DEFAULT_TOAST_SOUND: Record<Toast['kind'], SystemSound> = {
+  info: 'notify',
+  success: 'success',
+  warning: 'warning',
+  error: 'error',
+}
+
+/**
+ * 通知音的节流。
+ *
+ * 一个批量操作可能连着弹好几条（批量删除、批量导入），每条都"叮"一下就
+ * 变成噪音了。250ms 内只响第一声 —— 视觉上的通知一条不少，声音只留一个。
+ */
+let lastToastSoundAt = 0
+const TOAST_SOUND_GAP = 250
 
 interface State {
   theme: Theme
@@ -146,10 +170,21 @@ export const useUi = defineStore('ui', {
       title: string,
       detail?: string,
       duration = 4000,
-      options?: { onClick?: () => void },
+      options?: { onClick?: () => void; sound?: SystemSound | 'none' },
     ): number {
       const id = ++toastSeq
       this.toasts.push({ id, kind, title, detail, duration, onClick: options?.onClick })
+
+      const sound = options?.sound ?? DEFAULT_TOAST_SOUND[kind]
+      if (sound !== 'none') {
+        const now = performance.now()
+        // 出错必须让人听见：静默掉一条"保存失败"比多响一声危险得多
+        if (kind === 'error' || now - lastToastSoundAt >= TOAST_SOUND_GAP) {
+          lastToastSoundAt = now
+          playSystem(sound)
+        }
+      }
+
       if (duration > 0) {
         window.setTimeout(() => this.dismiss(id), duration)
       }
@@ -163,6 +198,7 @@ export const useUi = defineStore('ui', {
 
     openContextMenu(x: number, y: number, items: ContextMenuItem[]): void {
       this.contextMenu = { x, y, items }
+      playSystem('click')
     },
 
     closeContextMenu(): void {

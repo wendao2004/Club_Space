@@ -266,10 +266,15 @@ function onStartBot(): void {
   void doStartBot()
 }
 
-/** 音效开关（持久化在 localStorage，见 lib/sfx）。 */
-const soundOn = ref(!sfx.isMuted())
+/**
+ * 音效开关（持久化在 localStorage，见 lib/sfx）。
+ *
+ * 用 computed 读全局状态而不是自己存一个 ref：设置页里也有一个总闸，
+ * 两处各存一份必然漂移 —— 在设置里静音了，棋盘上那个喇叭还亮着。
+ */
+const soundOn = computed(() => !sfx.soundState.muted)
 function toggleSound(): void {
-  soundOn.value = !sfx.toggleMuted()
+  sfx.toggleMuted()
 }
 
 /** 这一局是不是人机对战。 */

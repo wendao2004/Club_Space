@@ -9,6 +9,7 @@
  * 任务栏 + 多桌面 + 贴边分屏"这一组需求，皮肤类库（98.css / React95）只是外观。
  */
 import { defineStore } from 'pinia'
+import { playSystem } from '@/lib/sfx'
 
 export type SnapZone = 'none' | 'left' | 'right' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
 
@@ -109,9 +110,13 @@ export const useWindows = defineStore('windows', {
 
       const existing = singleton ? sameApp[0] : undefined
       if (existing) {
+        // 从最小化里叫回来是"还原"，本来就开着只是抬到前面是"点击"——
+        // 两者声音不同，用户能听出"到底开没开新窗口"
+        const wasMinimized = existing.minimized
         existing.minimized = false
         if (Object.keys(args).length > 0) existing.args = args
         this.focus(existing.id)
+        playSystem(wasMinimized ? 'restore' : 'click')
         return existing.id
       }
 
@@ -142,6 +147,7 @@ export const useWindows = defineStore('windows', {
       })
       this.activeId = id
       this.persist()
+      playSystem('open')
       return id
     },
 
@@ -155,6 +161,7 @@ export const useWindows = defineStore('windows', {
         this.activeId = next?.id ?? null
       }
       this.persist()
+      playSystem('close')
     },
 
     focus(id: string): void {
@@ -169,6 +176,7 @@ export const useWindows = defineStore('windows', {
     minimize(id: string): void {
       const win = this.windows.find((w) => w.id === id)
       if (!win) return
+      if (win.minimized) return
       win.minimized = true
       if (this.activeId === id) {
         const next = [...this.windows]
@@ -177,6 +185,7 @@ export const useWindows = defineStore('windows', {
         this.activeId = next?.id ?? null
       }
       this.persist()
+      playSystem('minimize')
     },
 
     /**
@@ -215,6 +224,7 @@ export const useWindows = defineStore('windows', {
         win.h = area.h - 16
       }
       this.persist()
+      playSystem(win.maximized ? 'maximize' : 'restore')
     },
 
     /**
@@ -261,6 +271,7 @@ export const useWindows = defineStore('windows', {
           break
       }
       this.persist()
+      playSystem('maximize')
     },
 
     move(id: string, x: number, y: number): void {
@@ -296,9 +307,11 @@ export const useWindows = defineStore('windows', {
     },
 
     minimizeAll(): void {
+      const had = this.windows.some((w) => !w.minimized)
       for (const win of this.windows) win.minimized = true
       this.activeId = null
       this.persist()
+      if (had) playSystem('minimize')
     },
 
     /** 同应用多窗口时循环切换。 */

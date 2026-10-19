@@ -23,6 +23,7 @@ import {
 } from '@/api'
 import { useAuth } from '@/stores/auth'
 import { useUi } from '@/stores/ui'
+import { playSystem } from '@/lib/sfx'
 import type { WindowInstance } from '@/stores/windows'
 
 const auth = useAuth()
@@ -198,6 +199,7 @@ function openAbout(): void {
 // ---------------------------------------------------------------- 生命周期
 
 function selectTab(id: TabId): void {
+  if (id !== activeTab.value) playSystem('click')
   activeTab.value = id
 }
 

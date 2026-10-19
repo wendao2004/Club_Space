@@ -1,7 +1,7 @@
 <!--
   设置应用。
 
-  左侧纵向标签页 + 右侧内容区，四个页签：外观 / 账号 / 安全 / 存储。
+  左侧纵向标签页 + 右侧内容区，五个页签：外观 / 声音 / 账号 / 安全 / 存储。
   可以通过 win.args.tab 指定初始页签（任务栏头像按钮就以 tab=account 打开本应用）。
 
   几条刻意的设计立场：
@@ -18,6 +18,15 @@ import { api, ApiError, formatBytes, type CurrentUser } from '@/api'
 import { useAuth } from '@/stores/auth'
 import { useUi } from '@/stores/ui'
 import { useWindows, type WindowInstance } from '@/stores/windows'
+import {
+  playSystem,
+  previewSystem,
+  setSystemSoundOn,
+  setVolume,
+  soundState,
+  SYSTEM_SOUND_LABELS,
+  type SystemSound,
+} from '@/lib/sfx'
 
 const props = defineProps<{ win: WindowInstance }>()
 
@@ -27,7 +36,7 @@ const windows = useWindows()
 
 // ---------------------------------------------------------------- 标签页
 
-type TabId = 'appearance' | 'account' | 'security' | 'storage'
+type TabId = 'appearance' | 'sound' | 'account' | 'security' | 'storage'
 
 interface TabDef {
   id: TabId
@@ -37,6 +46,7 @@ interface TabDef {
 
 const tabs: TabDef[] = [
   { id: 'appearance', label: '外观', icon: 'sun' },
+  { id: 'sound', label: '声音', icon: 'volume' },
   { id: 'account', label: '账号', icon: 'user' },
   { id: 'security', label: '安全', icon: 'shield' },
   { id: 'storage', label: '存储', icon: 'db' },
@@ -80,6 +90,25 @@ function resetLayout(): void {
   ui.notify('info', '已恢复默认窗口布局', '下次刷新页面后生效')
 }
 
+// ---------------------------------------------------------------- 声音
+
+/** 试听列表的顺序就是音效表里的声明顺序（启动 → 窗口 → 通知 → 状态 → 杂项）。 */
+const soundList = Object.keys(SYSTEM_SOUND_LABELS) as SystemSound[]
+
+function toggleSystemSound(): void {
+  setSystemSoundOn(!soundState.systemOn)
+}
+
+function onVolumeInput(event: Event): void {
+  const value = Number((event.target as HTMLInputElement).value)
+  setVolume(value / 100)
+}
+
+function preview(name: SystemSound): void {
+  // force：即使系统音效关着也让它响 —— 点了试听却听不到，那个按钮就是坏的
+  previewSystem(name)
+}
+
 // ---------------------------------------------------------------- 账号
 
 const user = computed<CurrentUser | null>(() => auth.user)
@@ -100,8 +129,10 @@ const loggingOut = ref(false)
 async function logout(): Promise<void> {
   loggingOut.value = true
   try {
+    // 注销音要在 await 之前放：logout 之后这个窗口会被整个卸载
+    playSystem('lock')
     await auth.logout()
-    ui.notify('success', '已退出登录')
+    ui.notify('success', '已退出登录', undefined, 4000, { sound: 'none' })
   } catch (err) {
     ui.notify('error', '退出登录失败', err instanceof Error ? err.message : String(err))
   } finally {
@@ -338,6 +369,81 @@ watch(
               <Icon name="refresh" :size="15" />
               恢复默认窗口布局
             </button>
+          </div>
+        </template>
+
+        <!-- ============================ 声音 ============================ -->
+        <template v-else-if="activeTab === 'sound'">
+          <div class="settings__head">
+            <h2>声音</h2>
+            <p>音效由浏览器现场合成，不加载任何音频文件；开关与音量只影响本机。</p>
+          </div>
+
+          <div class="wl-card settings__card">
+            <div class="settings__card-head">
+              <div class="settings__card-title">反馈音</div>
+              <div class="wl-hint">
+                开窗、关窗、通知、出错各有一种声音，听一耳朵就知道刚才发生了什么。
+              </div>
+            </div>
+
+            <div class="sfx-row">
+              <div class="sfx-row__text">
+                <div class="sfx-row__title">系统音效</div>
+                <div class="wl-hint">
+                  菜单、窗口、通知这些界面动作的声音。关掉只静掉外壳，象棋落子照旧。
+                </div>
+              </div>
+              <button
+                class="sfx-switch"
+                :class="{ 'sfx-switch--on': soundState.systemOn }"
+                role="switch"
+                :aria-checked="soundState.systemOn"
+                :title="soundState.systemOn ? '关闭系统音效' : '打开系统音效'"
+                @click="toggleSystemSound"
+              >
+                <span class="sfx-switch__knob" />
+              </button>
+            </div>
+
+            <div class="sfx-row">
+              <div class="sfx-row__text">
+                <div class="sfx-row__title">音量</div>
+                <div class="wl-hint">{{ Math.round(soundState.volume * 100) }}%</div>
+              </div>
+              <input
+                class="sfx-range"
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                aria-label="音量"
+                :value="Math.round(soundState.volume * 100)"
+                @input="onVolumeInput"
+                @change="preview('notify')"
+              />
+            </div>
+          </div>
+
+          <div class="wl-card settings__card">
+            <div class="settings__card-head">
+              <div class="settings__card-title">试听</div>
+              <div class="wl-hint">
+                点一下听听是什么声音。浏览器要求页面先被点过才肯发声，所以静默时先点任意处。
+              </div>
+            </div>
+            <div class="sfx-grid">
+              <button
+                v-for="name in soundList"
+                :key="name"
+                class="sfx-chip"
+                :title="`试听：${SYSTEM_SOUND_LABELS[name]}`"
+                @click="preview(name)"
+              >
+                <Icon name="volume" :size="14" />
+                <span>{{ SYSTEM_SOUND_LABELS[name] }}</span>
+              </button>
+            </div>
           </div>
         </template>
 
@@ -1066,5 +1172,117 @@ watch(
   font-weight: 600;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 声音 */
+
+/* 一行"说明 + 控件"，与外观页的卡片标题同一套排版 */
+.sfx-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+}
+
+.sfx-row:first-of-type {
+  border-top: none;
+}
+
+.sfx-row__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.sfx-row__title {
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+/* 开关：44×24 的胶囊 + 圆钮，位置用 left 过渡（宽度固定，不会抖） */
+.sfx-switch {
+  position: relative;
+  flex: none;
+  width: 44px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--chip-bg);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.sfx-switch__knob {
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transform: translateY(-50%);
+  transition:
+    left var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.sfx-switch--on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.sfx-switch--on .sfx-switch__knob {
+  left: 23px;
+  background: var(--accent-text);
+}
+
+.sfx-switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sfx-range {
+  flex: none;
+  width: 180px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.sfx-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: var(--space-2);
+}
+
+/* 试听小按钮：一眼就是"按下去听听"，不是设置项 */
+.sfx-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.sfx-chip:hover {
+  background: var(--hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.sfx-chip:active {
+  transform: translateY(1px);
 }
 </style>

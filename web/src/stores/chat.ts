@@ -537,6 +537,8 @@ function notifyIncoming(msg: ChatMessage): void {
   const ui = useUi()
   ui.notify('info', msg.senderName ?? '新消息', previewOf(msg), 6000, {
     onClick: () => openChatConversation(msg.conversationId),
+    // 聊天用比普通通知更轻的一声：一天可能来几十条，别搞得像报警
+    sound: 'message',
   })
 }
 

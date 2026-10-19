@@ -28,6 +28,7 @@ import {
 import { useAuth } from '@/stores/auth'
 import { useUi, type ContextMenuItem } from '@/stores/ui'
 import { useWindows, type WindowInstance } from '@/stores/windows'
+import { playSystem } from '@/lib/sfx'
 
 const props = defineProps<{ win: WindowInstance }>()
 const auth = useAuth()
@@ -434,7 +435,9 @@ async function removeEntries(list: FileEntry[]): Promise<void> {
     }
   }
   if (done > 0) {
-    ui.notify('success', `已删除 ${done} 个项目`)
+    // 删除用"回收站"那一声，而不是通用的"完成"：这个动作有分量，值得区分
+    playSystem('trash')
+    ui.notify('success', `已删除 ${done} 个项目`, undefined, 4000, { sound: 'none' })
     await load()
   }
 }

@@ -1956,6 +1956,150 @@ async function main() {
       `${closedPreview.windows} > ${windowsBefore}`,
     )
 
+    // ---- 系统音效：界面动作真的在合成声音，静音真的静得掉 ----
+    //
+    // 声音没法在 CI 里用耳朵验，所以这里验的是**音频图真的被驱动了**：
+    // 把 AudioContext 原型上的 createOscillator / createBufferSource 换成计数版，
+    // 然后做"开窗 / 试听 / 关窗 / 静音后再开窗"，数新增的声源。
+    //
+    // 为什么不去断言"playXxx 被调用"：那样只要接线还在、参数写错也照样过。
+    // 数声源则要求整条链都通 —— 类型 → 配方 → AudioContext → 增益节点。
+    console.log('\n【系统音效（参考 Windows 的反馈音）】')
+
+    const hookAudio = `
+      (() => {
+        window.__sfx = { osc: 0, buf: 0 }
+        const proto = window.AudioContext.prototype
+        if (!proto.__sfxPatched) {
+          const osc = proto.createOscillator
+          const buf = proto.createBufferSource
+          proto.createOscillator = function (...args) {
+            window.__sfx.osc++
+            return osc.apply(this, args)
+          }
+          proto.createBufferSource = function (...args) {
+            window.__sfx.buf++
+            return buf.apply(this, args)
+          }
+          proto.__sfxPatched = true
+        }
+        return true
+      })()
+    `
+
+    await evaluate(hookAudio)
+    const soundStart = JSON.parse(await evaluate('JSON.stringify(window.__sfx)'))
+
+    // 开窗（从开始菜单打开「设置」）—— 应当有开窗音
+    // 开始菜单是开关式的：先确认它是关的，再点开，免得"点了一下反而关掉"
+    if (JSON.parse(await evaluate(`!!document.querySelector('.start')`))) {
+      await evaluate(`document.querySelector('.taskbar__start').click()`)
+      await sleep(200)
+    }
+    await evaluate(`document.querySelector('.taskbar__start').click()`)
+    await sleep(500)
+    const settingsTile = await evaluate(`
+      (() => {
+        const tiles = [...document.querySelectorAll('.start__tile')]
+        const t = tiles.find((x) => x.textContent.includes('设置'))
+        if (!t) return false
+        t.click()
+        return true
+      })()
+    `)
+    assert(settingsTile === true, '在开始菜单里找到了「设置」磁贴')
+    await sleep(2200)
+
+    const afterOpen = JSON.parse(await evaluate('JSON.stringify(window.__sfx)'))
+    const openSources = afterOpen.osc + afterOpen.buf - (soundStart.osc + soundStart.buf)
+    assert(openSources > 0, '打开窗口时真的产生了声源（开窗音）', `+${openSources} 个声源`)
+
+    // 声音页签：开关、音量、试听列表都在
+    const soundTabs = await evaluate(
+      `JSON.stringify([...document.querySelectorAll('.settings__tab')].map((e) => e.textContent.trim()))`,
+    )
+    assert(
+      JSON.parse(soundTabs).includes('声音'),
+      '设置里有「声音」页签',
+      JSON.parse(soundTabs).join('、'),
+    )
+
+    await evaluate(`
+      (() => {
+        const tab = [...document.querySelectorAll('.settings__tab')].find((t) => t.textContent.includes('声音'))
+        tab?.click()
+        return !!tab
+      })()
+    `)
+    await sleep(500)
+
+    const soundPanel = JSON.parse(
+      await evaluate(`JSON.stringify({
+        hasSwitch: !!document.querySelector('.sfx-switch'),
+        switchOn: document.querySelector('.sfx-switch')?.getAttribute('aria-checked'),
+        hasRange: !!document.querySelector('.sfx-range'),
+        chips: [...document.querySelectorAll('.sfx-chip')].map((e) => e.textContent.trim()),
+      })`),
+    )
+    assert(soundPanel.hasSwitch, '有「系统音效」开关')
+    assert(soundPanel.switchOn === 'true', '系统音效默认是开着的', String(soundPanel.switchOn))
+    assert(soundPanel.hasRange, '有音量滑块')
+    assert(
+      soundPanel.chips.length >= 12,
+      '试听列表列出了全部系统音效',
+      `${soundPanel.chips.length} 个：${soundPanel.chips.join('、')}`,
+    )
+
+    // 试听：即使系统音效关着也该响（force），所以这条同时证明"试听按钮不是摆设"
+    const beforePreview = JSON.parse(await evaluate('JSON.stringify(window.__sfx)'))
+    await evaluate(`document.querySelectorAll('.sfx-chip')[0]?.click()`)
+    await sleep(400)
+    const afterPreview = JSON.parse(await evaluate('JSON.stringify(window.__sfx)'))
+    const previewSources =
+      afterPreview.osc + afterPreview.buf - (beforePreview.osc + beforePreview.buf)
+    assert(previewSources > 0, '点「试听」真的发出了声音', `+${previewSources} 个声源`)
+
+    // 关窗音
+    const beforeClose = JSON.parse(await evaluate('JSON.stringify(window.__sfx)'))
+    await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__title')?.textContent.includes('设置'),
+        )
+        win?.querySelector('.window__ctl--close')?.click()
+        return true
+      })()
+    `)
+    await sleep(700)
+    const afterClose = JSON.parse(await evaluate('JSON.stringify(window.__sfx)'))
+    const closeSources =
+      afterClose.osc + afterClose.buf - (beforeClose.osc + beforeClose.buf)
+    assert(closeSources > 0, '关闭窗口时也有声音（关窗音）', `+${closeSources} 个声源`)
+
+    // 静音：刷新后应当一声都不出（含最容易被漏掉的"开机音"）
+    await evaluate(`localStorage.setItem('wl.sfx.muted', '1'); true`)
+    await cdp.send('Page.navigate', { url: `${BASE}/` }, sessionId)
+    await sleep(3500)
+    await evaluate(hookAudio)
+    await evaluate(`document.querySelector('.taskbar__start').click()`)
+    await sleep(500)
+    await evaluate(`
+      (() => {
+        const t = [...document.querySelectorAll('.start__tile')].find((x) => x.textContent.includes('文件'))
+        t?.click()
+        return !!t
+      })()
+    `)
+    await sleep(2200)
+    const muted = JSON.parse(await evaluate('JSON.stringify(window.__sfx)'))
+    assert(
+      muted.osc === 0 && muted.buf === 0,
+      '静音后一声都不出（开机音、开窗音都静住了）',
+      `${muted.osc} 个振荡器 / ${muted.buf} 段噪声`,
+    )
+    // 还原，别把静音留在测试浏览器的偏好里
+    await evaluate(`localStorage.setItem('wl.sfx.muted', '0'); true`)
+
     // ---- 控制台错误 ----
     console.log('\n【运行时错误检查】')
     const realConsole = cdp.consoleErrors.filter(

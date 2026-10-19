@@ -20,6 +20,7 @@ import WallpaperPicker from './WallpaperPicker.vue'
 import { api } from '@/api'
 import { appComponents, findApp } from '@/apps/registry'
 import { shouldYieldKeyboard } from '@/desktop/keyboard'
+import { playSystem } from '@/lib/sfx'
 import { useUi } from '@/stores/ui'
 import { useWindows } from '@/stores/windows'
 
@@ -30,6 +31,7 @@ const startOpen = ref(false)
 
 function toggleStart(): void {
   startOpen.value = !startOpen.value
+  playSystem('click')
 }
 
 function closeStart(): void {
@@ -129,6 +131,20 @@ onMounted(() => {
   window.addEventListener('pointerdown', onGlobalPointerDown)
   // 恢复上次的窗口布局：刷新页面不该丢掉工作区
   windows.restoreLayout()
+
+  // 开机音：每次"进桌面"响一次，刷新页面不重复。用 sessionStorage 而不是
+  // localStorage —— 关掉标签页再打开就算新的一次启动，符合直觉。
+  //
+  // 注意恢复布局必须排在它前面且**不出声**（restoreLayout 直接塞状态、不走
+  // open()），否则一开机就是七八个窗口音叠在一起。
+  try {
+    if (sessionStorage.getItem('wl.sfx.booted') !== '1') {
+      sessionStorage.setItem('wl.sfx.booted', '1')
+      playSystem('startup')
+    }
+  } catch {
+    // 隐私模式下 sessionStorage 不可用：那就不放开机音，不影响别的
+  }
 })
 
 onBeforeUnmount(() => {
