@@ -1,9 +1,31 @@
 {
-  "name": "weblearning",
-  "version": "0.1.0",
+  "name": "club-space",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "社团内网协作平台 —— 桌面式 Web 界面，部署于飞牛 NAS（Docker）",
+  "description": "社团内网协作平台 —— 桌面式 Web 界面，自托管在局域网 NAS 上（Docker）",
+  "license": "MIT",
+  "author": "wendao2004",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wendao2004/Club_Space.git"
+  },
+  "homepage": "https://github.com/wendao2004/Club_Space#readme",
+  "bugs": {
+    "url": "https://github.com/wendao2004/Club_Space/issues"
+  },
+  "keywords": [
+    "self-hosted",
+    "nas",
+    "docker",
+    "vue3",
+    "fastify",
+    "sqlite",
+    "lan",
+    "collaboration",
+    "chinese-chess"
+  ],
+  "packageManager": "pnpm@9.15.0",
   "scripts": {
     "dev": "concurrently -n server,web -c blue,green \"pnpm -F @wl/server dev\" \"pnpm -F @wl/web dev\"",
     "build": "pnpm -F @wl/web build",

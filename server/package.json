@@ -1,8 +1,9 @@
 {
   "name": "@wl/server",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
   "scripts": {
     "dev": "node --watch src/index.ts",
     "start": "node src/index.ts",
