@@ -386,33 +386,8 @@ export const api = {
         json: { archived },
       }),
 
-    entries: (
-      options: {
-        from?: string
-        to?: string
-        kind?: LedgerKind
-        categoryId?: string
-        status?: LedgerStatus
-        /** 只看某个活动下的账目 */
-        eventId?: string
-        /** 标题 / 备注模糊搜索 */
-        search?: string
-        mine?: boolean
-        pending?: boolean
-        limit?: number
-        offset?: number
-      } = {},
-    ) => {
-      const params = new URLSearchParams()
-      if (options.from) params.set('from', options.from)
-      if (options.to) params.set('to', options.to)
-      if (options.kind) params.set('kind', options.kind)
-      if (options.categoryId) params.set('categoryId', options.categoryId)
-      if (options.status) params.set('status', options.status)
-      if (options.eventId) params.set('eventId', options.eventId)
-      if (options.search) params.set('search', options.search)
-      if (options.mine) params.set('mine', '1')
-      if (options.pending) params.set('pending', '1')
+    entries: (options: LedgerQueryOptions & { limit?: number; offset?: number } = {}) => {
+      const params = new URLSearchParams(ledgerQueryString(options))
       if (options.limit !== undefined) params.set('limit', String(options.limit))
       if (options.offset !== undefined) params.set('offset', String(options.offset))
       const qs = params.toString()
@@ -467,13 +442,17 @@ export const api = {
         `/api/ledger/debts${eventId ? `?eventId=${encodeURIComponent(eventId)}` : ''}`,
       ),
 
-    /** 导出 CSV 的下载地址（服务端已加 BOM，Excel 打开中文不乱码）。 */
-    exportUrl: (options: { from?: string; to?: string; eventId?: string } = {}) => {
-      const params = new URLSearchParams()
-      if (options.from) params.set('from', options.from)
-      if (options.to) params.set('to', options.to)
-      if (options.eventId) params.set('eventId', options.eventId)
-      const qs = params.toString()
+    /**
+     * 导出 CSV 的下载地址（服务端已加 BOM，Excel 打开中文不乱码）。
+     *
+     * ⚠️ 接受的筛选条件与 `entries()` **完全一致**：导出的表必须就是列表里那张表。
+     * 从前这里只收 from/to，于是"搜索 / 分类 / 状态 / 只看我的 / 待我审批"
+     * 在导出时被静默丢掉 —— 用户筛出三行，下载到的是全部账目，
+     * 而界面上的筛选摘要还挂着，他不会怀疑这张表。它不报错，只能靠对账发现。
+     * 所以两边共用同一份 ledgerQueryString()。
+     */
+    exportUrl: (options: LedgerQueryOptions = {}) => {
+      const qs = ledgerQueryString(options)
       return `/api/ledger/export.csv${qs ? `?${qs}` : ''}`
     },
 
@@ -1122,6 +1101,49 @@ export interface WerewolfRoom {
 
 export type LedgerKind = 'income' | 'expense'
 export type LedgerStatus = 'draft' | 'submitted' | 'approved' | 'rejected' | 'paid'
+
+/**
+ * 账目筛选条件。
+ *
+ * 列表查询（entries）与导出（exportUrl）**共用同一个形状**：导出必须跟着
+ * 列表的筛选走。两边签名一旦分叉，就会长出"筛出来三行、导出几百行"那种
+ * 不报错的错 —— 而它只能在对账时被人肉发现。
+ */
+export interface LedgerQueryOptions {
+  from?: string
+  to?: string
+  kind?: LedgerKind
+  categoryId?: string
+  status?: LedgerStatus
+  /** 只看某个活动下的账目 */
+  eventId?: string
+  /** 标题 / 备注模糊搜索 */
+  search?: string
+  /** 只看自己记的 */
+  mine?: boolean
+  /** 只看"待我审批"的（管理员） */
+  pending?: boolean
+}
+
+/**
+ * 筛选条件 → 查询串（列表与导出共用）。
+ *
+ * 空值一律不进查询串：`URLSearchParams` 会把 null/undefined 拼成字面量
+ * "null"/"undefined"，而服务端只判有无、不认这两个词 —— 结果是"筛了个寂寞"。
+ */
+function ledgerQueryString(options: LedgerQueryOptions): string {
+  const params = new URLSearchParams()
+  if (options.from) params.set('from', options.from)
+  if (options.to) params.set('to', options.to)
+  if (options.kind) params.set('kind', options.kind)
+  if (options.categoryId) params.set('categoryId', options.categoryId)
+  if (options.status) params.set('status', options.status)
+  if (options.eventId) params.set('eventId', options.eventId)
+  if (options.search?.trim()) params.set('search', options.search.trim())
+  if (options.mine) params.set('mine', '1')
+  if (options.pending) params.set('pending', '1')
+  return params.toString()
+}
 
 export interface LedgerCategory {
   id: string

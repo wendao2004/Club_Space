@@ -143,6 +143,7 @@ import {
   updateEntry,
   updateEvent,
   withdrawEntry,
+  type ListOptions,
 } from './ledger.ts'
 // ⚠️ 财物模块和记账模块有几个重名导出（listCategories / createCategory /
 // archiveCategory / summary / seedDefaultCategories）。这里给财物侧加别名，
@@ -917,11 +918,20 @@ app.get('/api/files/:id/preview', async (req, reply) => {
  * Content-Disposition 头。
  *
  * 文件名会进 HTTP 头，必须防注入：非 ASCII 用 RFC 5987 的 filename*，
- * 同时给一个净化过的 ASCII 回退名。
+ * 同时给一个净化过的 ASCII 回退名（`fallback` 用于"回退名不该是下划线"
+ * 的场合，例如「社团账目-2026-10-19.csv」按字符替换会退成「______-…」）。
+ *
+ * ⚠️ `encodeURIComponent` 不转义 `' ( ) *`，而这四个字符不在 RFC 5987 的
+ * attr-char 里 —— 留着会把整个头变成非法值。活动名是用户可控的，
+ * 名字里带个单引号（`'`）就会中招，所以这里补上。
  */
-function contentDisposition(name: string): string {
-  const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`
+function contentDisposition(name: string, fallback?: string): string {
+  const ascii = (fallback ?? name).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')
+  const encoded = encodeURIComponent(name).replace(
+    /['()*]/g,
+    (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`,
+  )
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`
 }
 
 // ---------------------------------------------------------------- 分片上传
@@ -1712,11 +1722,20 @@ app.patch('/api/ledger/categories/:id', async (req) => {
   return { ok: true }
 })
 
-app.get('/api/ledger/entries', async (req) => {
-  const user = requireUser(req)
-  seedDefaultCategories()
-  const q = req.query as Record<string, string | undefined>
-  return listEntries(user.id, roleAtLeast(user.role, 'admin'), {
+/**
+ * 查询串 → 账目筛选条件。
+ *
+ * ⚠️ **列表接口和导出接口必须共用这一份解析**，这是修一个真实事故留下的：
+ * 导出原来自己抄了一遍条件（只认 from/to/kind/status/eventId），于是
+ * **搜索词 / 分类 / 只看我的 / 待我审批 这四项在导出里被静默丢掉** ——
+ * 用户筛出 3 条，点「导出 CSV」拿到的是全部几百条，而界面上的筛选摘要
+ * 还写着「搜索「场地」· 仅支出」。这种错最坏的地方是它不报错：
+ * 你得拿筛出来的列表一行行去对，才会发现导出的表多了东西。
+ *
+ * 所以这里不复制粘贴：两个入口引用同一个函数，将来加筛选条件也只会加一次。
+ */
+function ledgerFiltersFromQuery(q: Record<string, string | undefined>): ListOptions {
+  return {
     from: q.from,
     to: q.to,
     kind: q.kind === 'income' || q.kind === 'expense' ? q.kind : undefined,
@@ -1726,6 +1745,15 @@ app.get('/api/ledger/entries', async (req) => {
     search: q.search?.trim().slice(0, 60) || undefined,
     mine: q.mine === '1',
     pendingReview: q.pending === '1',
+  }
+}
+
+app.get('/api/ledger/entries', async (req) => {
+  const user = requireUser(req)
+  seedDefaultCategories()
+  const q = req.query as Record<string, string | undefined>
+  return listEntries(user.id, roleAtLeast(user.role, 'admin'), {
+    ...ledgerFiltersFromQuery(q),
     limit: q.limit ? Number.parseInt(q.limit, 10) : undefined,
     offset: q.offset ? Number.parseInt(q.offset, 10) : undefined,
   })
@@ -1966,30 +1994,37 @@ app.get('/api/ledger/debts', async (req) => {
 app.get('/api/ledger/export.csv', async (req, reply) => {
   const user = requireUser(req)
   const q = req.query as Record<string, string | undefined>
-  const csv = exportCsv(user.id, roleAtLeast(user.role, 'admin'), {
-    from: q.from,
-    to: q.to,
-    kind: q.kind === 'income' || q.kind === 'expense' ? q.kind : undefined,
-    status: q.status as never,
-    eventId: q.eventId,
-  })
+  // 与 /api/ledger/entries 用同一份筛选解析：导出的表必须就是用户筛出来的那张表。
+  const filters = ledgerFiltersFromQuery(q)
+  const csv = exportCsv(user.id, roleAtLeast(user.role, 'admin'), filters)
 
+  // 审计里记下**实际生效**的筛选，而不是只记日期。
+  // "这份表是按什么条件导出来的"在事后对账时是必须能回答的问题，
+  // 只记 from/to 的话，一次"按分类导出的表"在审计里会和"全量导出"长得一样。
   audit({
     actorId: user.id,
     actorIp: actorIp(req),
     category: 'ledger',
     action: 'ledger-export',
-    payload: { from: q.from ?? null, to: q.to ?? null, eventId: q.eventId ?? null },
+    payload: {
+      from: filters.from ?? null,
+      to: filters.to ?? null,
+      kind: filters.kind ?? null,
+      categoryId: filters.categoryId ?? null,
+      status: filters.status ?? null,
+      eventId: filters.eventId ?? null,
+      search: filters.search ?? null,
+      mine: filters.mine ?? false,
+      pending: filters.pendingReview ?? false,
+    },
   })
 
   const filename = `社团账目-${new Date().toISOString().slice(0, 10)}.csv`
   // 加 BOM：不加的话 Excel 打开会把中文显示成乱码，这是中文 CSV 最常见的翻车点
   reply
     .header('content-type', 'text/csv; charset=utf-8')
-    .header(
-      'content-disposition',
-      `attachment; filename="ledger.csv"; filename*=UTF-8''${encodeURIComponent(filename)}`,
-    )
+    // 回退名给一个干净的 ASCII（按字符替换的话中文会退成一排下划线）
+    .header('content-disposition', contentDisposition(filename, 'ledger.csv'))
   return reply.send(`﻿${csv}`)
 })
 
@@ -2097,10 +2132,8 @@ app.get('/api/ledger/events/:id/export.csv', async (req, reply) => {
   const filename = `${event.name}-账目-${new Date().toISOString().slice(0, 10)}.csv`
   reply
     .header('content-type', 'text/csv; charset=utf-8')
-    .header(
-      'content-disposition',
-      `attachment; filename="ledger-event.csv"; filename*=UTF-8''${encodeURIComponent(filename)}`,
-    )
+    // 活动名是用户可控的，contentDisposition 里做了头注入与 RFC 5987 的转义
+    .header('content-disposition', contentDisposition(filename, 'ledger-event.csv'))
   return reply.send(`﻿${csv}`)
 })
 

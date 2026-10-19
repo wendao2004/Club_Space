@@ -18,6 +18,7 @@ import type {
   LedgerEventInput,
   LedgerEventSummary,
   LedgerKind,
+  LedgerQueryOptions,
   LedgerStatus,
   LedgerSummary,
 } from '@/api'
@@ -72,18 +73,8 @@ function describe(err: unknown): string {
   return String(err)
 }
 
-/** 由筛选条件拼出列表查询参数。 */
-function entryQuery(filters: LedgerFilters): {
-  from?: string
-  to?: string
-  kind?: LedgerKind
-  categoryId?: string
-  status?: LedgerStatus
-  eventId?: string
-  search?: string
-  mine: boolean
-  pending: boolean
-} {
+/** 由筛选条件拼出列表查询参数。导出的下载地址也用这一份（见下面的 exportUrl）。 */
+function entryQuery(filters: LedgerFilters): LedgerQueryOptions {
   return {
     from: filters.from ?? undefined,
     to: filters.to ?? undefined,
@@ -113,6 +104,17 @@ export const useLedger = defineStore('ledger', {
   }),
 
   getters: {
+    /**
+     * 导出 CSV 的下载地址。
+     *
+     * **必须和列表用同一套筛选条件**（同一个 entryQuery）。这不是"顺便对齐一下"：
+     * 导出按钮就挂在筛选栏旁边、筛选摘要的下面，用户点它时的心理预期是
+     * "把我现在看到的这张表导出来"。只对齐日期区间是不够的 ——
+     * 搜索词/分类/状态/只看我的/待我审批 少一个，导出的表里就会多出东西，
+     * 而多出来的行不会报错，只能靠对账时人肉发现。
+     */
+    exportUrl: (state): string => api.ledger.exportUrl(entryQuery(state.filters)),
+
     /** 未归档的收入分类 */
     incomeCategories: (state): LedgerCategory[] =>
       state.categories.filter((category) => category.kind === 'income' && !category.archived),

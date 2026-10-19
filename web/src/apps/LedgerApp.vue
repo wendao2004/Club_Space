@@ -148,15 +148,11 @@ const filterSummary = computed<string>(() => {
   return parts.length > 0 ? parts.join(' · ') : '全部账目'
 })
 
-// 导出地址：筛选里的 null 要转成 undefined，
-// 因为 api.ledger.exportUrl 的签名是 { from?: string; to?: string }，
-// 而 URLSearchParams 遇到 null 会拼出字面量 "null"。
-const exportHref = computed(() =>
-  api.ledger.exportUrl({
-    from: ledger.filters.from ?? undefined,
-    to: ledger.filters.to ?? undefined,
-  }),
-)
+// 导出地址：直接用 store 里的 exportUrl —— 它与列表查询共用同一套筛选条件，
+// 保证"导出的表 = 你筛出来的表"。别在这里只挑几个字段自己拼：
+// 从前这里只传了 from/to，于是搜索/分类/状态/只看我的在导出时全被丢掉，
+// 用户筛出三行却下载到几百行，而且不会有任何报错。
+const exportHref = computed(() => ledger.exportUrl)
 
 function resetFilters(): void {
   // 逐字段给而不是调 store.resetFilters()：那个会把 eventId 也清掉，
