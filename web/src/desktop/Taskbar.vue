@@ -6,9 +6,10 @@
   的 toggleFromTaskbar）。
 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { findApp } from '@/apps/registry'
+import { previewSystem, setMuted, setVolume, soundState } from '@/lib/sfx'
 import { useAuth } from '@/stores/auth'
 import { useChat } from '@/stores/chat'
 import { useUi } from '@/stores/ui'
@@ -99,6 +100,92 @@ const today = computed(() => {
   const d = new Date()
   return `${d.getMonth() + 1}/${d.getDate()}`
 })
+
+// ---------------------------------------------------------------- 音量浮窗
+//
+// 参考 Windows 的做法：点托盘上的喇叭，弹出一小块音量面板，拖完立刻能听见。
+// 和「设置 → 声音」共用同一份 soundState，两处永远同步（不存在各存一个 ref）。
+
+const volumeOpen = ref(false)
+const volumeAnchor = ref<HTMLElement | null>(null)
+const volumePanel = ref<HTMLElement | null>(null)
+
+const volumePercent = computed(() => Math.round(soundState.volume * 100))
+/** 静音或拉到 0 都显示带叉的喇叭 */
+const volumeIcon = computed(() => (soundState.muted || soundState.volume <= 0 ? 'volume-off' : 'volume'))
+const volumeTitle = computed(() => {
+  if (soundState.muted) return '已静音（点击调音量）'
+  return `音量 ${volumePercent.value}%`
+})
+
+let previewTimer = 0
+
+/**
+ * 调整音量时给一声"叮"作为确认 —— 但滚轮一格一个音会吵，所以合并：
+ * 停下来 160ms 后才响一次。
+ */
+function schedulePreview(): void {
+  window.clearTimeout(previewTimer)
+  previewTimer = window.setTimeout(() => previewSystem('notify'), 160)
+}
+
+function toggleVolume(): void {
+  volumeOpen.value = !volumeOpen.value
+}
+
+function onVolumeInput(event: Event): void {
+  const el = event.target as HTMLInputElement
+  // Windows 的行为：静音状态下拖动音量条会自动取消静音
+  if (soundState.muted) setMuted(false)
+  setVolume(Number(el.value) / 100)
+  schedulePreview()
+}
+
+/** 拖动结束（松手 / 键盘松开）响一声确认最终音量 */
+function onVolumeCommit(): void {
+  window.clearTimeout(previewTimer)
+  previewSystem('notify')
+}
+
+function toggleMute(): void {
+  setMuted(!soundState.muted)
+  // 从静音恢复时响一声，让用户确认真的有声音了
+  if (!soundState.muted) previewSystem('notify')
+}
+
+/** 滚轮直接调音量 —— Windows 上鼠标停在喇叭图标上滚轮就是这个行为 */
+function onVolumeWheel(event: WheelEvent): void {
+  const step = event.deltaY > 0 ? -0.05 : 0.05
+  setVolume(soundState.volume + step)
+  schedulePreview()
+}
+
+function openSoundSettings(): void {
+  volumeOpen.value = false
+  windows.open({ appId: 'settings', title: '设置', args: { tab: 'sound' } })
+}
+
+function onGlobalPointerDown(event: PointerEvent): void {
+  if (!volumeOpen.value) return
+  const target = event.target as Node | null
+  if (volumePanel.value?.contains(target) || volumeAnchor.value?.contains(target)) return
+  volumeOpen.value = false
+}
+
+function onGlobalKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && volumeOpen.value) volumeOpen.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', onGlobalPointerDown)
+  window.addEventListener('keydown', onGlobalKeydown)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onGlobalPointerDown)
+  window.removeEventListener('keydown', onGlobalKeydown)
+  window.clearTimeout(previewTimer)
+})
 </script>
 
 <template>
@@ -146,6 +233,49 @@ const today = computed(() => {
 
     <!-- 右：托盘 -->
     <div class="taskbar__right">
+      <button
+        ref="volumeAnchor"
+        class="taskbar__tray"
+        :title="volumeTitle"
+        aria-label="音量"
+        :aria-expanded="volumeOpen"
+        @click="toggleVolume"
+        @wheel.prevent="onVolumeWheel"
+      >
+        <Icon :name="volumeIcon" :size="15" />
+      </button>
+
+      <!-- 音量浮窗：点喇叭弹出，行为和 Windows 一致（点别处 / Esc 关闭） -->
+      <div v-if="volumeOpen" ref="volumePanel" class="volfly" role="dialog" aria-label="音量">
+        <div class="volfly__head">
+          <span class="volfly__title">扬声器</span>
+          <span class="volfly__value">{{ soundState.muted ? '静音' : `${volumePercent}%` }}</span>
+        </div>
+        <div class="volfly__row">
+          <button
+            class="volfly__mute"
+            :title="soundState.muted ? '取消静音' : '静音'"
+            :aria-pressed="soundState.muted"
+            @click="toggleMute"
+          >
+            <Icon :name="volumeIcon" :size="18" />
+          </button>
+          <input
+            class="volfly__range"
+            type="range"
+            min="0"
+            max="100"
+            step="5"
+            :value="volumePercent"
+            aria-label="音量"
+            @input="onVolumeInput"
+            @change="onVolumeCommit"
+          />
+        </div>
+        <div class="volfly__hint">滚轮停在喇叭图标上也能调</div>
+        <button class="volfly__link" @click="openSoundSettings">声音设置</button>
+      </div>
+
       <button class="taskbar__tray" title="切换主题" @click="ui.toggleTheme()">
         <Icon :name="ui.theme === 'dark' ? 'moon' : 'sun'" :size="15" />
       </button>
@@ -191,6 +321,8 @@ const today = computed(() => {
 .taskbar__right {
   justify-content: flex-end;
   gap: var(--space-2);
+  /* 音量浮窗以这里为定位基准 */
+  position: relative;
 }
 
 .taskbar__center {
@@ -397,5 +529,100 @@ const today = computed(() => {
   color: var(--accent-text);
   font-size: 12px;
   font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- 音量浮窗 */
+
+.volfly {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 10;
+  width: 232px;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popup);
+  backdrop-filter: blur(24px) saturate(1.6);
+  /* 出现时轻微上浮，和开始菜单保持同一种动效语言 */
+  animation: volfly-in var(--dur-fast) var(--ease-out);
+}
+
+@keyframes volfly-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.volfly__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.volfly__title {
+  font-size: var(--fs-body);
+  font-weight: var(--fw-medium);
+  color: var(--text);
+}
+
+.volfly__value {
+  font-size: var(--fs-caption);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.volfly__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.volfly__mute {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--text-secondary);
+}
+
+.volfly__mute:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* 用原生滑块 + accent-color：拖动手感、键盘操作、无障碍都由浏览器负责，
+   自己画一个反而容易丢掉这些 */
+.volfly__range {
+  flex: 1;
+  height: 20px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.volfly__hint {
+  margin-top: var(--space-2);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
+.volfly__link {
+  margin-top: var(--space-2);
+  padding: 5px 0;
+  width: 100%;
+  border-top: 1px solid var(--line-hair);
+  color: var(--accent);
+  font-size: var(--fs-caption);
+  text-align: left;
+}
+
+.volfly__link:hover {
+  text-decoration: underline;
 }
 </style>

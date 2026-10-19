@@ -84,15 +84,27 @@ function readBool(key: string, fallback: boolean): boolean {
   }
 }
 
+/**
+ * 默认音量。
+ *
+ * 原来是 0.65，实测系统音（配方峰值 0.04-0.11）再乘上这条曲线后，
+ * 实际振幅只有 2%-5%，笔记本喇叭上基本听不见。默认提到 0.8。
+ *
+ * ⚠️ 这里同时修了一个一直存在的 bug：`setVolume` 存进 localStorage 的是
+ * **百分数**（0-100），而读回来时按 0-1 的小数去截断 —— 于是存在 '80' 的
+ * 用户一刷新就变成 100%。现在按百分数读，并兼容直接存小数的旧数据。
+ */
 function readVolume(): number {
   try {
     const raw = localStorage.getItem(VOLUME_KEY)
-    if (raw === null) return 0.65
+    if (raw === null) return 0.8
     const n = Number(raw)
-    if (!Number.isFinite(n)) return 0.65
-    return Math.min(1, Math.max(0, n))
+    if (!Number.isFinite(n)) return 0.8
+    // 大于 1 一定是百分数（滑块写进去的就是这个形式）
+    const fraction = n > 1 ? n / 100 : n
+    return Math.min(1, Math.max(0, fraction))
   } catch {
-    return 0.65
+    return 0.8
   }
 }
 
@@ -153,10 +165,25 @@ export function setVolume(next: number): void {
 
 let ctx: AudioContext | null = null
 let master: GainNode | null = null
+/** 系统音效专用总线：把外壳音整体抬起来，见 SYSTEM_BUS_GAIN */
+let bus: GainNode | null = null
+/** 限幅器：抬音量之后防止叠加音削顶（削顶听起来是"噗"的一声） */
+let limiter: DynamicsCompressorNode | null = null
 let unavailable = false
 
 /**
- * 音量曲线。
+ * 系统音效的额外增益。
+ *
+ * 配方里的峰值（0.04-0.11）是照"近距离、安静房间"调的，实测在笔记本喇叭上
+ * 几乎听不见；而象棋落子用的是 0.18-0.34，明显更响。既然棋子的音量是合适的，
+ * 就把外壳音抬到同一量级 —— 3 倍，正好落在这个区间。
+ *
+ * 放在独立的总线节点上而不是改 14 个配方里的数字：**音色（各音的相对轻重）
+ * 一处不动，只调整体响度**；以后想再调也不用逐个改。
+ */
+const SYSTEM_BUS_GAIN = 3
+
+/** 滑块值 → 实际增益。
  *
  * 滑块是线性的，但耳朵对响度不是线性的（约按幂函数感知）。直接拿滑块值当增益，
  * 中段听起来几乎和最大一样响、往小调又掉得太突然。这里取 1.7 次幂折中：
@@ -175,13 +202,21 @@ function applyVolume(): void {
   }
 }
 
+interface Rig {
+  audio: AudioContext
+  /** 棋牌等业务音走这里（不额外抬高） */
+  out: GainNode
+  /** 系统音效走这里（已乘 SYSTEM_BUS_GAIN） */
+  sys: GainNode
+}
+
 /** 拿 AudioContext 与总音量节点；拿不到就永久降级（不要每次调用都重试一遍）。 */
-function rig(): { audio: AudioContext; out: GainNode } | null {
+function rig(): Rig | null {
   if (unavailable || soundState.muted) return null
-  if (ctx && master) {
+  if (ctx && master && bus) {
     // 有些浏览器会把挂起的 context 留着（切后台、省电模式），恢复一下再发声
     if (ctx.state === 'suspended') void ctx.resume().catch(() => {})
-    return { audio: ctx, out: master }
+    return { audio: ctx, out: master, sys: bus }
   }
   try {
     const Ctor =
@@ -192,10 +227,27 @@ function rig(): { audio: AudioContext; out: GainNode } | null {
       return null
     }
     ctx = new Ctor()
+
     master = ctx.createGain()
     master.gain.value = gainFor(soundState.volume)
-    master.connect(ctx.destination)
-    return { audio: ctx, out: master }
+
+    // 限幅器接在总音量之后、输出之前。
+    // 阈值 -3dB、20:1：正常音量下它几乎不动作（不动音色），
+    // 只有在多个音叠加到接近满刻度时才压一下，避免数字削顶的爆音。
+    limiter = ctx.createDynamicsCompressor()
+    limiter.threshold.value = -3
+    limiter.knee.value = 0
+    limiter.ratio.value = 20
+    limiter.attack.value = 0.002
+    limiter.release.value = 0.12
+
+    bus = ctx.createGain()
+    bus.gain.value = SYSTEM_BUS_GAIN
+
+    bus.connect(master)
+    master.connect(limiter)
+    limiter.connect(ctx.destination)
+    return { audio: ctx, out: master, sys: bus }
   } catch {
     unavailable = true
     return null
@@ -421,7 +473,8 @@ export function playSystem(name: SystemSound, options?: { force?: boolean }): vo
   const r = rig()
   if (!r) return
   try {
-    RECIPES[name](r.audio, r.out)
+    // 走 sys 总线：外壳音比业务音额外抬 SYSTEM_BUS_GAIN 倍
+    RECIPES[name](r.audio, r.sys)
   } catch {
     /* 出声失败不影响界面 */
   }

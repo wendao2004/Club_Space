@@ -2035,14 +2035,20 @@ async function main() {
 
     const soundPanel = JSON.parse(
       await evaluate(`JSON.stringify({
-        hasSwitch: !!document.querySelector('.sfx-switch'),
-        switchOn: document.querySelector('.sfx-switch')?.getAttribute('aria-checked'),
+        rows: [...document.querySelectorAll('.sfx-row')].map((row) => ({
+          title: row.querySelector('.sfx-row__title')?.textContent.trim() ?? '',
+          checked: row.querySelector('.sfx-switch')?.getAttribute('aria-checked') ?? null,
+        })),
         hasRange: !!document.querySelector('.sfx-range'),
         chips: [...document.querySelectorAll('.sfx-chip')].map((e) => e.textContent.trim()),
       })`),
     )
-    assert(soundPanel.hasSwitch, '有「系统音效」开关')
-    assert(soundPanel.switchOn === 'true', '系统音效默认是开着的', String(soundPanel.switchOn))
+    const muteRow = soundPanel.rows.find((r) => r.title.startsWith('全部声音'))
+    const systemRow = soundPanel.rows.find((r) => r.title.startsWith('系统音效'))
+    assert(!!muteRow, '有「全部声音」总开关（含棋牌）')
+    assert(!!systemRow, '有「系统音效」开关')
+    assert(systemRow.checked === 'true', '系统音效默认是开着的', String(systemRow.checked))
+    assert(muteRow.checked === 'true', '「全部声音」默认没有静音', String(muteRow.checked))
     assert(soundPanel.hasRange, '有音量滑块')
     assert(
       soundPanel.chips.length >= 12,
@@ -2075,6 +2081,212 @@ async function main() {
     const closeSources =
       afterClose.osc + afterClose.buf - (beforeClose.osc + beforeClose.buf)
     assert(closeSources > 0, '关闭窗口时也有声音（关窗音）', `+${closeSources} 个声源`)
+
+    // ---- 音量：任务栏喇叭浮窗 + 真实的增益变化 ----
+    //
+    // 这一轮的原始问题是"声音太小"，所以不能只验"滑块能拖"，要验**增益真的变了**：
+    // 在页面加载前注入钩子，记录所有 GainNode，然后读 master 的实际 gain.value。
+    // 顺带验限幅器在图上（抬音量之后不会削顶）。
+    console.log('\n【音量调节（任务栏喇叭，参考 Windows）】')
+
+    await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `
+          (() => {
+            window.__gains = []
+            window.__dyn = 0
+            window.__targets = []
+            const proto = window.AudioContext && window.AudioContext.prototype
+            if (!proto) return
+            const createGain = proto.createGain
+            proto.createGain = function (...args) {
+              const node = createGain.apply(this, args)
+              if (window.__gains.length < 60) window.__gains.push(node)
+              return node
+            }
+            const createDyn = proto.createDynamicsCompressor
+            proto.createDynamicsCompressor = function (...args) {
+              window.__dyn++
+              return createDyn.apply(this, args)
+            }
+            // 音量走 setTargetAtTime 平滑过渡，直接读 .value 未必是自动化后的值，
+            // 所以把每次设定的目标值记下来 —— 这是"滑块真的改到了增益"的直接证据。
+            const paramProto = window.AudioParam && window.AudioParam.prototype
+            if (paramProto) {
+              const setTarget = paramProto.setTargetAtTime
+              paramProto.setTargetAtTime = function (target, start, tc) {
+                if (window.__targets.length < 80) {
+                  window.__targets.push(Number(Number(target).toFixed(4)))
+                }
+                return setTarget.call(this, target, start, tc)
+              }
+            }
+          })()
+        `,
+      },
+      sessionId,
+    )
+
+    await evaluate(
+      `localStorage.setItem('wl.sfx.volume', '80'); localStorage.setItem('wl.sfx.muted', '0'); true`,
+    )
+    await cdp.send('Page.navigate', { url: `${BASE}/` }, sessionId)
+    await sleep(3500)
+    await evaluate(hookAudio)
+
+    const volButton = await evaluate(`
+      (() => {
+        const b = document.querySelector('.taskbar__tray[aria-label="音量"]')
+        if (!b) return false
+        b.click()
+        return true
+      })()
+    `)
+    assert(volButton === true, '任务栏托盘里有喇叭图标')
+    await sleep(300)
+
+    const flyout = JSON.parse(
+      await evaluate(`JSON.stringify({
+        open: !!document.querySelector('.volfly'),
+        value: document.querySelector('.volfly__value')?.textContent.trim(),
+        slider: (() => {
+          const s = document.querySelector('.volfly__range')
+          return s ? { min: s.min, max: s.max, step: s.step, value: s.value } : null
+        })(),
+      })`),
+    )
+    assert(flyout.open, '点喇叭弹出音量浮窗')
+    assert(flyout.value === '80%', '浮窗显示当前音量（默认 80%，不是被截成 100%）', String(flyout.value))
+    assert(
+      flyout.slider && flyout.slider.value === '80',
+      '滑块位置与音量一致',
+      JSON.stringify(flyout.slider),
+    )
+
+    // 音频图是**第一次要出声时**才建的，所以先确认一次静音/取消静音把上下文拉起来，
+    // 再去读 master / 总线 / 限幅器 —— 否则读到的是空数组。
+    await evaluate(`document.querySelector('.volfly__mute').click()`)
+    await sleep(200)
+    await evaluate(`document.querySelector('.volfly__mute').click()`)
+    await sleep(500)
+
+    const audioGraph = JSON.parse(
+      await evaluate(`JSON.stringify({
+        dyn: window.__dyn,
+        gains: window.__gains.map((g) => Number(g.gain.value.toFixed(3))),
+      })`),
+    )
+    assert(audioGraph.dyn >= 1, '音频图上有限幅器（抬音量后不削顶）', `${audioGraph.dyn} 个`)
+    assert(
+      audioGraph.gains.some((v) => v > 2.8 && v < 3.2),
+      '系统音走了一条 ×3 的总线（"声音太小"的直接修复）',
+      audioGraph.gains.slice(0, 6).join(', '),
+    )
+    assert(
+      audioGraph.gains.some((v) => v > 0.6 && v < 0.76),
+      '总音量节点按 80% 的曲线设好了',
+      audioGraph.gains.slice(0, 6).join(', '),
+    )
+
+    // 拖到 40% —— 不只要看界面，还要看 master 增益真的降下来了
+    const beforeVolumeSound = JSON.parse(await evaluate('JSON.stringify(window.__sfx)'))
+    await evaluate(`
+      (() => {
+        const s = document.querySelector('.volfly__range')
+        s.value = '40'
+        s.dispatchEvent(new Event('input', { bubbles: true }))
+        s.dispatchEvent(new Event('change', { bubbles: true }))
+        return true
+      })()
+    `)
+    await sleep(500)
+    const volAfter = JSON.parse(
+      await evaluate(`JSON.stringify({
+        stored: localStorage.getItem('wl.sfx.volume'),
+        label: document.querySelector('.volfly__value')?.textContent.trim(),
+        targets: window.__targets,
+        sfx: window.__sfx,
+      })`),
+    )
+    assert(volAfter.stored === '40', '音量偏好被持久化（刷新后还在）', String(volAfter.stored))
+    assert(volAfter.label === '40%', '浮窗的百分比跟着变', String(volAfter.label))
+    // 0.4^1.7 ≈ 0.211 —— 这条是"真的改了音量"和"只改了界面数字"的分界线
+    assert(
+      volAfter.targets.some((v) => v > 0.17 && v < 0.25),
+      '总增益按曲线真的降下来了（不是只改了界面数字）',
+      `setTargetAtTime 收到：${volAfter.targets.slice(-5).join(', ')}`,
+    )
+    const volumeSound =
+      volAfter.sfx.osc + volAfter.sfx.buf - (beforeVolumeSound.osc + beforeVolumeSound.buf)
+    assert(volumeSound > 0, '调完音量响一声确认（试听反馈）', `+${volumeSound} 个声源`)
+
+    // 一键静音
+    await evaluate(`document.querySelector('.volfly__mute').click()`)
+    await sleep(250)
+    const mutedState = JSON.parse(
+      await evaluate(`JSON.stringify({
+        stored: localStorage.getItem('wl.sfx.muted'),
+        pressed: document.querySelector('.volfly__mute')?.getAttribute('aria-pressed'),
+        label: document.querySelector('.volfly__value')?.textContent.trim(),
+      })`),
+    )
+    assert(
+      mutedState.stored === '1' && mutedState.label === '静音',
+      '浮窗里能一键静音，图标与文字同步',
+      JSON.stringify(mutedState),
+    )
+
+    // 静音状态下拖音量条 → 自动取消静音（Windows 的行为）
+    await evaluate(`
+      (() => {
+        const s = document.querySelector('.volfly__range')
+        s.value = '55'
+        s.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()
+    `)
+    await sleep(250)
+    assert(
+      (await evaluate(`localStorage.getItem('wl.sfx.muted')`)) === '0',
+      '静音时拖音量条自动取消静音',
+    )
+
+    // Esc 关闭
+    await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`)
+    await sleep(250)
+    assert(!(await evaluate(`!!document.querySelector('.volfly')`)), 'Esc 能关掉音量浮窗')
+
+    // 浮窗里的「声音设置」直达设置的声音页签
+    await evaluate(`document.querySelector('.taskbar__tray[aria-label="音量"]').click()`)
+    await sleep(250)
+    await evaluate(`document.querySelector('.volfly__link')?.click()`)
+    await sleep(1400)
+    const toSettings = JSON.parse(
+      await evaluate(`JSON.stringify({
+        flyoutGone: !document.querySelector('.volfly'),
+        activeTab: document.querySelector('.settings__tab--active')?.textContent.trim() ?? '',
+        percent: document.querySelector('.sfx-vol')?.textContent.trim() ?? '',
+      })`),
+    )
+    assert(toSettings.flyoutGone, '点「声音设置」后浮窗收起')
+    assert(toSettings.activeTab === '声音', '直接跳到设置的「声音」页签', toSettings.activeTab)
+    assert(toSettings.percent === '55%', '设置页里的音量与浮窗同步', toSettings.percent)
+
+    // 收尾：还原音量、关掉设置窗口，别影响后面的用例
+    await evaluate(
+      `localStorage.setItem('wl.sfx.volume', '80'); localStorage.setItem('wl.sfx.muted', '0'); true`,
+    )
+    await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__title')?.textContent.includes('设置'),
+        )
+        win?.querySelector('.window__ctl--close')?.click()
+        return true
+      })()
+    `)
+    await sleep(600)
 
     // 静音：刷新后应当一声都不出（含最容易被漏掉的"开机音"）
     await evaluate(`localStorage.setItem('wl.sfx.muted', '1'); true`)

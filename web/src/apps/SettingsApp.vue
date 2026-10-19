@@ -21,6 +21,7 @@ import { useWindows, type WindowInstance } from '@/stores/windows'
 import {
   playSystem,
   previewSystem,
+  setMuted,
   setSystemSoundOn,
   setVolume,
   soundState,
@@ -99,8 +100,16 @@ function toggleSystemSound(): void {
   setSystemSoundOn(!soundState.systemOn)
 }
 
+/** 总开关：静音时所有声音都不响（含棋牌），与任务栏喇叭是同一份状态 */
+function toggleMuteAll(): void {
+  setMuted(!soundState.muted)
+  if (!soundState.muted) previewSystem('notify')
+}
+
 function onVolumeInput(event: Event): void {
   const value = Number((event.target as HTMLInputElement).value)
+  // 静音状态下拖音量条自动取消静音（Windows 的行为）
+  if (soundState.muted) setMuted(false)
   setVolume(value / 100)
 }
 
@@ -408,8 +417,31 @@ watch(
 
             <div class="sfx-row">
               <div class="sfx-row__text">
-                <div class="sfx-row__title">音量</div>
-                <div class="wl-hint">{{ Math.round(soundState.volume * 100) }}%</div>
+                <div class="sfx-row__title">全部声音</div>
+                <div class="wl-hint">
+                  总开关：连象棋、斗地主的落子声一起静掉。任务栏右下角的喇叭是同一个开关。
+                </div>
+              </div>
+              <button
+                class="sfx-switch"
+                :class="{ 'sfx-switch--on': !soundState.muted }"
+                role="switch"
+                :aria-checked="!soundState.muted"
+                :title="soundState.muted ? '取消静音' : '全部静音'"
+                @click="toggleMuteAll"
+              >
+                <span class="sfx-switch__knob" />
+              </button>
+            </div>
+
+            <div class="sfx-row">
+              <div class="sfx-row__text">
+                <div class="sfx-row__title">
+                  音量<span class="sfx-vol">{{ Math.round(soundState.volume * 100) }}%</span>
+                </div>
+                <div class="wl-hint">
+                  松手会响一声确认。也可以点任务栏的喇叭，或用滚轮停在那个图标上直接调。
+                </div>
               </div>
               <input
                 class="sfx-range"
@@ -1197,6 +1229,14 @@ watch(
 .sfx-row__title {
   font-size: var(--fs-body);
   font-weight: 600;
+}
+
+/* 百分比跟在标题后面，用等宽数字：拖动时数字不会左右跳 */
+.sfx-vol {
+  margin-left: var(--space-2);
+  font-weight: 500;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
 }
 
 /* 开关：44×24 的胶囊 + 圆钮，位置用 left 过渡（宽度固定，不会抖） */
