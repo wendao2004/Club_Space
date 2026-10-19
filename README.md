@@ -1,6 +1,13 @@
-# 社团空间
+# 社团空间（Club Space）
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/wendao2004/Club_Space/actions/workflows/ci.yml/badge.svg)](https://github.com/wendao2004/Club_Space/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%E2%89%A5%2022-339933?logo=node.js&logoColor=white)](.nvmrc)
 
 部署在社团自己的 NAS 上、只对局域网开放的协作平台。桌面式界面，操作习惯贴近 Windows。
+
+> 一个可以**自己部署、数据全在自己手里**的替代品：不用把社团的账目、文件和聊天记录交给任何云服务。
+> 单机 Docker 跑得动（8GB 内存的 NAS 实测可用），也适合当作"桌面式 Web 应用"的工程样例来读。
 
 **当前状态：需求里的五项功能全部实现并可运行** —— 工具集（23 个）· 聊天 · 管理员管控 · 记账 · 财物管理 · 娱乐项目（象棋/斗地主/狼人杀），外加桌面外壳与文件系统。
 
@@ -126,6 +133,20 @@
 
 ---
 
+## 文档
+
+| 想了解 | 看这里 |
+|---|---|
+| 现在有哪些功能 | 本文「它现在能做什么」 |
+| 从零部署到自己的机器 | [docs/部署指南.md](docs/部署指南.md) |
+| 一次真实部署的记录（含踩过的坑） | [docs/部署记录.md](docs/部署记录.md) |
+| 每轮改了什么、验证到什么程度 | [docs/迭代记录.md](docs/迭代记录.md) |
+| 为什么这么设计、绕过哪些坑 | [docs/开发纪实.md](docs/开发纪实.md)、本文「技术栈与关键决策」 |
+| 最初的需求原文 | [docs/需求.md](docs/需求.md) |
+| 全部文档索引 | [docs/README.md](docs/README.md) |
+
+---
+
 ## 快速开始（本机开发）
 
 本机不需要 Docker：
@@ -147,31 +168,44 @@ pnpm test:fast            # 跳过需要浏览器的 ui-smoke-test
 node scripts/run-all-tests.mjs --only chat-test,games-test
 ```
 
-单独跑某一项（都需要后端已在 3000 端口运行）：
+单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
+直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
+
+全量 **26 个套件 / 1801 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|
 | `xiangqi-test` | 69 | 规则引擎，**perft 深度 1/2/3/4 = 44 / 1920 / 79666 / 3290240** 精确匹配 |
+| `xiangqi-ai-test` | 36 | 机器人：**903 个随机局面上与规则引擎逐条差分**、棋力、时间预算、自对弈 |
+| `xiangqi-mate-test` | 11 | 九种杀法：**先确认"这确实是将死"，再断言名字** |
+| `games-test` | 84 | 象棋房间：80 手逐步与引擎差分、人机对战、三次重复判和、按人推送 |
+| `game-isolation-test` | 31 | 三种游戏共用 `game_rooms` 一张表时的隔离（`board` 列含义不同） |
 | `totp-test` | 36 | **RFC 6238 附录 B 的 6 条标准向量**全部匹配 |
 | `admin-test` | 71 | 运维管控的权限门禁与参数白名单 |
 | `ops-runner-test` | 43 | 执行器的独立白名单校验 |
-| `e2e-test` | 52 | 文件分片续传、秒传、**任何格式上传（内容定类型）**、跨空间隔离、路径穿越 |
+| `e2e-test` | 58 | 文件分片续传、秒传、**任何格式上传（内容定类型）**、跨空间隔离、路径穿越 |
+| `upload-limit-test` | 11 | 磁盘余量守卫（余量不足时拒绝并告知差多少） |
+| `ratelimit-test` | 12 | 真打满阈值的限流 |
 | `image-tools-test` | 37 | 图片转换/缩放/压缩，含"透明转 JPEG 不能变黑" |
+| `tools-extra-test` | 67 | 工具集扩展：PDF、文本、抽签 |
 | `chat-test` | 68 | SSE 实时推送、中文全文检索、撤回不留正文 |
-| `ledger-test` | 149 | 金额精度、状态机不许跳步、分摊合计、CSV 注入防护、活动汇总与逐笔对账 |
+| `realtime-test` | 27 | 在线状态与心跳过期 |
+| `ledger-test` | 176 | 金额精度、状态机不许跳步、分摊合计、CSV 注入防护、活动汇总与逐笔对账 |
 | `assets-test` | 71 | 可用量算而不存、事务内防超借、逾期派生、退役保留历史 |
-| `user-admin-test` | 82 | 管理员改成员、安全红线拒绝路径、**借还记录的作废与恢复** |
-| `werewolf-test` | 274 | 身份分配随机性、隐藏信息、超时兜底、**房主退房解散房间** |
+| `user-admin-test` | 82 | 管理员改成员、安全红线拒绝路径、借还记录的作废与恢复 |
+| `werewolf-test` | 274 | 身份分配随机性、隐藏信息、超时兜底、房主退房解散房间 |
 | `werewolf-route-test` | 59 | 9 个真实账号走 HTTP 全流程，逐个比对 view 有没有泄露 |
-| `games-test` | 48 | **80 手逐步与引擎差分比对，0 处偏差** |
 | `doudizhu-test` | 109 | 全部牌型的正例与反例、比较规则、400 手自动对局 |
-| `doudizhu-room-test` | 58 | **手牌隐藏**、叫地主、出牌校验、自动打完整局 |
+| `doudizhu-room-test` | 59 | **手牌隐藏**、叫地主、出牌校验、自动打完整局 |
+| `doudizhu-ux-test` | 26 | 驱动动画的"这一手"标识与结算文案映射 |
 | `admin-e2e-test` | 71 | 两步验证绑定/确认/关闭、秘密不外泄 |
-| `ui-smoke-test` | 144 | **在真实 Chrome 里打开窗口、发消息、记一笔账、走一步棋、登记物品** |
+| `convert-test` | 27 | 与 Gotenberg 的接口契约（用一个假服务验证，不需要真装） |
+| `ui-smoke-test` | 186 | **在真实 Chrome 里开窗口、发消息、记一笔账、走一步棋、跟机器人下一盘、登记物品** |
 
 `ui-smoke-test` 用 DevTools 协议驱动系统里的 Chrome/Edge，
 验证界面**确实渲染出来了**（不是构建成功就算），并且**真的能操作**；
 每个操作都会再用 API 查一遍后端，确认状态确实被持久化 —— 不是前端乐观更新。
+（它需要一个真实的 Chrome，所以 CI 里跳过，其余 25 个套件都在 CI 里跑。）
 
 依赖 `data/` 的测试需要干净数据库（首次运行才能自举创建管理员），
 `run-all-tests.mjs` 会自动处理：每个端到端测试前重启服务并清空 `data/`。
@@ -213,7 +247,7 @@ docker compose up -d --build
 | 窗口管理 | **自研** | 评测过 winbox（2023 停更）、golden-layout（2022 停更）、OS.js（强锁定），都无法满足"自由重叠窗口 + 任务栏 + 贴边分屏"，皮肤类库（98.css 等）只有外观 |
 | 棋盘 | **自研 SVG** | 同上：能画对河界/九宫/位置标记，且完全可控 |
 | 象棋规则 | **自研 + perft 验证** | 上游库版本线无法核实（本机拿不到 GitHub/npm 官方源），而规则正确性不能押在无法核实的依赖上 |
-| 后端 | Node.js 24 + Fastify 5 | 用 Node 原生类型剥离直接跑 `.ts`，无编译步骤 |
+| 后端 | Node.js 24（容器）/ ≥22（本机） + Fastify 5 | 用 Node 原生类型剥离直接跑 `.ts`，无编译步骤 |
 | 数据库 | **`node:sqlite`**（内置，WAL） | 省掉一个 250-400MB 的 Postgres 容器；本机无 Docker 也能原生跑 |
 | 口令哈希 | `node:crypto` scrypt | 避开 argon2 的原生编译依赖 |
 | 会话 | httpOnly cookie + 服务端会话表 | 可即时吊销；localStorage 里的 JWT 做不到 |
@@ -255,8 +289,8 @@ docker compose up -d --build
 ## 目录结构
 
 ```
-WebLearning/
-├── server/                 # 后端（Node 24 + Fastify，直接跑 .ts）
+Club_Space/
+├── server/                 # 后端（Node ≥22 + Fastify，直接跑 .ts）
 │   └── src/
 │       ├── index.ts        # HTTP 入口与全部路由
 │       ├── db.ts           # node:sqlite + schema 迁移（v1 文件 v2 聊天 v3 记账 v4 游戏 v5 两步验证）
@@ -292,8 +326,9 @@ WebLearning/
 │       ├── mobile/         # 移动端外壳（独立界面）
 │       ├── views/          # 登录页 / 安全上下文提示条
 │       └── styles/         # 设计令牌与基础样式
-├── scripts/                # 测试（24 个套件、1638 项断言，`pnpm test` 全跑）
-└── deploy/                 # 部署：compose / Caddyfile / 证书 / 引导页 / 备份 / 转换镜像
+├── scripts/                # 测试（26 个套件、1801 条断言，`pnpm test` 全跑）
+├── deploy/                 # 部署：compose / Caddyfile / 证书 / 引导页 / 备份 / 转换镜像
+└── docs/                   # 需求、部署、开发纪实、迭代记录（索引见 docs/README.md）
 ```
 
 ---
@@ -319,3 +354,12 @@ WebLearning/
 
 整个应用只维持**一条** SSE 连接（由 `stores/realtime.ts` 持有），聊天和游戏都通过它订阅事件。
 真需要全双工（例如实时协同编辑）时再引入 WebSocket，不必现在预付这个复杂度。
+
+---
+
+## 参与与许可
+
+- 想改代码：见 [CONTRIBUTING.md](CONTRIBUTING.md)（里面有"几条不能破的约定"）。
+- 发现安全问题：**不要开公开 issue**，走 [SECURITY.md](SECURITY.md) 里的私密渠道。
+- 许可证：**MIT**（见 [LICENSE](LICENSE)）—— 可自由使用、修改、商用，保留版权声明即可。
+  自建内网 CA 的根私钥、`data/`、`.env` 均已在 `.gitignore` 里，请勿提交。
