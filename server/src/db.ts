@@ -557,6 +557,17 @@ function migrate(database: DatabaseSync): void {
            AND space != (SELECT p.space FROM nodes p WHERE p.id = nodes.parent_id);
       `)
     },
+    // ---- v11: 人机对战（象棋机器人）----
+    (d) => {
+      d.exec(`
+        -- 机器人的座位不占 users 表：给它建一个假账号意味着它会出现在成员列表、
+        -- 聊天联系人、审计的 actor 里，还会有一个谁也登不上的口令 ——
+        -- 为了显示一个"电脑对手"而污染账号体系，代价太大。
+        -- 所以只在这张表上记"哪一边是电脑、什么难度"，human 一方照旧占 player 列。
+        ALTER TABLE game_rooms ADD COLUMN bot_side TEXT;
+        ALTER TABLE game_rooms ADD COLUMN bot_level TEXT;
+      `)
+    },
   ]
 
   if (version < migrations.length) {

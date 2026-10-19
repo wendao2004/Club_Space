@@ -86,6 +86,7 @@ import {
   leaveRoom,
   legalMovesFor,
   listRooms,
+  makeBotMove,
   makeMove,
   myStats,
   resign,
@@ -2512,7 +2513,80 @@ const roomSchema = z.object({
   kind: z.enum(['xiangqi']).default('xiangqi'),
   title: z.string().max(40).default(''),
   side: z.enum(['red', 'black']).optional(),
+  /**
+   * 人机对战。传了它，创建者就只坐另一边，电脑坐对面 —— 坐下即开局。
+   * 难度不传按普通；边不传默认电脑执黑（用户执红先走，符合"我先来"的直觉）。
+   */
+  bot: z
+    .object({
+      level: z.enum(['easy', 'normal', 'hard']).default('normal'),
+      side: z.enum(['red', 'black']).default('black'),
+    })
+    .optional(),
 })
+
+/**
+ * 机器人"思考"的时间。
+ *
+ * 这不是给搜索留的时间（搜索有自己的预算），而是纯粹给人看的节奏：
+ * 立刻回一手会显得对面是个脚本，稍微顿一下才像在跟你下棋。
+ * 也正好把人落子后的响应（SSE 推送）先送出去，界面不会卡着等结果。
+ */
+const BOT_THINK_MS = 500
+
+/**
+ * 正在等机器人落子的房间。
+ *
+ * 去重是必须的：一次落子会同时触发"人走完 → 该机器人了"和"机器人自己走完 →
+ * 又轮到人"两条路径，没有这张表就会出现同一个房间有两个定时器，
+ * 结果机器人连走两手（对手还没动，第二次会被规则拒绝并刷一屏错误日志）。
+ */
+const pendingBotReplies = new Set<string>()
+
+/**
+ * 让机器人走一步（延迟到"像是想了一下"之后再走）。
+ *
+ * ⚠️ 搜索是**在主线程上同步跑**的：困难档最长约 1.2 秒，这段时间里
+ * 整个进程（含别人的 HTTP 请求与 SSE 心跳）都会被挡住。
+ * 这是刻意的取舍：机器人对战是单人对单人的慢节奏场景，
+ * 为此起 worker 线程要维护一套跨线程的棋盘状态，复杂度和收益不成比例。
+ * 时间预算本身是硬上限（见 xiangqi-ai.ts 的 LEVEL_CONFIG），
+ * 8GB 的 NAS 上不会出现"机器人思考把服务拖垮"。
+ */
+function scheduleBotReply(roomId: string): void {
+  if (pendingBotReplies.has(roomId)) return
+  pendingBotReplies.add(roomId)
+
+  setTimeout(() => {
+    pendingBotReplies.delete(roomId)
+    try {
+      const result = makeBotMove(roomId)
+      if (!result) return // 已经轮不到机器人了（人刚走了别的、或对局已结束）
+      pushXiangqiRoom(roomId, 'game-move', { move: result.move, finished: result.finished })
+      if (result.finished) {
+        audit({
+          // actor 明确写 'bot'：审计里要能一眼看出"这一手是电脑下的"，
+          // 而不是把战绩记到创建者头上（actor_id 只是 TEXT，没有外键约束）
+          actorId: 'bot',
+          category: 'system',
+          action: 'game-finished',
+          target: roomId,
+          payload: {
+            winner: result.finished.winner,
+            reason: result.finished.reason,
+            mate: result.finished.mate?.name ?? null,
+            plies: result.room.moves.length,
+            opponent: 'bot',
+            human: result.room.createdBy,
+          },
+        })
+      }
+    } catch (err) {
+      // 机器人自己出问题是后台错误，不该影响任何人的请求；记下来即可
+      console.error(`[棋局] 机器人落子失败（房间 ${roomId}）：`, err instanceof Error ? err.message : err)
+    }
+  }, BOT_THINK_MS)
+}
 
 app.post('/api/games/rooms', async (req) => {
   const user = requireUser(req)
@@ -2520,9 +2594,10 @@ app.post('/api/games/rooms', async (req) => {
   const body = roomSchema.parse(req.body ?? {})
   const room = createRoom({
     kind: body.kind,
-    title: body.title || `${user.display_name} 的棋局`,
+    title: body.title || (body.bot ? `${user.display_name} 的人机对战` : `${user.display_name} 的棋局`),
     creatorId: user.id,
     side: body.side,
+    bot: body.bot,
   })
   // 大厅里的每个人都要看到新房间，但各自视角不同 —— 按人推
   pushXiangqiRoom(room.id, 'game', { action: 'created' })
@@ -2532,8 +2607,17 @@ app.post('/api/games/rooms', async (req) => {
     category: 'system',
     action: 'game-create-room',
     target: room.id,
-    payload: { kind: room.kind, title: room.title, side: body.side ?? 'red' },
+    payload: {
+      kind: room.kind,
+      title: room.title,
+      side: body.side ?? 'red',
+      bot: body.bot ? `${body.bot.level}:${body.bot.side}` : null,
+    },
   })
+  // 用户执黑时，红方是电脑 —— 开局就得它先走
+  if (room.botSide !== null && room.status === 'playing' && room.turn === room.botSide) {
+    scheduleBotReply(room.id)
+  }
   return { room }
 })
 
@@ -2586,8 +2670,20 @@ app.post('/api/games/rooms/:id/move', async (req) => {
       category: 'system',
       action: 'game-finished',
       target: id,
-      payload: { winner: result.finished.winner, reason: result.finished.reason, plies: result.room.moves.length },
+      payload: {
+        winner: result.finished.winner,
+        reason: result.finished.reason,
+        mate: result.finished.mate?.name ?? null,
+        plies: result.room.moves.length,
+      },
     })
+  }
+
+  // 人机对战：人走完就该电脑了。
+  // ⚠️ 必须放在"推送之后、返回之前"：先让人的这一步通过 SSE 落到两边屏幕上，
+  // 再去算机器人的棋；否则用户要对着一个没有任何反馈的界面等 1 秒多。
+  if (!result.finished && result.room.botSide !== null && result.room.turn === result.room.botSide) {
+    scheduleBotReply(id)
   }
 
   return { room: result.room, move: result.move, finished: result.finished }

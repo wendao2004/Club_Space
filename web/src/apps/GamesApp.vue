@@ -16,7 +16,8 @@ import XiangqiBoard from '@/components/XiangqiBoard.vue'
 import { useGames } from '@/stores/games'
 import { useUi } from '@/stores/ui'
 import { formatTime } from '@/api'
-import type { GameColor, GameMove, GameRoom, GameStatus } from '@/api'
+import type { GameBotLevel, GameColor, GameMove, GameRoom, GameStatus } from '@/api'
+import * as sfx from '@/lib/sfx'
 import type { WindowInstance } from '@/stores/windows'
 
 const props = defineProps<{ win: WindowInstance }>()
@@ -148,6 +149,15 @@ const resultText = computed<string>(() => {
   return '和棋'
 })
 
+/** 结果标题：将死且认出了杀法时直接报杀法名 ——「绝杀 · 卧槽马」。 */
+const resultHeadline = computed<string>(() => {
+  const current = room.value
+  if (!current || !current.result) return ''
+  const m = current.result.mate
+  if (m && current.result.reason === 'checkmate') return `绝杀 · ${m.name}`
+  return resultText.value
+})
+
 const resultReason = computed<string>(() => {
   const result = room.value?.result
   return result ? reasonLabel(result.reason) : ''
@@ -157,6 +167,8 @@ const turnText = computed<string>(() => {
   const current = room.value
   if (!current || current.status !== 'playing') return ''
   if (games.myTurn) return '轮到你走'
+  // 人机对战：对面是电脑时别写"轮到黑方走"，直接说它在想 —— 用户要的是这个信息
+  if (current.botThinking) return '电脑正在思考…'
   return current.turn === 'red' ? '轮到红方走' : '轮到黑方走'
 })
 
@@ -209,6 +221,70 @@ function errText(err: unknown): string {
 function onRefresh(): void {
   void games.loadRooms()
 }
+
+// ---------------------------------------------------------------- 人机对战
+
+/**
+ * 三个难度档。文案里刻意说清"它下得怎么样"而不是"它的搜索深度"——
+ * 用户关心的是"我下得过它吗"，不是引擎参数。
+ */
+const BOT_LEVELS: Array<{ key: GameBotLevel; label: string; hint: string }> = [
+  { key: 'easy', label: '简单', hint: '会走漏着，刚学棋也能赢' },
+  { key: 'normal', label: '普通', hint: '算得比较认真，能跟你来回下' },
+  { key: 'hard', label: '困难', hint: '每步想一想，不太好赢' },
+]
+
+const showBot = ref(false)
+const botLevel = ref<GameBotLevel>('normal')
+const botSide = ref<GameColor>('red')
+
+function openBot(): void {
+  localError.value = null
+  showBot.value = true
+}
+
+function closeBot(): void {
+  if (!busy.value) showBot.value = false
+}
+
+async function doStartBot(): Promise<void> {
+  if (busy.value) return
+  busy.value = true
+  localError.value = null
+  try {
+    await games.startBotGame({ level: botLevel.value, side: botSide.value })
+    showBot.value = false
+    view.value = 'room'
+  } catch (err) {
+    localError.value = errText(err)
+  } finally {
+    busy.value = false
+  }
+}
+
+function onStartBot(): void {
+  void doStartBot()
+}
+
+/** 音效开关（持久化在 localStorage，见 lib/sfx）。 */
+const soundOn = ref(!sfx.isMuted())
+function toggleSound(): void {
+  soundOn.value = !sfx.toggleMuted()
+}
+
+/** 这一局是不是人机对战。 */
+const isBotRoom = computed<boolean>(() => room.value?.botSide === 'red' || room.value?.botSide === 'black')
+
+/** 将死时识别出的杀法（「绝杀 · 卧槽马」）。 */
+const mate = computed(() => room.value?.result?.mate ?? null)
+
+/** 电脑坐在哪一边（用于文案"电脑执黑"）。 */
+const botSideText = computed<string>(() => {
+  const side = room.value?.botSide
+  if (side === 'red') return '红'
+  if (side === 'black') return '黑'
+  return ''
+})
 
 function dismissError(): void {
   games.error = null
@@ -454,6 +530,9 @@ onBeforeUnmount(() => {
         <div class="bar-title"><Icon name="grid" :size="18" />象棋</div>
         <span class="stats">{{ statsText }}</span>
         <div class="spacer" />
+        <button class="wl-btn" title="和电脑下一盘" @click="openBot">
+          <Icon name="cpu" :size="16" />人机对战
+        </button>
         <button class="wl-btn wl-btn--primary" @click="openCreate">
           <Icon name="plus" :size="16" />新建对局
         </button>
@@ -508,6 +587,9 @@ onBeforeUnmount(() => {
                     <span class="wl-badge" :class="statusClass(item.status)">
                       {{ statusLabel(item.status) }}
                     </span>
+                    <span v-if="item.botSide" class="wl-badge wl-badge--accent" title="这一局对面是电脑">
+                      人机
+                    </span>
                   </div>
                   <div class="room-players">
                     <span class="side">
@@ -541,6 +623,13 @@ onBeforeUnmount(() => {
           {{ statusLabel(room?.status) }}
         </span>
         <div class="spacer" />
+        <button
+          class="wl-icon-btn"
+          :title="soundOn ? '关闭音效' : '打开音效'"
+          @click="toggleSound"
+        >
+          <Icon :name="soundOn ? 'volume' : 'volume-off'" :size="16" />
+        </button>
         <span v-if="room" class="room-id">房间号 {{ room?.id }}</span>
       </header>
 
@@ -615,8 +704,12 @@ onBeforeUnmount(() => {
           </div>
 
           <!-- 对局结果 -->
-          <div v-if="room?.status === 'finished'" class="result">
-            <div class="result-main">{{ resultText }}</div>
+          <div v-if="room?.status === 'finished'" class="result" :class="{ 'result--mate': mate }">
+            <div class="result-main">{{ resultHeadline }}</div>
+            <div v-if="mate" class="result-mate">
+              <Icon name="star" :size="14" />
+              <span>{{ mate.detail }}</span>
+            </div>
             <div class="result-reason">{{ resultReason }}</div>
             <div v-if="room?.mySide" class="result-mine">你执{{ mySideText }}</div>
             <button class="wl-btn wl-btn--primary" :disabled="busy" @click="onRematch">
@@ -626,7 +719,8 @@ onBeforeUnmount(() => {
 
           <!-- 回合提示 -->
           <div v-else-if="room?.status === 'playing'" class="turnbox">
-            <Icon name="clock" :size="16" />
+            <span v-if="room?.botThinking" class="wl-spinner" />
+            <Icon v-else name="clock" :size="16" />
             <span class="turn-text">{{ turnText }}</span>
             <span v-if="games.checkedSide" class="wl-badge wl-badge--danger">将军</span>
           </div>
@@ -723,6 +817,59 @@ onBeforeUnmount(() => {
           <button class="wl-btn" :disabled="busy" @click="closeCreate">取消</button>
           <button class="wl-btn wl-btn--primary" :disabled="busy" @click="onCreate">
             <span v-if="busy" class="wl-spinner" /><span v-else>创建</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================================================== 人机对战弹层 -->
+    <div v-if="showBot" class="popover-layer">
+      <div class="scrim" @click="closeBot" />
+      <div class="modal wl-card">
+        <h3><Icon name="cpu" :size="18" /> 人机对战</h3>
+        <p class="modal-sub">和电脑下一盘 —— 不用等人，坐下就开始</p>
+
+        <div class="wl-field">
+          <label class="wl-label">难度</label>
+          <div class="level-pick">
+            <button
+              v-for="item in BOT_LEVELS"
+              :key="item.key"
+              class="level-btn"
+              :class="{ active: botLevel === item.key }"
+              @click="botLevel = item.key"
+            >
+              <span class="level-name">{{ item.label }}</span>
+              <span class="level-hint">{{ item.hint }}</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="wl-field">
+          <label class="wl-label">你执哪一边</label>
+          <div class="side-pick">
+            <button
+              class="side-btn"
+              :class="{ active: botSide === 'red' }"
+              @click="botSide = 'red'"
+            >
+              <span class="side-dot red" />执红（先行）
+            </button>
+            <button
+              class="side-btn"
+              :class="{ active: botSide === 'black' }"
+              @click="botSide = 'black'"
+            >
+              <span class="side-dot black" />执黑（电脑先行）
+            </button>
+          </div>
+        </div>
+
+        <p v-if="localError" class="form-error">{{ localError }}</p>
+        <div class="modal-actions">
+          <button class="wl-btn" :disabled="busy" @click="closeBot">取消</button>
+          <button class="wl-btn wl-btn--primary" :disabled="busy" @click="onStartBot">
+            <span v-if="busy" class="wl-spinner" /><span v-else>开始</span>
           </button>
         </div>
       </div>
@@ -1186,6 +1333,32 @@ onBeforeUnmount(() => {
   color: var(--text-tertiary);
 }
 
+/* 绝杀：结果卡单独给一层强调色。将死是这盘棋的高潮，
+   跟"对手认输"用同一张灰卡显示就太可惜了。 */
+.result--mate {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-1));
+}
+
+.result--mate .result-main {
+  color: var(--accent);
+}
+
+.result-mate {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.result-mate svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
 .actions {
   display: flex;
   flex-wrap: wrap;
@@ -1387,6 +1560,47 @@ onBeforeUnmount(() => {
 .side-btn:disabled {
   color: var(--text-disabled);
   cursor: not-allowed;
+}
+
+/* 难度选择：三张带说明的小卡，比一个下拉框更容易看明白"选的是什么" */
+.level-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.level-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.level-btn:hover {
+  border-color: var(--border-strong);
+}
+
+.level-btn.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-1));
+}
+
+.level-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.level-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .modal-actions {

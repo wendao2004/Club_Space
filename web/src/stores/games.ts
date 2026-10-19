@@ -15,13 +15,64 @@
  *    这是最容易写反的地方，所以 pieceAt 与 squareToIndex 只在这一处做转换。
  */
 import { defineStore } from 'pinia'
-import { api, ApiError, type GameColor, type GameMove, type GameRoom, type GameStats } from '@/api'
+import {
+  api,
+  ApiError,
+  type GameBotLevel,
+  type GameColor,
+  type GameMove,
+  type GameResult,
+  type GameRoom,
+  type GameStats,
+} from '@/api'
+
+/** 机器人难度档位的中文名。与 i18n 无关，就是一处文案。 */
+export const BOT_LEVEL_LABELS: Record<GameBotLevel, string> = {
+  easy: '简单',
+  normal: '普通',
+  hard: '困难',
+}
 import { useAuth } from '@/stores/auth'
 import { useUi } from '@/stores/ui'
 import { useRealtime } from '@/stores/realtime'
+import * as sfx from '@/lib/sfx'
 
 /** 实时事件的取消函数，组件卸载时统一解绑。 */
 let offRealtime: Array<() => void> = []
+
+/**
+ * 一手棋该配什么声。
+ *
+ * 只在**实时事件**这一处发声，不在"我提交落子"的 HTTP 响应里发 ——
+ * 自己走的那一手也会通过 SSE 回到这里（整盘覆盖式的处理），
+ * 两处都发声就会"啪、啪"响两次。
+ *
+ * 几种情况刻意分得开：
+ *   - 普通落子：一记轻敲
+ *   - 吃子：更沉更长（不用看屏幕也知道刚才有子被吃了）
+ *   - 将军：叠加两个上行方波音，和落子完全不同的音色
+ *   - 将死：一小段琶音，配合界面上的「绝杀」横幅
+ */
+function playMoveSound(move: GameMove, finished: GameRoom['result'], mySide: GameColor | null): void {
+  if (move.captured) sfx.playCapture()
+  else sfx.playMove()
+
+  if (move.check) sfx.playCheck()
+
+  if (!finished) return
+  if (finished.reason === 'checkmate') {
+    // 我把对方将死了才放"绝杀"那段；被将死放的是下行的败音
+    if (mySide && finished.winner !== mySide) sfx.playLose()
+    else sfx.playMate()
+    return
+  }
+  if (finished.winner === null) {
+    sfx.playDraw()
+    return
+  }
+  if (mySide && finished.winner === mySide) sfx.playWin()
+  else if (mySide) sfx.playLose()
+}
 
 interface State {
   rooms: GameRoom[]
@@ -150,7 +201,7 @@ export const useGames = defineStore('games', {
             roomId: string
             move: GameMove
             room: GameRoom
-            finished: { winner: GameColor | null; reason: string } | null
+            finished: GameResult | null
           }
           if (!payload?.room) return
           const view = viewerRoom(payload.room)
@@ -160,6 +211,8 @@ export const useGames = defineStore('games', {
             this.room = view
             this.lastMove = { from: payload.move.from, to: payload.move.to }
             this.clearSelection()
+            // 只有"我正看着的这一局"才出声：大厅里别人的棋局不该往耳朵里灌
+            playMoveSound(payload.move, payload.finished, view.mySide)
           }
 
           // 列表里那一项也同步更新，避免切回大厅时看到过期状态
@@ -169,8 +222,14 @@ export const useGames = defineStore('games', {
 
           if (payload.finished) {
             const winnerName = payload.finished.winner === 'red' ? '红方' : '黑方'
+            const mate = payload.finished.mate
             const reasonText = REASON_LABELS[payload.finished.reason] ?? payload.finished.reason
-            useUi().notify('info', `${winnerName}获胜`, reasonText)
+            if (mate) {
+              // 将死时把杀法报出来：「绝杀 · 卧槽马」比"红方获胜"有意思得多
+              useUi().notify('info', `绝杀 · ${mate.name}`, mate.detail)
+            } else {
+              useUi().notify('info', `${winnerName}获胜`, reasonText)
+            }
             void this.loadRooms()
           }
         }),
@@ -179,8 +238,18 @@ export const useGames = defineStore('games', {
           if (this.room && payload?.roomId === this.room.id) {
             // room 为 null 表示这个房间已经不存在了（人都走光了）——
             // 退回大厅，而不是继续显示一个已经不存在的对局。
+            const before = this.room.status
             this.room = payload.room ? viewerRoom(payload.room) : null
             if (!this.room) this.clearSelection()
+
+            // 认输/离开/对手退出导致的对局结束：这里没有落子事件，得单独补一声
+            if (before === 'playing' && this.room?.status === 'finished') {
+              const winner = this.room.result?.winner ?? null
+              const mySide = this.room.mySide
+              if (winner === null) sfx.playDraw()
+              else if (mySide && winner === mySide) sfx.playWin()
+              else sfx.playLose()
+            }
           }
           // 房间的增删改都可能发生，直接重拉列表最省心
           void this.loadRooms()
@@ -236,6 +305,37 @@ export const useGames = defineStore('games', {
         const message = err instanceof ApiError ? err.message : '创建对局失败'
         this.error = message
         useUi().notify('error', '创建对局失败', message)
+        throw err
+      }
+    },
+
+    /**
+     * 开一局人机对战。
+     *
+     * 与"新建对局"的区别只有两点：对面立刻有人（电脑），以及开局即下 ——
+     * 所以我执黑时，机器人会自己走第一步（服务端在创建后就会安排）。
+     */
+    async startBotGame(input: { level: GameBotLevel; side: GameColor }): Promise<GameRoom> {
+      try {
+        const result = await api.games.createRoom({
+          kind: 'xiangqi',
+          side: input.side,
+          bot: { level: input.level, side: input.side === 'red' ? 'black' : 'red' },
+        })
+        this.room = result.room
+        this.clearSelection()
+        this.lastMove = null
+        await this.loadRooms()
+        useUi().notify(
+          'success',
+          '人机对战开始',
+          `你执${input.side === 'red' ? '红' : '黑'}，对手是${result.room.botSide === 'red' ? '红方' : '黑方'}电脑（${BOT_LEVEL_LABELS[input.level]}）`,
+        )
+        return result.room
+      } catch (err) {
+        const message = err instanceof ApiError ? err.message : '开始人机对战失败'
+        this.error = message
+        useUi().notify('error', '开始人机对战失败', message)
         throw err
       }
     },
@@ -298,14 +398,9 @@ export const useGames = defineStore('games', {
         const index = this.rooms.findIndex((r) => r.id === roomId)
         if (index >= 0) this.rooms[index] = result.room
 
-        if (result.finished) {
-          const winnerName = result.finished.winner === 'red' ? '红方' : '黑方'
-          useUi().notify(
-            'info',
-            `${winnerName}获胜`,
-            REASON_LABELS[result.finished.reason] ?? result.finished.reason,
-          )
-        }
+        // 结束通知**不在这里弹**：对局结束会通过 SSE 的 game-move 事件回到双方，
+        // 那边统一弹一次（含杀法说明）。两处都弹的话，走出制胜一手的人会看到两个一样的提示。
+
       } catch (err) {
         // 服务端判定不合法：清掉目标高亮但保留选中，让用户可以改走别的
         this.targets = []
@@ -428,6 +523,7 @@ export const useGames = defineStore('games', {
 
 const REASON_LABELS: Record<string, string> = {
   checkmate: '将死',
+  repetition: '同一局面出现三次，判和',
   stalemate: '困毙（无棋可走判负）',
   resign: '对手认输',
   abandon: '对手离开',

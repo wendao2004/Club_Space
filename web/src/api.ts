@@ -632,8 +632,13 @@ export const api = {
       )
     },
 
-    createRoom: (input: { kind?: 'xiangqi'; title?: string; side?: GameColor } = {}) =>
-      request<{ room: GameRoom }>('/api/games/rooms', { json: input }),
+    createRoom: (input: {
+      kind?: 'xiangqi'
+      title?: string
+      side?: GameColor
+      /** 传了就是人机对战：电脑坐对面，开局即下。 */
+      bot?: { level: GameBotLevel; side: GameColor }
+    } = {}) => request<{ room: GameRoom }>('/api/games/rooms', { json: input }),
 
     getRoom: (id: string) => request<{ room: GameRoom }>(`/api/games/rooms/${id}`),
 
@@ -1340,6 +1345,22 @@ export interface GameMove {
   byName: string
 }
 
+/** 机器人的难度档位。 */
+export type GameBotLevel = 'easy' | 'normal' | 'hard'
+
+/** 将死时识别出来的杀法（卧槽马、双车错……）。 */
+export interface GameMatePattern {
+  name: string
+  detail: string
+}
+
+export interface GameResult {
+  winner: GameColor | null
+  reason: string
+  /** 将死时的杀法；认不出来或不是将死就是 null */
+  mate?: GameMatePattern | null
+}
+
 export interface GameRoom {
   id: string
   kind: 'xiangqi'
@@ -1355,8 +1376,13 @@ export interface GameRoom {
   board: string
   turn: GameColor
   moves: GameMove[]
-  result: { winner: GameColor | null; reason: string } | null
+  result: GameResult | null
   inCheck: boolean
+  /** 哪一边是电脑（人机对战）；两边都是人就是 null */
+  botSide: GameColor | null
+  botLevel: GameBotLevel | null
+  /** 是否正轮到电脑走 —— 界面据此显示"电脑思考中…" */
+  botThinking: boolean
   createdAt: number
   updatedAt: number
   finishedAt: number | null

@@ -22,14 +22,17 @@ import {
   applyMove,
   deserializeBoard,
   evaluateResult,
+  initialBoard,
   legalMoves,
   parseSquare,
   serializeBoard,
   squareName,
-  initialBoard,
+  type Board,
   type Color,
   type Move,
 } from './xiangqi.ts'
+import { BOT_LEVEL_LABELS, chooseMove, positionKey, type BotLevel } from './xiangqi-ai.ts'
+import { classifyMate, type MatePattern } from './xiangqi-mates.ts'
 
 export type RoomKind = 'xiangqi'
 export type RoomStatus = 'waiting' | 'playing' | 'finished'
@@ -47,6 +50,13 @@ export interface RoomMove {
   byName: string
 }
 
+export interface RoomResult {
+  winner: Color | null
+  reason: string
+  /** 将死时给出的杀法（卧槽马、双车错……），认不出来就是 null。 */
+  mate?: MatePattern | null
+}
+
 export interface RoomView {
   id: string
   kind: RoomKind
@@ -61,9 +71,15 @@ export interface RoomView {
   board: string
   turn: Color
   moves: RoomMove[]
-  result: { winner: Color | null; reason: string } | null
+  result: RoomResult | null
   /** 当前局面是否处于将军状态 */
   inCheck: boolean
+  /** 哪一边是电脑（人机对战）；两边都是人就为 null。 */
+  botSide: Color | null
+  /** 电脑的难度档位，用于显示与"再来一局"沿用同一档。 */
+  botLevel: BotLevel | null
+  /** 是否轮到电脑走 —— 前端据此显示"电脑思考中…"。 */
+  botThinking: boolean
   createdAt: number
   updatedAt: number
   finishedAt: number | null
@@ -88,9 +104,16 @@ interface RawRoom {
   turn: Color
   moves: string
   result: string | null
+  bot_side: Color | null
+  bot_level: BotLevel | null
   created_at: number
   updated_at: number
   finished_at: number | null
+}
+
+/** 电脑的显示名。故意带上难度：用户想知道自己在跟什么水平的对手下。 */
+export function botName(level: BotLevel): string {
+  return `电脑（${BOT_LEVEL_LABELS[level]}）`
 }
 
 const ROOM_SELECT = `
@@ -105,13 +128,17 @@ const ROOM_SELECT = `
 function toView(row: RawRoom, viewerId: string): RoomView {
   const board = deserializeBoard(row.board)
   const moves = JSON.parse(row.moves) as RoomMove[]
-  const result = row.result ? (JSON.parse(row.result) as RoomView['result']) : null
+  const result = row.result ? (JSON.parse(row.result) as RoomResult) : null
 
   const mySide: Color | null =
     row.red_player === viewerId ? 'red' : row.black_player === viewerId ? 'black' : null
 
   // 只在未结束时算将军，避免对已结束的对局做无意义的计算
   const inCheck = row.status === 'finished' ? false : evaluateResult({ board, turn: row.turn, history: [] }).inCheck
+
+  const botSide = row.bot_side ?? null
+  const botLevel = row.bot_level ?? null
+  const botLabel = botLevel ? botName(botLevel) : '电脑'
 
   return {
     id: row.id,
@@ -121,14 +148,17 @@ function toView(row: RawRoom, viewerId: string): RoomView {
     createdBy: row.created_by,
     creatorName: row.creator_name,
     redPlayer: row.red_player,
-    redName: row.red_name,
+    redName: botSide === 'red' ? botLabel : row.red_name,
     blackPlayer: row.black_player,
-    blackName: row.black_name,
+    blackName: botSide === 'black' ? botLabel : row.black_name,
     board: row.board,
     turn: row.turn,
     moves,
     result,
     inCheck,
+    botSide,
+    botLevel,
+    botThinking: row.status === 'playing' && botSide === row.turn,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -212,6 +242,8 @@ export function createRoom(input: {
   creatorId: string
   /** 创建者想坐哪一边；不指定就坐红方（红先走，通常是先手方）。 */
   side?: Color
+  /** 人机对战：电脑坐哪一边、什么难度。传了就是"坐下即开局"。 */
+  bot?: { side: Color; level: BotLevel }
 }): RoomView {
   const title = input.title.trim() || '一盘象棋'
   if (title.length > 40) throw new HttpError(400, '房间名过长')
@@ -220,20 +252,36 @@ export function createRoom(input: {
   const id = newId('room')
   const ts = now()
 
+  /**
+   * 人机对战与人人对战走**同一条数据通路**，只在两处不同：
+   *   - 电脑那一边不占 player 列（它不是一个用户），改记在 bot_side 上；
+   *   - 座位一开始就是满的，所以直接进 playing，不用等人加入。
+   *
+   * 这样"走棋校验、认输、退出、大厅列表、战绩统计"都不用为机器人写特例 ——
+   * 特例越少，越不容易出现"只有人机对战模式下某个功能坏掉"这种 bug。
+   */
+  const botSide = input.bot?.side ?? null
+  const humanSide: Color = botSide ? (botSide === 'red' ? 'black' : 'red') : side
+  const status: RoomStatus = botSide ? 'playing' : 'waiting'
+
   getDb()
     .prepare(
       `INSERT INTO game_rooms
-         (id, kind, title, status, created_by, red_player, black_player, board, turn, moves, created_at, updated_at)
-       VALUES (?, ?, ?, 'waiting', ?, ?, ?, ?, 'red', '[]', ?, ?)`,
+         (id, kind, title, status, created_by, red_player, black_player, board, turn, moves,
+          bot_side, bot_level, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'red', '[]', ?, ?, ?, ?)`,
     )
     .run(
       id,
       input.kind,
       title,
+      status,
       input.creatorId,
-      side === 'red' ? input.creatorId : null,
-      side === 'black' ? input.creatorId : null,
+      humanSide === 'red' ? input.creatorId : null,
+      humanSide === 'black' ? input.creatorId : null,
       serializeBoard(initialBoard()),
+      botSide,
+      botSide ? (input.bot?.level ?? 'normal') : null,
       ts,
       ts,
     )
@@ -246,11 +294,15 @@ export function createRoom(input: {
  *
  * 若两个座位都满了就拒绝 —— 不提供"顶替"能力，那会让正在下的人莫名其妙被换掉。
  * 想换人要先退出。
+ *
+ * 人机对战**不能被加入**：那是给一个人开的练习局。别人插进来坐不上座位
+ * （电脑那一边不是用户），只会看到一个"对面是电脑"的棋局，白占一个座位。
  */
 export function joinRoom(roomId: string, userId: string, side?: Color): RoomView {
   return transaction(() => {
     const row = getRaw(roomId)
     if (!row) throw new HttpError(404, '房间不存在')
+    if (row.bot_side) throw new HttpError(409, '这是人机对战，不能加入 —— 你可以自己新开一局')
     if (row.status === 'finished') throw new HttpError(400, '这局已经结束了')
     if (row.red_player === userId || row.black_player === userId) {
       return toView(row, userId) // 已经在里面了，幂等返回
@@ -297,20 +349,163 @@ export interface MoveResult {
   room: RoomView
   move: RoomMove
   /** 走完这一手之后对局是否结束 */
-  finished: { winner: Color | null; reason: string } | null
+  finished: RoomResult | null
 }
 
 /**
- * 走一步棋。
+ * 这个局面在这一局里出现过几次（含当前这一次）。
+ *
+ * 用于"同一局面出现三次判和"：一盘棋如果双方都不肯变着，会无限走下去，
+ * 而**没有任何超时机制**的话就会一直挂在 playing 上，谁都不知道该干什么。
+ *
+ * ⚠️ 这是**简化版**的和棋规则。正式的中国象棋裁判还要区分"长将""长捉"
+ * （单方面反复将军是要判负的），那需要逐着判定"是否在将军""是否在捉同一个子"，
+ * 规则量很大。这里只做"三次重复即和"，两种情形都说清楚：
+ * 机器人不会无谓重复（它在根节点会避开已经出现过的局面），
+ * 所以真被判和的，基本都是人自己在下"磨棋"。
+ */
+function positionOccurrences(moves: RoomMove[], current: Board, currentTurn: Color): number {
+  const target = positionKey(current, currentTurn)
+  let board = initialBoard()
+  let turn: Color = 'red'
+  let count = positionKey(board, turn) === target ? 1 : 0
+
+  for (const record of moves) {
+    let from: number
+    let to: number
+    try {
+      from = parseSquare(record.from)
+      to = parseSquare(record.to)
+    } catch {
+      break // 历史里出现坏坐标就别再往下算了（宁可少算，不要抛异常打断走棋）
+    }
+    const piece = board[from]
+    if (!piece) break
+    const applied = applyMove(
+      { board, turn, history: [] },
+      { from, to, piece, captured: board[to] ?? null },
+    )
+    board = applied.board
+    turn = applied.turn
+    if (positionKey(board, turn) === target) count++
+  }
+  return count
+}
+
+/** 这一局里出现过的所有局面（给机器人用来避开无谓重复）。 */
+function historyKeys(moves: RoomMove[]): string[] {
+  const keys: string[] = [positionKey(initialBoard(), 'red')]
+  let board = initialBoard()
+  let turn: Color = 'red'
+  for (const record of moves) {
+    let from: number
+    let to: number
+    try {
+      from = parseSquare(record.from)
+      to = parseSquare(record.to)
+    } catch {
+      break
+    }
+    const piece = board[from]
+    if (!piece) break
+    const applied = applyMove(
+      { board, turn, history: [] },
+      { from, to, piece, captured: board[to] ?? null },
+    )
+    board = applied.board
+    turn = applied.turn
+    keys.push(positionKey(board, turn))
+  }
+  return keys
+}
+
+/**
+ * 落子的**共同内核**：人类与机器人走的是同一段代码。
  *
  * 校验链条（任一环不过就拒绝）：
  *   1. 房间在对局中
- *   2. 你是这一局的参与者，不是观战者
- *   3. 现在轮到你走
+ *   2. 走子的是这一局的参与者（调用方已经定好是哪一方）
+ *   3. 现在轮到他走
  *   4. 这个走法在规则引擎给出的合法着法列表里
  *
  * 第 4 条是防作弊的关键：客户端提交的只是一个意图，合法性完全由服务端裁定。
  */
+function applySideMove(
+  roomId: string,
+  row: RawRoom,
+  side: Color,
+  from: number,
+  to: number,
+  by: string,
+  byName: string,
+): MoveResult {
+  if (side !== row.turn) throw new HttpError(400, '还没轮到你走')
+
+  const board = deserializeBoard(row.board)
+  const legal = legalMoves(board, side)
+  const move = legal.find((m) => m.from === from && m.to === to)
+  if (!move) {
+    throw new HttpError(400, '这个走法不合法')
+  }
+
+  const next = applyMove({ board, turn: side, history: [] }, move)
+  const verdict = evaluateResult(next)
+
+  const record: RoomMove = {
+    from: squareName(move.from),
+    to: squareName(move.to),
+    color: side,
+    piece: move.piece.type,
+    captured: move.captured ? move.captured.type : null,
+    check: verdict.inCheck,
+    at: now(),
+    by,
+    byName,
+  }
+
+  const moves = [...(JSON.parse(row.moves) as RoomMove[]), record]
+  const ts = now()
+
+  let status: RoomStatus = 'playing'
+  let result: RoomResult | null = null
+
+  if (verdict.over) {
+    status = 'finished'
+    result = {
+      winner: verdict.winner,
+      reason: verdict.reason,
+      // 将死时把杀法认出来：用户看到的是「绝杀 · 卧槽马」，而不是干巴巴一句"你输了"。
+      // 认不出来就是 null，前端照旧显示「将死」。
+      mate: verdict.reason === 'checkmate' ? classifyMate(next.board, move, next.turn) : null,
+    }
+  } else if (positionOccurrences(moves, next.board, next.turn) >= 3) {
+    // 三次重复判和（见 positionOccurrences 的说明）
+    status = 'finished'
+    result = { winner: null, reason: 'repetition', mate: null }
+  }
+
+  getDb()
+    .prepare(
+      `UPDATE game_rooms
+          SET board = ?, turn = ?, moves = ?, status = ?, result = ?,
+              updated_at = ?, finished_at = ?
+        WHERE id = ?`,
+    )
+    .run(
+      serializeBoard(next.board),
+      next.turn,
+      JSON.stringify(moves),
+      status,
+      result ? JSON.stringify(result) : null,
+      ts,
+      status === 'finished' ? ts : null,
+      roomId,
+    )
+
+  return { room: getRoom(roomId, by), move: record, finished: result }
+}
+
+/** 人类走一步棋。 */
 export function makeMove(
   roomId: string,
   userId: string,
@@ -328,7 +523,6 @@ export function makeMove(
     const mySide: Color | null =
       row.red_player === userId ? 'red' : row.black_player === userId ? 'black' : null
     if (!mySide) throw new HttpError(403, '你是观战者，不能走棋')
-    if (mySide !== row.turn) throw new HttpError(400, '还没轮到你走')
 
     let from: number
     let to: number
@@ -339,58 +533,42 @@ export function makeMove(
       throw new HttpError(400, err instanceof Error ? err.message : '坐标不合法')
     }
 
-    const board = deserializeBoard(row.board)
-    const legal = legalMoves(board, mySide)
-    const move = legal.find((m) => m.from === from && m.to === to)
-    if (!move) {
-      throw new HttpError(400, '这个走法不合法')
-    }
-
-    const next = applyMove({ board, turn: mySide, history: [] }, move)
-    const verdict = evaluateResult(next)
-
-    const record: RoomMove = {
-      from: squareName(move.from),
-      to: squareName(move.to),
-      color: mySide,
-      piece: move.piece.type,
-      captured: move.captured ? move.captured.type : null,
-      check: verdict.inCheck,
-      at: now(),
-      by: userId,
-      byName: userName,
-    }
-
-    const moves = [...(JSON.parse(row.moves) as RoomMove[]), record]
-    const ts = now()
-
-    let status: RoomStatus = 'playing'
-    let result: { winner: Color | null; reason: string } | null = null
-    if (verdict.over) {
-      status = 'finished'
-      result = { winner: verdict.winner, reason: verdict.reason }
-    }
-
-    getDb()
-      .prepare(
-        `UPDATE game_rooms
-            SET board = ?, turn = ?, moves = ?, status = ?, result = ?,
-                updated_at = ?, finished_at = ?
-          WHERE id = ?`,
-      )
-      .run(
-        serializeBoard(next.board),
-        next.turn,
-        JSON.stringify(moves),
-        status,
-        result ? JSON.stringify(result) : null,
-        ts,
-        status === 'finished' ? ts : null,
-        roomId,
-      )
-
-    return { room: getRoom(roomId, userId), move: record, finished: result }
+    return applySideMove(roomId, row, mySide, from, to, userId, userName)
   })
+}
+
+/**
+ * 机器人走一步棋。
+ *
+ * 与 makeMove 的区别只有"谁在走"这一层：这里不接受任何外部输入的着法，
+ * 一切由搜索决定；所以它**不是**一个可以被客户端调用的接口，
+ * 只由服务端在"轮到机器人"时自己触发（见 index.ts 的 scheduleBotReply）。
+ *
+ * 返回 null 表示现在不该机器人走（比如人正好在同一瞬间也落了子）。
+ */
+export function makeBotMove(roomId: string): MoveResult | null {
+  const row = getRaw(roomId)
+  if (!row) throw new HttpError(404, '房间不存在')
+  if (!row.bot_side || !row.bot_level) return null
+  if (row.status !== 'playing') return null
+
+  const botSide = row.bot_side
+  if (botSide !== row.turn) return null
+
+  const board = deserializeBoard(row.board)
+  const level: BotLevel = row.bot_level
+
+  const choice = chooseMove({
+    board,
+    side: botSide,
+    level,
+    seenKeys: historyKeys(JSON.parse(row.moves) as RoomMove[]),
+  })
+  if (!choice) return null // 无棋可走：这一手之后的对局判定由上一层（人走完那一步）负责
+
+  return transaction(() =>
+    applySideMove(roomId, row, botSide, choice.from, choice.to, 'bot', botName(level)),
+  )
 }
 
 /** 认输。对手获胜。 */
@@ -527,6 +705,25 @@ export function cleanupStaleRooms(online: Set<string>): number {
     .prepare("DELETE FROM game_rooms WHERE status = 'waiting' AND updated_at < ?")
     .run(hardCutoff)
   removed += Number(result.changes ?? 0)
+
+  /**
+   * 第三档：**人机对战**的残局。
+   *
+   * 人机对战一坐下就是 playing（电脑那一半座位不需要等人），所以前两档都够不着它。
+   * 而"人关掉窗口就走了"这件事在机器人那一边没有任何人来收尾 ——
+   * 正常路径是前端关窗前自动退出（会判负并结束），但那需要前端真的执行到；
+   * 浏览器崩溃、手机关掉、网断了都不会。
+   *
+   * 所以给一条 24 小时兜底：练习局而已，不值得为它保留残局，
+   * 但要留够时间让人回来接着下（刷新页面就能继续）。
+   */
+  const botRooms = db
+    .prepare(
+      `DELETE FROM game_rooms
+        WHERE kind = 'xiangqi' AND bot_side IS NOT NULL AND status = 'playing' AND updated_at < ?`,
+    )
+    .run(hardCutoff)
+  removed += Number(botRooms.changes ?? 0)
 
   return removed
 }

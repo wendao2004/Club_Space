@@ -1245,6 +1245,38 @@ async function main() {
     )
 
     // 点开那个房间卡片
+    // ---- 人机对战的入口与弹层（不真的开局：那会让机器人跟着落子，
+    //      打乱后面用 API 铺好的那盘棋。这里只验"入口在、弹层能开"）
+    const botEntry = await evaluate(`
+      (() => {
+        const btn = [...document.querySelectorAll('.games button')].find(b => b.textContent.includes('人机对战'))
+        if (!btn) return JSON.stringify({ found: false })
+        btn.click()
+        return JSON.stringify({ found: true })
+      })()
+    `)
+    const be = JSON.parse(botEntry)
+    assert(be.found === true, '象棋大厅里有「人机对战」入口')
+    await sleep(500)
+
+    const botDialog = await evaluate(`JSON.stringify({
+      levels: [...document.querySelectorAll('.level-btn')].map(b => b.querySelector('.level-name')?.textContent?.trim() ?? ''),
+      sides: [...document.querySelectorAll('.modal .side-btn')].map(b => b.textContent.replace(/\\s+/g, ' ').trim()),
+      hasStart: !![...document.querySelectorAll('.modal .wl-btn--primary')].find(b => b.textContent.includes('开始')),
+    })`)
+    const bd = JSON.parse(botDialog)
+    assert(
+      Array.isArray(bd.levels) && bd.levels.join(',') === '简单,普通,困难',
+      '人机对战可选三个难度',
+      bd.levels.join(' / '),
+    )
+    assert(bd.sides.length === 2 && bd.hasStart, '可以选执红/执黑并开始', bd.sides.join(' | '))
+    // 关掉弹层，别留下来挡着后面的操作
+    await evaluate(
+      `[...document.querySelectorAll('.modal .wl-btn')].find(b => b.textContent.includes('取消'))?.click()`,
+    )
+    await sleep(300)
+
     const entered = await evaluate(`
       (() => {
         const cards = [...document.querySelectorAll('.room-card')]

@@ -285,11 +285,20 @@ async function main() {
   )
 
   // 终局：要么引擎判定结束，要么还没结束
+  //
+  // ⚠️ 这里有一条**故意留的例外**：服务端还多一条规则引擎不管的判和 ——
+  // "同一局面出现三次"（见 rooms.ts 的 positionOccurrences）。规则引擎只认
+  // 将死/困毙，重复局面它不判，所以服务端"提前"结束是**对的**，
+  // 不能拿它当"服务端自己乱判终局"的证据。
   const engineVerdict = evaluateResult({ board: engineBoard, turn: engineTurn, history: [] })
   if (engineVerdict.over) {
     assert(finished !== null, '引擎判定终局时服务端也判定了终局')
   } else {
-    assert(finished === null, '引擎判定未终局时服务端也没提前结束')
+    assert(
+      finished === null || finished.reason === 'repetition',
+      '引擎判定未终局时服务端也没提前结束（三次重复判和除外）',
+      finished ? `服务端判了 ${finished.reason}` : '',
+    )
   }
 
   // ---------------------------------------------------------------- 合法着法查询
@@ -445,6 +454,130 @@ async function main() {
     '胜+负不超过总局数',
     `胜 ${list.body.stats.won} 负 ${list.body.stats.lost} 总 ${list.body.stats.played}`,
   )
+
+  // ---------------------------------------------------------------- 人机对战
+  console.log('\n【人机对战】')
+
+  const botRoom = await red.api('/api/games/rooms', {
+    method: 'POST',
+    json: { bot: { level: 'hard', side: 'black' } },
+  })
+  assert(botRoom.status === 200, '创建人机对战', `状态 ${botRoom.status}`)
+  const botRoomId = botRoom.body.room.id
+  assert(botRoom.body.room.status === 'playing', '人机对战坐下即开局（不用等人）', botRoom.body.room.status)
+  assert(botRoom.body.room.botSide === 'black', '电脑坐黑方')
+  assert(botRoom.body.room.botLevel === 'hard', '难度记在房间里（用于显示与"再来一局"沿用）')
+  assert(
+    typeof botRoom.body.room.blackName === 'string' && botRoom.body.room.blackName.includes('电脑'),
+    '黑方显示成「电脑（困难）」这类名字，而不是「虚位以待」',
+    botRoom.body.room.blackName ?? '(null)',
+  )
+  assert(botRoom.body.room.mySide === 'red', '我坐红方')
+  assert(botRoom.body.room.myTurn === true, '开局轮到我走（红先）')
+  assert(botRoom.body.room.botThinking === false, '还没到电脑思考的时候')
+
+  const redMove = await red.api(`/api/games/rooms/${botRoomId}/move`, {
+    method: 'POST',
+    json: { from: 'c3', to: 'c4' },
+  })
+  assert(redMove.status === 200, '我走一步', `状态 ${redMove.status}`)
+  assert(redMove.body.room.myTurn === false, '走完之后轮不到我')
+  assert(redMove.body.room.botThinking === true, '界面据此显示「电脑正在思考…」')
+
+  /** 等电脑落子（它有思考延迟 + 搜索时间，最长约 2 秒）。 */
+  async function waitForBot(roomId, minPlies, timeoutMs = 12000) {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200))
+      const got = await red.api(`/api/games/rooms/${roomId}`)
+      if (got.status === 200 && got.body.room.moves.length >= minPlies) return got.body.room
+    }
+    return null
+  }
+
+  const afterBot = await waitForBot(botRoomId, 2)
+  assert(afterBot !== null, '电脑应手了（等到了第二手）')
+  if (afterBot) {
+    const botMove = afterBot.moves[1]
+    assert(botMove.by === 'bot', '第二手记的是机器人下的', `by=${botMove.by} / ${botMove.byName}`)
+    assert(botMove.color === 'black', '机器人下的是它那一边（黑）', botMove.color)
+    assert(afterBot.turn === 'red' && afterBot.myTurn === true, '电脑走完又轮到我')
+    assert(afterBot.botThinking === false, '不在"思考中"状态了')
+    // 机器人走出来的局面必须还是合法的：拿引擎复核一遍红方还有没有棋走
+    const board = deserializeBoard(afterBot.board)
+    const legal = legalMoves(board, 'red')
+    assert(legal.length > 0, '电脑走完之后的局面，红方仍有合法着法', `${legal.length} 步`)
+  }
+
+  // 我执黑时电脑执红先走 —— 我一步没走，它就该自己动起来
+  const botFirst = await red.api('/api/games/rooms', {
+    method: 'POST',
+    json: { bot: { level: 'easy', side: 'red' } },
+  })
+  const botFirstId = botFirst.body.room.id
+  assert(botFirst.body.room.mySide === 'black', '（电脑执红）我坐黑方')
+  assert(botFirst.body.room.myTurn === false, '开局轮不到我')
+  assert(botFirst.body.room.botThinking === true, '开局就处于"电脑思考中"')
+  const firstHand = await waitForBot(botFirstId, 1, 8000)
+  assert(firstHand !== null, '电脑自己走了第一步（我一步都没走）')
+  if (firstHand) {
+    assert(firstHand.moves[0].by === 'bot' && firstHand.moves[0].color === 'red', '第一手是电脑替红方下的')
+    assert(firstHand.myTurn === true, '电脑走完轮到我')
+  }
+
+  // 别人不能插进人机对战
+  const intrude = await black.api(`/api/games/rooms/${botRoomId}/join`, { method: 'POST', json: {} })
+  assert(intrude.status === 409, '别人不能加入人机对战（409）', `状态 ${intrude.status}`)
+
+  // 人机对战也进战绩：认输之后应该计一局
+  const statsBefore = (await red.api('/api/games/rooms')).body.stats.played
+  const resignBot = await red.api(`/api/games/rooms/${botRoomId}/resign`, { method: 'POST', json: {} })
+  assert(resignBot.status === 200, '人机对战里可以认输')
+  assert(
+    resignBot.body.room.result.winner === 'black',
+    '认输之后判电脑那一边获胜',
+    JSON.stringify(resignBot.body.room.result),
+  )
+  const statsAfter = (await red.api('/api/games/rooms')).body.stats.played
+  assert(statsAfter === statsBefore + 1, '这一局计入了我的战绩', `${statsBefore} → ${statsAfter}`)
+
+  // ---------------------------------------------------------------- 三次重复判和
+  //
+  // 没有这条规则的话，双方都不肯变着时这盘棋会永远挂在"对局中"，
+  // 谁也不知道该干什么。这里让两只车来回平移，正好把局面走回原始形态三次。
+  console.log('\n【三次重复判和】')
+  const drawRoom = await red.api('/api/games/rooms', {
+    method: 'POST',
+    json: { kind: 'xiangqi', title: '重复局面测试', side: 'red' },
+  })
+  const drawRoomId = drawRoom.body.room.id
+  await black.api(`/api/games/rooms/${drawRoomId}/join`, { method: 'POST', json: { side: 'black' } })
+
+  // 红车 a0↔a1、黑车 a9↔a8：每四手回到同一个局面
+  const shuffle = [
+    { client: red, from: 'a0', to: 'a1' },
+    { client: black, from: 'a9', to: 'a8' },
+    { client: red, from: 'a1', to: 'a0' },
+    { client: black, from: 'a8', to: 'a9' },
+    { client: red, from: 'a0', to: 'a1' },
+    { client: black, from: 'a9', to: 'a8' },
+    { client: red, from: 'a1', to: 'a0' },
+    { client: black, from: 'a8', to: 'a9' },
+  ]
+  let drawState = null
+  for (const step of shuffle) {
+    const res = await step.client.api(`/api/games/rooms/${drawRoomId}/move`, {
+      method: 'POST',
+      json: { from: step.from, to: step.to },
+    })
+    assert(res.status === 200, `重复局面：${step.from}->${step.to} 走得通`, `状态 ${res.status}`)
+    if (res.status !== 200) break
+    drawState = res.body.room
+    if (drawState.status === 'finished') break
+  }
+  assert(drawState !== null && drawState.status === 'finished', '走回同一个局面三次之后对局结束')
+  assert(drawState?.result?.reason === 'repetition', '结束原因是"三次重复局面"', drawState?.result?.reason ?? '')
+  assert(drawState?.result?.winner === null, '判和（没有胜者）', JSON.stringify(drawState?.result ?? {}))
 
   const anon = await fetch(`${BASE}/api/games/rooms`)
   assert(anon.status === 401, '未登录不能访问游戏接口（401）', `状态 ${anon.status}`)

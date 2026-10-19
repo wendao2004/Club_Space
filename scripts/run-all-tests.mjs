@@ -45,6 +45,11 @@ const TEST_DATA_DIR = join(ROOT, `.test-data-${TEST_PORT}`)
 /** 不需要服务端的测试：纯逻辑，秒级完成。 */
 const OFFLINE_TESTS = [
   { name: 'xiangqi-test', label: '象棋规则引擎（含 perft）' },
+  // 机器人用的是另写的一套快速走法生成/将军判定，必须与规则引擎**逐局面比对**，
+  // 不许两份实现悄悄分叉（见 xiangqi-ai-test.mjs 开头）。
+  { name: 'xiangqi-ai-test', label: '象棋机器人（差分测试 / 棋力 / 性能）' },
+  // 杀法识别：每个名局都用"先确认确实是将死、再确认名字"的方式验过。
+  { name: 'xiangqi-mate-test', label: '绝杀识别（卧槽马 / 双车错 / 对面笑…）' },
   { name: 'doudizhu-test', label: '斗地主规则引擎（牌型与比较）' },
   // 斗地主反馈效果的纯逻辑部分：驱动动画的"这一手"标识（回归 history 封顶那个坑）
   // 与结算原因的中文映射。真跑动画需要浏览器，那部分只能靠 ui-smoke-test / 肉眼。
