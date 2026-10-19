@@ -647,6 +647,106 @@ async function main() {
     )
   }
 
+  // ---------------------------------------------------------------- 导出跟随筛选
+  //
+  // 这一块是针对一个真实事故的回归：导出的 URL 从前只带日期区间，
+  // 搜索词 / 分类 / 状态 / 只看我的 / 待我审批 在导出时被**静默丢掉** ——
+  // 界面上筛选摘要写着「搜索「招新」· 仅支出」，筛出三行，
+  // 点「导出 CSV」下载到的却是全部账目。它不报错、不告警，
+  // 只会在对账那天被人肉发现，所以必须钉死。
+  //
+  // 断言的主体是**不变量**：同一个筛选条件，"导出的数据行数"必须等于
+  // "列表接口的 total"。以后再加筛选条件时，只要两边没对齐就立刻红。
+  console.log('\n【导出跟随筛选】')
+
+  /** 数 CSV 的数据行数：去掉表头，也去掉末尾的截断提示行（它不属于数据）。 */
+  function csvRowCount(text) {
+    return text
+      .split('\r\n')
+      .filter((line) => line.trim() !== '')
+      .slice(1)
+      .filter((line) => !line.startsWith('"# ')).length
+  }
+
+  /** 按同样的查询串分别取列表和导出，配对比较。 */
+  async function compareListAndExport(client, query, label) {
+    const list = await client.api(`/api/ledger/entries?${query}`)
+    const csv = await client.api(`/api/ledger/export.csv?${query}`)
+    const rows = csvRowCount(csv.body)
+    assert(
+      list.status === 200 && csv.status === 200,
+      `${label}：列表与导出都返回 200`,
+      `列表 ${list.status} / 导出 ${csv.status}`,
+    )
+    assert(
+      rows === list.body.total,
+      `${label}：导出的数据行数 == 列表 total（筛选条件没有被导出丢掉）`,
+      `列表 ${list.body.total} 行 / 导出 ${rows} 行`,
+    )
+    return csv.body
+  }
+
+  const searchTerm = '招新宣传'
+  const searchCsv = await compareListAndExport(
+    admin,
+    `search=${encodeURIComponent(searchTerm)}`,
+    'search=招新宣传',
+  )
+  // 光比条数是不够的：万一"搜索"在列表和导出里**同时**被忽略，条数照样相等。
+  // 所以再验一次内容 —— 匹配的那条在，明显不匹配的那条不在。
+  assert(
+    searchCsv.includes('招新宣传物料印刷'),
+    '导出带 search：命中的账目在表里',
+  )
+  assert(
+    !searchCsv.includes('本学期会费收入'),
+    '导出带 search：没命中的账目不会出现（不是"两个入口一起无视筛选"）',
+  )
+
+  await compareListAndExport(admin, 'kind=expense', 'kind=expense')
+  await compareListAndExport(admin, 'kind=income', 'kind=income')
+  await compareListAndExport(admin, 'status=submitted', 'status=submitted')
+  await compareListAndExport(admin, 'status=approved', 'status=approved')
+  await compareListAndExport(admin, `categoryId=${encodeURIComponent(expenseCat.id)}`, 'categoryId=支出分类')
+  await compareListAndExport(admin, 'mine=1', 'mine=1')
+  await compareListAndExport(admin, 'pending=1', 'pending=1（待我审批）')
+  await compareListAndExport(
+    member,
+    `search=${encodeURIComponent('会费')}&kind=income`,
+    '多条件叠加（search + kind，且用普通成员身份）',
+  )
+  // 组合条件里最容易出错的一种：区间 + 状态 + 分类
+  await compareListAndExport(
+    admin,
+    `from=${daysAgo(10)}&to=${daysAgo(0)}&status=approved&categoryId=${encodeURIComponent(expenseCat.id)}`,
+    'from+to+status+categoryId 四条件叠加',
+  )
+
+  // 两列的 Excel 取舍必须一起钉住 —— 它们看起来矛盾，其实是两个方向：
+  //   日期 → 制表符前缀（强制当文本，否则 Excel 显示成 46292 / ######）
+  //   金额 → 纯数字（能直接求和，加了制表符就变成不能求和的文本）
+  const fullCsv = await admin.api('/api/ledger/export.csv')
+  const dataLines = fullCsv.body
+    .split('\r\n')
+    .filter((line) => line.trim() !== '')
+    .slice(1)
+    .filter((line) => !line.startsWith('"# '))
+  assert(dataLines.length > 0, '导出里有数据行', `${dataLines.length} 行`)
+  assert(
+    dataLines.every((line) => /^"\t\d{4}-\d{2}-\d{2}"/.test(line)),
+    '日期列是「制表符 + YYYY-MM-DD」——Excel 才不会把它转成日期序列号 / ######',
+    dataLines[0]?.slice(0, 32) ?? '(没有数据行)',
+  )
+  assert(
+    dataLines.every((line) => /,"\d+\.\d{2}","/.test(line)),
+    '金额列是纯数字（形如 "288.00"），可以直接在 Excel 里求和',
+    dataLines[0]?.slice(0, 60) ?? '(没有数据行)',
+  )
+  assert(
+    !dataLines.some((line) => /,"\t/.test(line)),
+    '除日期列以外没有别的列带不可见制表符',
+  )
+
   // ---------------------------------------------------------------- 管理员直接入账
   console.log('\n【管理员直接入账（无需审批）】')
   const adminDirect = await admin.api('/api/ledger/entries', {
@@ -958,6 +1058,13 @@ async function main() {
   assert(
     !/(^|,)"=cmd/.test(evCsv) && evCsv.includes("'=cmd"),
     '活动 CSV 同样做了以 = 开头的公式注入转义（没漏）',
+  )
+  // eventId 也是筛选条件之一，走的是同一个导出入口 —— 必须和按活动导出给出同一张表。
+  // （两个入口各写一套条件正是"导出丢筛选"那次事故的成因。）
+  const evCsvByQuery = await admin.api(`/api/ledger/export.csv?eventId=${encodeURIComponent(ev.id)}`)
+  assert(
+    evCsvByQuery.body === evCsv,
+    '用 eventId 走通用导出，结果与 /events/:id/export.csv 逐字节一致',
   )
 
   // ---------------------------------------------------------------- 封账

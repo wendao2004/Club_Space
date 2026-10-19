@@ -1104,6 +1104,65 @@ async function main() {
       `支出汇总 ${summaryApi.body.summary.expense}`,
     )
 
+    // ---- 导出链接必须跟着筛选走 ----
+    //
+    // 回归的是一个真实事故：导出链接从前只带日期区间，于是搜索词 / 分类 /
+    // 状态 / 只看我的 / 待我审批 在导出时被**静默丢掉** —— 界面上写着
+    // 「搜索「矿泉水」」筛出一行，点「导出 CSV」下载到的却是全部账目。
+    // 它不报错，只在对账那天被人肉发现，所以在这里钉死"链接里带着当前筛选"。
+    const exportBefore = await evaluate(
+      `document.querySelector('.ledger a[href*="export.csv"]')?.getAttribute('href') ?? null`,
+    )
+    assert(
+      exportBefore === '/api/ledger/export.csv',
+      '没有筛选条件时，导出链接不带查询串',
+      exportBefore ?? '(页面上找不到导出链接)',
+    )
+
+    const typedSearch = await evaluate(`
+      (() => {
+        const input = document.querySelector('.ledger .filter__search')
+        if (!input) return false
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+        setter.call(input, '矿泉水')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()
+    `)
+    assert(typedSearch === true, '在搜索框里输入了关键词')
+    // 搜索是防抖的（250ms 后才落到 store 上），等它生效再读链接
+    await sleep(1200)
+
+    const exportAfter = await evaluate(
+      `document.querySelector('.ledger a[href*="export.csv"]')?.getAttribute('href') ?? null`,
+    )
+    assert(
+      typeof exportAfter === 'string' &&
+        exportAfter.includes(`search=${encodeURIComponent('矿泉水')}`),
+      '搜索后导出链接带上了 search（导出的表 = 你筛出来的表）',
+      exportAfter ?? '(页面上找不到导出链接)',
+    )
+    assert(
+      typeof exportAfter === 'string' &&
+        !exportAfter.includes('null') &&
+        !exportAfter.includes('undefined'),
+      '导出链接里没有 null / undefined 字面量（空筛选不能拼成 "null"）',
+      exportAfter ?? '',
+    )
+
+    // 收尾：把搜索清掉，别让后面小节读到的是筛过的列表
+    await evaluate(`
+      (() => {
+        const input = document.querySelector('.ledger .filter__search')
+        if (!input) return false
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+        setter.call(input, '')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()
+    `)
+    await sleep(1000)
+
     // ---- 象棋：棋盘渲染与真实走棋 ----
     console.log('\n【象棋界面与交互】')
 
