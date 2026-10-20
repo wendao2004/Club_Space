@@ -30,6 +30,8 @@ const KNOWN_EVENTS = [
   'game-werewolf',
   'game-werewolf-chat',
   'game-werewolf-lobby',
+  'game-draw',
+  'draw-stroke',
 ] as const
 
 export type RealtimeEventName = (typeof KNOWN_EVENTS)[number]

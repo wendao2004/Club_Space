@@ -1,0 +1,1252 @@
+<!--
+  你画我猜。
+
+  画布的三个决定：
+  1. **坐标是 0-1000 的相对值**（与服务端 draw-rooms.ts 的校验一致），渲染时
+     按画布实际尺寸缩放。窗口随便缩放、两人屏幕不一样大，画出来是同一张图。
+  2. **本地即时画 + 服务端回放分两条路**：自己画的每一笔先落本地画布（不等
+     服务器），同时攒批上报；别人的笔画通过 draw-stroke 事件到达后重放。
+     所以本地画布有两条入口：pointer 事件（自己）与 store.onStroke（别人），
+     两条路最终都汇入同一个"指令重放"函数 replay()。
+  3. **攒批 80ms**：pointermove 一秒能来上百次，一条一个请求会把服务端打爆。
+     攒 80ms 合并成一条 points 上报 —— 画感延迟 ~100ms，肉眼无感。
+-->
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import Icon from '@/components/Icon.vue'
+import { api, ApiError, type DrawChatMsg, type DrawStrokeInput } from '@/api'
+import { useDraw } from '@/stores/draw'
+import { useUi } from '@/stores/ui'
+import { useAuth } from '@/stores/auth'
+import * as sfx from '@/lib/sfx'
+import type { WindowInstance } from '@/stores/windows'
+
+const props = defineProps<{ win: WindowInstance }>()
+
+const draw = useDraw()
+const ui = useUi()
+const auth = useAuth()
+
+const myId = computed(() => auth.user?.id ?? '')
+
+type View = 'lobby' | 'table'
+const view = ref<View>('lobby')
+const busy = ref(false)
+
+// ---------------------------------------------------------------- 数据
+
+const room = computed(() => draw.room)
+const viewState = computed(() => draw.room?.view ?? null)
+const rooms = computed(() => draw.rooms)
+
+/** 倒计时（秒）。phaseEndsAt 是服务器时间，与本地可能有偏差，误差 <1s 可接受。 */
+const nowTick = ref(Date.now())
+let tickTimer: number | null = null
+
+const secondsLeft = computed(() => {
+  const endsAt = viewState.value?.phaseEndsAt ?? 0
+  if (!endsAt) return 0
+  return Math.max(0, Math.ceil((endsAt - nowTick.value) / 1000))
+})
+
+const PHASE_LABEL: Record<string, string> = {
+  waiting: '等人',
+  choosing: '选词',
+  drawing: '绘画',
+  reveal: '答案',
+  finished: '结束',
+}
+
+// ---------------------------------------------------------------- 画布
+
+const canvasEl = ref<HTMLCanvasElement | null>(null)
+const canvasBox = ref<HTMLElement | null>(null)
+
+const COLORS = ['#1f2430', '#e5484d', '#2b6cf6', '#30a46c', '#f5a623', '#8e4ec6', '#8b5a2b', '#f7f8fa']
+const WIDTHS = [3, 6, 14]
+
+const tool = ref<'pen' | 'eraser'>('pen')
+const color = ref(COLORS[0]!)
+const width = ref(WIDTHS[1]!)
+const canDraw = computed(() => viewState.value?.iAmDrawer === true && viewState.value?.phase === 'drawing')
+
+/**
+ * 本地笔画簿：strokeId → 笔画。重放 / 撤销 / 清空都基于它，
+ * 与服务端的缓冲是镜像（自己画的先落本地，服务端确认后大家一致）。
+ */
+interface LocalStroke {
+  id: string
+  color: string
+  width: number
+  tool: 'pen' | 'eraser'
+  points: Array<{ x: number; y: number }>
+}
+const localStrokes = new Map<string, LocalStroke>()
+/** 本地笔画簿的插入顺序（撤销 = 删最后一个）。 */
+const strokeOrder: string[] = []
+
+function ctx(): CanvasRenderingContext2D | null {
+  return canvasEl.value?.getContext('2d') ?? null
+}
+
+/** 逻辑坐标（0-1000）→ 画布像素。 */
+function scaleOf(): { sx: number; sy: number } {
+  const el = canvasEl.value
+  if (!el) return { sx: 1, sy: 1 }
+  return { sx: el.width / 1000, sy: el.height / 1000 }
+}
+
+function drawSegment(
+  g: CanvasRenderingContext2D,
+  stroke: { color: string; width: number; tool: 'pen' | 'eraser'; points: Array<{ x: number; y: number }> },
+  from: number,
+): void {
+  if (stroke.points.length < 2 || from >= stroke.points.length) return
+  const { sx, sy } = scaleOf()
+  g.save()
+  g.lineCap = 'round'
+  g.lineJoin = 'round'
+  g.strokeStyle = stroke.tool === 'eraser' ? '#ffffff' : stroke.color
+  g.lineWidth = stroke.width * (stroke.tool === 'eraser' ? 4 : 1) * sx
+  g.beginPath()
+  const start = Math.max(0, from - 1)
+  g.moveTo(stroke.points[start]!.x * sx, stroke.points[start]!.y * sy)
+  for (let i = start + 1; i < stroke.points.length; i++) {
+    g.lineTo(stroke.points[i]!.x * sx, stroke.points[i]!.y * sy)
+  }
+  g.stroke()
+  g.restore()
+}
+
+/** 起笔画一个点（只有一个点也看得见：画个圆点）。 */
+function drawDot(stroke: LocalStroke): void {
+  const g = ctx()
+  if (!g || stroke.points.length === 0) return
+  const { sx, sy } = scaleOf()
+  const p = stroke.points[0]!
+  g.save()
+  g.fillStyle = stroke.tool === 'eraser' ? '#ffffff' : stroke.color
+  g.beginPath()
+  g.arc(p.x * sx, p.y * sy, (stroke.width * sx) / 2, 0, Math.PI * 2)
+  g.fill()
+  g.restore()
+}
+
+function clearCanvas(): void {
+  const g = ctx()
+  if (!g) return
+  g.clearRect(0, 0, canvasEl.value!.width, canvasEl.value!.height)
+}
+
+/** 全量重放本地笔画簿（撤销 / clear / 补发之后）。 */
+function replayAll(): void {
+  clearCanvas()
+  for (const id of strokeOrder) {
+    const stroke = localStrokes.get(id)
+    if (!stroke) continue
+    drawDot(stroke)
+    drawSegment(ctx()!, stroke, 0)
+  }
+}
+
+// ---------------------------------------------------------------- 上报攒批
+
+let strokeSeq = 0
+let activeStroke: LocalStroke | null = null
+/** 攒批队列：pointermove 的点先堆在这里，80ms 定时器统一上报。 */
+let pendingPoints: Array<{ x: number; y: number }> = []
+let flushTimer: number | null = null
+
+function scheduleFlush(): void {
+  if (flushTimer !== null) return
+  flushTimer = window.setInterval(() => {
+    flushPending()
+  }, 80)
+}
+
+function stopFlush(): void {
+  if (flushTimer !== null) {
+    window.clearInterval(flushTimer)
+    flushTimer = null
+  }
+}
+
+function flushPending(): void {
+  if (!activeStroke || pendingPoints.length === 0) return
+  const points = pendingPoints
+  pendingPoints = []
+  // 本地立即补画这些段
+  const index = activeStroke.points.length - points.length
+  drawSegment(ctx()!, activeStroke, index)
+  draw.sendStroke({
+    op: 'points',
+    strokeId: activeStroke.id,
+    points,
+    color: activeStroke.color,
+    width: activeStroke.width,
+    tool: activeStroke.tool,
+  })
+}
+
+function toLocal(event: PointerEvent): { x: number; y: number } {
+  const el = canvasEl.value!
+  const rect = el.getBoundingClientRect()
+  const x = Math.round(((event.clientX - rect.left) / rect.width) * 1000)
+  const y = Math.round(((event.clientY - rect.top) / rect.height) * 1000)
+  return {
+    x: Math.min(1000, Math.max(0, x)),
+    y: Math.min(1000, Math.max(0, y)),
+  }
+}
+
+function onPointerDown(event: PointerEvent): void {
+  if (!canDraw.value) return
+  if (event.button !== 0) return
+  const point = toLocal(event)
+  strokeSeq += 1
+  activeStroke = {
+    id: `s${Date.now().toString(36)}${strokeSeq}`,
+    color: color.value,
+    width: width.value,
+    tool: tool.value,
+    points: [point],
+  }
+  localStrokes.set(activeStroke.id, activeStroke)
+  strokeOrder.push(activeStroke.id)
+  drawDot(activeStroke)
+  canvasEl.value?.setPointerCapture(event.pointerId)
+  draw.sendStroke({
+    op: 'begin',
+    strokeId: activeStroke.id,
+    points: [point],
+    color: activeStroke.color,
+    width: activeStroke.width,
+    tool: activeStroke.tool,
+  })
+  scheduleFlush()
+}
+
+function onPointerMove(event: PointerEvent): void {
+  if (!activeStroke) return
+  pendingPoints.push(toLocal(event))
+  // 攒批期间本地先画出来（不等 80ms），手感才跟手
+  if (pendingPoints.length >= 2) {
+    drawSegment(ctx()!, activeStroke, activeStroke.points.length)
+  }
+}
+
+function onPointerUp(): void {
+  if (!activeStroke) return
+  flushPending()
+  draw.sendStroke({
+    op: 'end',
+    strokeId: activeStroke.id,
+    points: [],
+    color: activeStroke.color,
+    width: activeStroke.width,
+    tool: activeStroke.tool,
+  })
+  activeStroke = null
+  stopFlush()
+}
+
+function undoStroke(): void {
+  if (!canDraw.value) return
+  const lastId = strokeOrder.pop()
+  if (!lastId) return
+  localStrokes.delete(lastId)
+  replayAll()
+  draw.sendStroke({ op: 'undo', strokeId: lastId, points: [], color: color.value, width: width.value, tool: tool.value })
+}
+
+function clearAll(): void {
+  if (!canDraw.value) return
+  localStrokes.clear()
+  strokeOrder.length = 0
+  activeStroke = null
+  pendingPoints = []
+  clearCanvas()
+  draw.sendStroke({ op: 'clear', strokeId: '', points: [], color: color.value, width: width.value, tool: tool.value })
+}
+
+// ---------------------------------------------------------------- 别人的笔迹
+
+const offStroke = draw.onStroke((op: DrawStrokeInput) => {
+  if (op.op === 'clear') {
+    localStrokes.clear()
+    strokeOrder.length = 0
+    clearCanvas()
+    return
+  }
+  if (op.op === 'undo') {
+    // 撤销：按 strokeId 删；删不到（丢过事件）就全量补发兜底
+    if (localStrokes.delete(op.strokeId)) {
+      const index = strokeOrder.indexOf(op.strokeId)
+      if (index >= 0) strokeOrder.splice(index, 1)
+      replayAll()
+    } else {
+      void pullCanvas()
+    }
+    return
+  }
+  if (op.op === 'begin') {
+    const stroke: LocalStroke = {
+      id: op.strokeId,
+      color: op.color,
+      width: op.width,
+      tool: op.tool,
+      points: [...op.points],
+    }
+    localStrokes.set(stroke.id, stroke)
+    strokeOrder.push(stroke.id)
+    drawDot(stroke)
+    return
+  }
+  if (op.op === 'points' || op.op === 'end') {
+    const stroke = localStrokes.get(op.strokeId)
+    if (!stroke) return
+    const before = stroke.points.length
+    stroke.points.push(...op.points)
+    drawSegment(ctx()!, stroke, before === 0 ? 0 : before - 1)
+  }
+})
+
+/** 补发画布：进入牌桌 / 新回合开始 / 本地状态可疑时拉一次全量。 */
+async function pullCanvas(): Promise<void> {
+  const current = room.value
+  if (!current) return
+  try {
+    const { strokes } = await api.draw.canvas(current.id)
+    localStrokes.clear()
+    strokeOrder.length = 0
+    clearCanvas()
+    for (const op of strokes) {
+      if (op.op === 'clear') {
+        localStrokes.clear()
+        strokeOrder.length = 0
+        clearCanvas()
+        continue
+      }
+      if (op.op === 'undo') {
+        const index = strokeOrder.indexOf(op.strokeId)
+        if (index >= 0) {
+          strokeOrder.splice(index, 1)
+          localStrokes.delete(op.strokeId)
+        }
+        continue
+      }
+      if (op.op === 'begin') {
+        const stroke: LocalStroke = {
+          id: op.strokeId,
+          color: op.color,
+          width: op.width,
+          tool: op.tool,
+          points: [...op.points],
+        }
+        localStrokes.set(stroke.id, stroke)
+        strokeOrder.push(stroke.id)
+        continue
+      }
+      if (op.op === 'points' || op.op === 'end') {
+        localStrokes.get(op.strokeId)?.points.push(...op.points)
+      }
+    }
+    replayAll()
+  } catch {
+    // 补发失败不致命：下一回合开始时会再拉
+  }
+}
+
+// ---------------------------------------------------------------- 大厅
+
+const newTitle = ref('')
+
+async function onCreate(): Promise<void> {
+  if (busy.value) return
+  busy.value = true
+  try {
+    await draw.createRoom(newTitle.value.trim(), rounds.value)
+    newTitle.value = ''
+    view.value = 'table'
+    await afterEnterTable()
+  } catch {
+    /* 错误已在 store 里 */
+  } finally {
+    busy.value = false
+  }
+}
+
+const rounds = ref(2)
+
+async function onRefresh(): Promise<void> {
+  await draw.loadRooms()
+}
+
+async function onEnterRoom(id: string): Promise<void> {
+  const target = rooms.value.find((r) => r.id === id)
+  if (!target) return
+  const alreadyIn = target.view.players.some((p) => p.userId === myId.value)
+  try {
+    if (alreadyIn || target.phase !== 'waiting') await draw.openRoom(id)
+    else await draw.join(id)
+    view.value = 'table'
+    await afterEnterTable()
+  } catch (err) {
+    if (err instanceof ApiError) ui.notify('warning', '进不去这一局', err.message)
+  }
+}
+
+async function onLeave(): Promise<void> {
+  await draw.leave()
+  view.value = 'lobby'
+  activeStroke = null
+  stopFlush()
+  await draw.loadRooms()
+}
+
+async function onStart(): Promise<void> {
+  await draw.start()
+}
+
+async function afterEnterTable(): Promise<void> {
+  await nextTick()
+  resizeCanvas()
+  // 中途进来（别人已画了半张图）补一次全量
+  if (viewState.value?.phase === 'drawing') void pullCanvas()
+}
+
+// ---------------------------------------------------------------- 选词 / 猜词
+
+async function onPickWord(word: string): Promise<void> {
+  await draw.chooseWord(word)
+}
+
+const guessText = ref('')
+const chatListEl = ref<HTMLElement | null>(null)
+
+async function onSendGuess(): Promise<void> {
+  const text = guessText.value
+  guessText.value = ''
+  await draw.guess(text)
+}
+
+// ---------------------------------------------------------------- 反馈
+
+const lastChatLen = ref(0)
+
+watch(
+  () => draw.room?.chat,
+  (chat) => {
+    if (!chat) return
+    // 有人猜对：一声"成功"（不区分是谁 —— 对猜的人来说这就是个提示音）
+    if (chat.length > lastChatLen.value) {
+      const latest = chat[chat.length - 1]
+      if (latest?.correct) sfx.playSystem('success')
+    }
+    lastChatLen.value = chat.length
+    void nextTick(() => {
+      const el = chatListEl.value
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  },
+)
+
+watch(
+  () => viewState.value?.phase,
+  (phase, prev) => {
+    if (phase === prev) return
+    if (phase === 'drawing') {
+      // 新回合：清空本地画布，补发（通常此时服务端缓冲也是空的）
+      localStrokes.clear()
+      strokeOrder.length = 0
+      clearCanvas()
+      void pullCanvas()
+      // 轮到我画：这是唯一需要"立刻知道"的信号（错过就是干等 10 秒选词）
+      if (viewState.value?.iAmDrawer) sfx.playYourTurn()
+    }
+    if (phase === 'reveal') sfx.playSystem('notify')
+    if (phase === 'finished') sfx.playSystem('success')
+  },
+)
+
+// ---------------------------------------------------------------- 生命周期
+
+function resizeCanvas(): void {
+  const el = canvasEl.value
+  const box = canvasBox.value
+  if (!el || !box) return
+  // 高分屏按 devicePixelRatio 放大，避免笔画发虚
+  const dpr = window.devicePixelRatio || 1
+  const rect = box.getBoundingClientRect()
+  el.width = Math.max(200, Math.round(rect.width * dpr))
+  el.height = Math.max(150, Math.round(rect.height * dpr))
+  el.style.width = `${rect.width}px`
+  el.style.height = `${rect.height}px`
+  replayAll()
+}
+
+let resizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+  draw.connectRealtime()
+  void draw.loadRooms()
+
+  const roomId = props.win.args.roomId
+  if (typeof roomId === 'string' && roomId) {
+    view.value = 'table'
+    void draw.openRoom(roomId).then(() => afterEnterTable())
+  }
+
+  if (typeof ResizeObserver !== 'undefined' && canvasBox.value) {
+    resizeObserver = new ResizeObserver(() => resizeCanvas())
+    resizeObserver.observe(canvasBox.value)
+  }
+
+  tickTimer = window.setInterval(() => {
+    nowTick.value = Date.now()
+  }, 500)
+})
+
+onBeforeUnmount(() => {
+  offStroke()
+  stopFlush()
+  if (tickTimer !== null) {
+    window.clearInterval(tickTimer)
+    tickTimer = null
+  }
+  resizeObserver?.disconnect()
+  resizeObserver = null
+})
+
+// ---------------------------------------------------------------- 小工具
+
+function chatTextOf(msg: DrawChatMsg): string {
+  // 猜对的消息对所有人显示为"猜对了"—— 不把词再广播一遍（reveal 才公布）
+  if (msg.correct) return `${msg.name} 猜对了！`
+  // "很接近"只给猜的人自己看（服务端只把 close 标在消息上，房间内人人可见，
+  // 与 skribbl 的通行做法一致：接近不算泄题）
+  if (msg.close) return `${msg.name} 猜得很接近`
+  return `${msg.name}：${msg.text}`
+}
+</script>
+
+<template>
+  <div class="draw">
+    <!-- ======================================================= 大厅 -->
+    <template v-if="view === 'lobby'">
+      <header class="bar">
+        <div class="bar-title"><Icon name="brush" :size="18" />你画我猜</div>
+        <div class="spacer" />
+        <button class="wl-icon-btn" :disabled="draw.loading" title="刷新" @click="onRefresh">
+          <Icon name="refresh" :size="16" :class="{ spin: draw.loading }" />
+        </button>
+      </header>
+
+      <div class="body wl-scroll">
+        <div class="new-room">
+          <input v-model="newTitle" class="wl-input" placeholder="房间名（可留空）" maxlength="40" @keydown.enter="onCreate" />
+          <select v-model.number="rounds" class="wl-input rounds-select" aria-label="轮数">
+            <option :value="1">1 轮</option>
+            <option :value="2">2 轮</option>
+            <option :value="3">3 轮</option>
+          </select>
+          <button class="wl-btn wl-btn--primary" :disabled="busy" @click="onCreate">
+            <Icon name="plus" :size="16" />新建房间
+          </button>
+        </div>
+
+        <div v-if="rooms.length === 0 && !draw.loading" class="wl-empty">
+          <Icon name="brush" :size="32" />
+          <span>还没有房间，开一个吧</span>
+        </div>
+
+        <div v-else class="room-list">
+          <article v-for="item in rooms" :key="item.id" class="room-card">
+            <div class="room-main">
+              <div class="room-head">
+                <span class="room-title">{{ item.title || '你画我猜' }}</span>
+                <span class="wl-badge" :class="item.phase === 'waiting' ? 'wl-badge--accent' : 'wl-badge--success'">
+                  {{ item.phase === 'waiting' ? `等人（${item.view.players.length}/8）` : '进行中' }}
+                </span>
+              </div>
+              <div class="room-seats">
+                <span v-for="p in item.view.players" :key="p.userId" class="seat-chip">
+                  <span class="dot" :class="p.online ? 'dot--on' : 'dot--off'" />
+                  {{ p.name }}
+                </span>
+              </div>
+              <div class="room-meta">房主 {{ item.creatorName }}</div>
+            </div>
+            <div class="room-action">
+              <button
+                class="wl-btn"
+                :class="{ 'wl-btn--primary': item.phase === 'waiting' }"
+                @click="onEnterRoom(item.id)"
+              >
+                {{ item.phase === 'waiting' ? '进入' : '观看' }}
+              </button>
+            </div>
+          </article>
+        </div>
+      </div>
+    </template>
+
+    <!-- ======================================================= 画桌 -->
+    <template v-else>
+      <header class="bar">
+        <button class="wl-icon-btn" title="返回大厅" @click="onLeave">
+          <Icon name="chevron-left" :size="16" />
+        </button>
+        <div class="bar-title">
+          <Icon name="brush" :size="18" />
+          <span class="selectable">{{ room?.title || '你画我猜' }}</span>
+        </div>
+        <span class="wl-badge" :class="viewState?.phase === 'finished' ? '' : 'wl-badge--success'">
+          {{ PHASE_LABEL[viewState?.phase ?? ''] ?? '' }}
+        </span>
+        <span v-if="viewState && viewState.phase !== 'waiting' && viewState.phase !== 'finished'" class="countdown">
+          {{ secondsLeft }}s
+        </span>
+        <span v-if="viewState && viewState.phase !== 'waiting'" class="round-mark">
+          第 {{ viewState.round }}/{{ viewState.totalRounds }} 轮
+        </span>
+        <div class="spacer" />
+        <button class="wl-icon-btn" :disabled="draw.loading" title="刷新" @click="draw.reload()">
+          <Icon name="refresh" :size="16" :class="{ spin: draw.loading }" />
+        </button>
+      </header>
+
+      <div v-if="!room" class="wl-empty">
+        <span class="wl-spinner" />
+        <span>正在加载房间…</span>
+      </div>
+
+      <template v-else>
+        <!-- ============ 等人 ============ -->
+        <div v-if="viewState?.phase === 'waiting'" class="phase-panel wl-scroll">
+          <div class="wl-empty">
+            <Icon name="user" :size="32" />
+            <span>
+              当前 {{ viewState.players.length }} 人，还差 {{ Math.max(0, 2 - viewState.players.length) }} 人开局
+            </span>
+            <div class="waiting-players">
+              <span v-for="p in viewState.players" :key="p.userId" class="seat-chip">
+                <span class="dot" :class="p.online ? 'dot--on' : 'dot--off'" />{{ p.name }}
+              </span>
+            </div>
+            <button v-if="room?.createdBy === myId" class="wl-btn wl-btn--primary" :disabled="draw.submitting" @click="onStart">
+              开始游戏
+            </button>
+            <span v-else class="wl-hint">等房主开始</span>
+          </div>
+        </div>
+
+        <!-- ============ 结算 ============ -->
+        <div v-else-if="viewState?.phase === 'finished'" class="phase-panel">
+          <div class="result-panel">
+            <h3>本局结束</h3>
+            <ol class="ranking">
+              <li v-for="(p, i) in viewState.result?.ranking ?? []" :key="p.userId" :class="{ me: p.userId === myId }">
+                <span class="rank-no">{{ i + 1 }}</span>
+                <span class="rank-name">{{ p.name }}</span>
+                <span class="rank-score">{{ p.score }} 分</span>
+              </li>
+            </ol>
+            <button class="wl-btn wl-btn--primary" @click="onLeave">返回大厅再来一局</button>
+          </div>
+        </div>
+
+        <!-- ============ 游戏中 ============ -->
+        <div v-else class="table">
+          <!-- 左：玩家 -->
+          <aside class="players wl-scroll">
+            <div
+              v-for="p in viewState?.players ?? []"
+              :key="p.userId"
+              class="player"
+              :class="{ 'player--drawer': p.isDrawer, 'player--guessed': p.guessed }"
+            >
+              <span class="dot" :class="p.online ? 'dot--on' : 'dot--off'" />
+              <span class="player-name">{{ p.name }}</span>
+              <Icon v-if="p.isDrawer" name="brush" :size="14" />
+              <Icon v-else-if="p.guessed" name="check" :size="14" class="guessed-mark" />
+              <span class="player-score">{{ p.score }}</span>
+            </div>
+          </aside>
+
+          <!-- 中：画布 -->
+          <section class="board">
+            <div class="board-head">
+              <!-- 选词 -->
+              <template v-if="viewState?.phase === 'choosing'">
+                <template v-if="viewState.iAmDrawer">
+                  <span class="hint-text">选一个词来画（{{ Math.ceil(secondsLeft) }}s 后随机）：</span>
+                  <button
+                    v-for="choice in viewState.wordChoices"
+                    :key="choice"
+                    class="wl-btn wl-btn--primary word-choice"
+                    @click="onPickWord(choice)"
+                  >
+                    {{ choice }}
+                  </button>
+                </template>
+                <span class="hint-text">{{ viewState.drawerName }} 正在选词…</span>
+              </template>
+
+              <!-- 绘画：词 / 掩码 -->
+              <template v-else-if="viewState?.phase === 'drawing'">
+                <span v-if="viewState.iAmDrawer" class="word-display">
+                  请画：<strong>{{ viewState.word }}</strong>
+                </span>
+                <span v-else-if="viewState.iGuessed" class="word-display">
+                  你猜对了：<strong>{{ viewState.word }}</strong>
+                </span>
+                <span v-else class="word-display word-masked">{{ viewState.masked }}</span>
+                <span class="hint-text">（{{ viewState.masked?.length }} 个字）</span>
+              </template>
+
+              <!-- 答案 -->
+              <template v-else-if="viewState?.phase === 'reveal'">
+                <span class="word-display">答案：<strong>{{ viewState.word }}</strong></span>
+                <span class="hint-text">下一个：{{ viewState.players[viewState.drawerIndex]?.name }}（{{ secondsLeft }}s）</span>
+              </template>
+            </div>
+
+            <div ref="canvasBox" class="canvas-box">
+              <canvas
+                ref="canvasEl"
+                class="board-canvas"
+                :class="{ 'board-canvas--draw': canDraw }"
+                @pointerdown="onPointerDown"
+                @pointermove="onPointerMove"
+                @pointerup="onPointerUp"
+                @pointercancel="onPointerUp"
+              />
+              <div v-if="viewState?.phase === 'choosing' && !viewState.iAmDrawer" class="canvas-veil">
+                <span>准备开始…</span>
+              </div>
+            </div>
+
+            <!-- 工具栏：只有画家能用 -->
+            <div class="tools" :class="{ 'tools--disabled': !canDraw }">
+              <div class="tool-group">
+                <button
+                  v-for="c in COLORS"
+                  :key="c"
+                  class="color-chip"
+                  :class="{ 'color-chip--on': color === c && tool === 'pen' }"
+                  :style="{ background: c }"
+                  :title="c"
+                  :disabled="!canDraw"
+                  @click="color = c; tool = 'pen'"
+                />
+              </div>
+              <div class="tool-group">
+                <button
+                  v-for="w in WIDTHS"
+                  :key="w"
+                  class="width-chip"
+                  :class="{ 'width-chip--on': width === w }"
+                  :disabled="!canDraw"
+                  @click="width = w; tool = 'pen'"
+                >
+                  <span :style="{ width: `${w + 2}px`, height: `${w + 2}px` }" />
+                </button>
+              </div>
+              <div class="tool-group">
+                <button
+                  class="wl-icon-btn"
+                  :class="{ 'tool--on': tool === 'eraser' }"
+                  :disabled="!canDraw"
+                  title="橡皮"
+                  @click="tool = tool === 'eraser' ? 'pen' : 'eraser'"
+                >
+                  <Icon name="eraser" :size="16" />
+                </button>
+                <button class="wl-icon-btn" :disabled="!canDraw" title="撤销上一笔" @click="undoStroke">
+                  <Icon name="refresh" :size="16" />
+                </button>
+                <button class="wl-icon-btn" :disabled="!canDraw" title="清空画布" @click="clearAll">
+                  <Icon name="trash" :size="16" />
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <!-- 右：猜词 -->
+          <aside class="chat">
+            <div ref="chatListEl" class="chat-list wl-scroll">
+              <div
+                v-for="(msg, i) in draw.chat"
+                :key="i"
+                class="chat-msg"
+                :class="{ 'chat-msg--correct': msg.correct, 'chat-msg--mine': msg.userId === myId }"
+              >
+                {{ chatTextOf(msg) }}
+              </div>
+              <div v-if="draw.chat.length === 0" class="chat-empty">在这里输入你的猜测</div>
+            </div>
+            <div class="chat-input-row">
+              <input
+                v-model="guessText"
+                class="wl-input"
+                :placeholder="viewState?.phase === 'drawing' ? '在这里猜…' : '随便聊聊'"
+                maxlength="60"
+                @keydown.enter="onSendGuess"
+              />
+              <button class="wl-btn wl-btn--primary" :disabled="!guessText.trim()" @click="onSendGuess">发送</button>
+            </div>
+          </aside>
+        </div>
+      </template>
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.draw {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 44px;
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--line-hair);
+  flex: none;
+}
+
+.bar-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.countdown {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.round-mark {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.new-room {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.new-room .wl-input {
+  flex: 1;
+}
+
+.rounds-select {
+  width: 90px;
+  flex: none;
+}
+
+.room-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.room-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+}
+
+.room-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.room-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.room-title {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.room-seats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.room-meta {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.seat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.dot--on {
+  background: #30a46c;
+}
+
+.dot--off {
+  background: var(--text-disabled);
+}
+
+/* ---------------- 游戏区三栏 */
+
+.table {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 170px 1fr 240px;
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+
+.players {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  overflow-y: auto;
+}
+
+.player {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+
+.player--drawer {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.player--guessed {
+  color: #30a46c;
+}
+
+.player-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guessed-mark {
+  color: #30a46c;
+}
+
+.player-score {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.board {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  gap: var(--space-2);
+}
+
+.board-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  flex-wrap: wrap;
+}
+
+.hint-text {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.word-display {
+  font-size: 15px;
+}
+
+.word-display strong {
+  font-size: 18px;
+  letter-spacing: 2px;
+}
+
+.word-masked {
+  letter-spacing: 6px;
+  font-weight: 700;
+}
+
+.word-choice {
+  font-size: 14px;
+}
+
+.canvas-box {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.board-canvas {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+
+.board-canvas--draw {
+  cursor: crosshair;
+}
+
+.canvas-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 13px;
+}
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.tools--disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.tool-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.color-chip {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+
+.color-chip--on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.width-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.width-chip span {
+  border-radius: 50%;
+  background: var(--text);
+}
+
+.width-chip--on {
+  border-color: var(--accent);
+}
+
+.tool--on {
+  background: var(--accent-soft);
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  overflow: hidden;
+}
+
+.chat-list {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.chat-msg {
+  font-size: 12.5px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  word-break: break-all;
+}
+
+.chat-msg--correct {
+  background: rgba(48, 164, 108, 0.16);
+  color: #1f7a4d;
+  font-weight: 600;
+}
+
+.chat-msg--mine {
+  background: var(--accent-soft);
+}
+
+.chat-empty {
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+  text-align: center;
+  margin-top: var(--space-4);
+}
+
+.chat-input-row {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-top: 1px solid var(--line-hair);
+}
+
+.chat-input-row .wl-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------------- 等人 / 结算 */
+
+.phase-panel {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.waiting-players {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin: var(--space-3) 0;
+}
+
+.result-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  min-width: 320px;
+}
+
+.result-panel h3 {
+  margin: 0;
+}
+
+.ranking {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.ranking li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.ranking li.me {
+  background: var(--accent-soft);
+}
+
+.rank-no {
+  width: 22px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+}
+
+.rank-name {
+  flex: 1;
+}
+
+.rank-score {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+</style>

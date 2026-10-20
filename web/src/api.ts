@@ -793,6 +793,41 @@ export const api = {
 
     leave: (id: string) => request<{ room: DdzRoom | null }>(`/api/games/doudizhu/rooms/${id}/leave`, { json: {} }),
   },
+
+  // ---------------------------------------------------------------- 你画我猜
+
+  draw: {
+    rooms: () => request<{ rooms: DrawRoom[] }>('/api/games/draw/rooms'),
+
+    createRoom: (title = '', rounds = 2) =>
+      request<{ room: DrawRoom }>('/api/games/draw/rooms', { json: { title, rounds } }),
+
+    getRoom: (id: string) => request<{ room: DrawRoom }>(`/api/games/draw/rooms/${id}`),
+
+    join: (id: string) => request<{ room: DrawRoom }>(`/api/games/draw/rooms/${id}/join`, { json: {} }),
+
+    start: (id: string) => request<{ room: DrawRoom }>(`/api/games/draw/rooms/${id}/start`, { json: {} }),
+
+    leave: (id: string) => request<{ room: DrawRoom }>(`/api/games/draw/rooms/${id}/leave`, { json: {} }),
+
+    /** 画家选定要画的词（必须来自服务端下发的候选）。 */
+    chooseWord: (id: string, word: string) =>
+      request<{ room: DrawRoom }>(`/api/games/draw/rooms/${id}/word`, { json: { word } }),
+
+    /** 画笔上报。调用方负责攒批（见 DrawApp 的 80ms 合并）。 */
+    stroke: (id: string, op: DrawStrokeInput) =>
+      request<{ ok: true }>(`/api/games/draw/rooms/${id}/strokes`, { json: op }),
+
+    /** 中途进来 / 刷新：补发当前画布。 */
+    canvas: (id: string) => request<{ strokes: DrawStrokeInput[] }>(`/api/games/draw/rooms/${id}/canvas`),
+
+    /** 猜词 / 房内闲聊。 */
+    guess: (id: string, text: string) =>
+      request<{ room: DrawRoom; correct: boolean; close: boolean; allGuessed: boolean }>(
+        `/api/games/draw/rooms/${id}/guess`,
+        { json: { text } },
+      ),
+  },
 }
 
 // ---------------------------------------------------------------- 分片上传
@@ -1561,6 +1596,73 @@ export interface DdzSeat {
   userId: string | null
   name: string | null
   online: boolean
+}
+
+// ---------------------------------------------------------------- 你画我猜
+
+export type DrawPhase = 'waiting' | 'choosing' | 'drawing' | 'reveal' | 'finished'
+
+export interface DrawPlayerView {
+  userId: string
+  name: string
+  score: number
+  online: boolean
+  /** 本回合是否已猜对。 */
+  guessed: boolean
+  isDrawer: boolean
+}
+
+export interface DrawChatMsg {
+  userId: string
+  name: string
+  text: string
+  at: number
+  correct?: boolean
+  close?: boolean
+}
+
+/** 画笔操作。与 DrawApp 画布的单位约定：坐标是 0-1000 的相对值。 */
+export interface DrawStrokeInput {
+  op: 'begin' | 'points' | 'end' | 'clear' | 'undo'
+  strokeId: string
+  points: Array<{ x: number; y: number }>
+  color: string
+  width: number
+  tool: 'pen' | 'eraser'
+}
+
+/** 按视角裁剪后的游戏状态（服务端 draw.ts viewFor 的镜像）。 */
+export interface DrawGameView {
+  phase: DrawPhase
+  players: DrawPlayerView[]
+  drawerIndex: number
+  drawerName: string
+  round: number
+  totalRounds: number
+  /** 只有画家 / 已猜对者 / reveal 后才有值；猜词者是 null。 */
+  word: string | null
+  masked: string | null
+  revealed: boolean[]
+  /** 只发给画家本人的候选词。 */
+  wordChoices: string[]
+  iGuessed: boolean
+  iAmDrawer: boolean
+  phaseEndsAt: number
+  result: { ranking: Array<{ userId: string; name: string; score: number }> } | null
+}
+
+export interface DrawRoom {
+  id: string
+  kind: 'draw'
+  title: string
+  phase: DrawPhase
+  status: string
+  createdBy: string
+  creatorName: string
+  view: DrawGameView
+  chat: DrawChatMsg[]
+  createdAt: number
+  updatedAt: number
 }
 
 export interface DdzRoom {
