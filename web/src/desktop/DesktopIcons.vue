@@ -20,6 +20,7 @@ import { APPS, type AppDef } from '@/apps/registry'
 import { shouldYieldKeyboard } from '@/desktop/keyboard'
 import { useAuth } from '@/stores/auth'
 import { useChat } from '@/stores/chat'
+import { badgeText, useTodos } from '@/stores/todos'
 import { useUi } from '@/stores/ui'
 import { useWindows } from '@/stores/windows'
 
@@ -27,12 +28,32 @@ const windows = useWindows()
 const auth = useAuth()
 const ui = useUi()
 const chat = useChat()
+const todos = useTodos()
 
 const selected = ref<string | null>(null)
 
 const icons = computed<AppDef[]>(() =>
   APPS.filter((app) => app.onDesktop).filter((app) => !(app.adminOnly && !auth.isAdmin)),
 )
+
+/**
+ * 图标右上角的数字。
+ *
+ * 聊天走自己的未读计数（服务端 totalUnread），记账/财物走待办接口。
+ * 两套数字都是服务端算的 —— 前端不在这里"顺手估算"，否则角标和列表迟早对不上。
+ */
+function badgeOf(appId: string): number {
+  if (appId === 'chat') return chat.totalUnread
+  return todos.badgeFor(appId)
+}
+
+function badgeTitle(app: AppDef): string {
+  const count = badgeOf(app.id)
+  if (app.id === 'chat') return `${count} 条未读消息`
+  if (app.id === 'ledger') return `${count} 项待办：待审批 / 被驳回待修改`
+  if (app.id === 'assets') return `${count} 项待办：逾期未还 / ${todos.dueSoonDays} 天内到期`
+  return `${count} 项待办`
+}
 
 function launch(app: AppDef, force = false): void {
   windows.open({
@@ -153,13 +174,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     >
       <span class="icon__glyph">
         <Icon :name="app.icon" :size="26" :stroke="1.6" />
-        <!-- 未读红点：聊天收到消息时最直观的一层反馈（任务栏角标 + 右下角提示另有两层） -->
+        <!-- 角标：聊天是未读数；记账/财物是"等我处理的事"（数字都来自服务端，0 不显示） -->
         <span
-          v-if="app.id === 'chat' && chat.totalUnread > 0"
+          v-if="badgeOf(app.id) > 0"
           class="icon__badge"
-          :title="`${chat.totalUnread} 条未读消息`"
+          :title="badgeTitle(app)"
         >
-          {{ chat.totalUnread > 99 ? '99+' : chat.totalUnread }}
+          {{ badgeText(badgeOf(app.id)) }}
         </span>
       </span>
       <span class="icon__label">{{ app.name }}</span>

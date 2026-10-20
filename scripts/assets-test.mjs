@@ -416,6 +416,110 @@ async function main() {
   })
   assert(memberRetire.status === 403 || memberRetire.status === 401, '普通成员不能退役物品', `状态 ${memberRetire.status}`)
 
+  // ---------------------------------------------------------------- 待办接口
+  //
+  // 财物的待办是"我借的东西快到期 / 已经过期"。这里钉住三件事：
+  //   1. 角标数字 == 列表按同样条件筛出来的条数；
+  //   2. **当天到期不算逾期**（due_on < 今天 才是逾期），但它算"即将到期"；
+  //   3. 别人的借出不进我的待办。
+  console.log('\n【待办接口：我的逾期 / 即将到期】')
+
+  /** 今天 + n 天的 YYYY-MM-DD（本地时区，与服务端 today() 同源）。 */
+  function dateOffset(days) {
+    const d = new Date()
+    d.setDate(d.getDate() + days)
+    const pad = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  }
+
+  const todoItem = await admin.api('/api/assets/items', {
+    method: 'POST',
+    json: { name: `待办边界测试品${SUFFIX}`, totalQty: 10 },
+  })
+  assert(todoItem.status === 200, '创建一件用于待办测试的物品')
+
+  async function lendWithDue(dueOn) {
+    const res = await member.api('/api/assets/loans', {
+      method: 'POST',
+      json: { itemId: todoItem.body.item.id, qty: 1, ...(dueOn ? { dueOn } : {}) },
+    })
+    assert(res.status === 200, `建立借出（dueOn=${dueOn ?? '空'}）`, `状态 ${res.status}`)
+    return res.body.loan
+  }
+
+  const dueToday = await lendWithDue(dateOffset(0))
+  const dueSoon2 = await lendWithDue(dateOffset(2))
+  const dueFar = await lendWithDue(dateOffset(10))
+  const duePast = await lendWithDue(dateOffset(-3))
+  const duePastReturned = await lendWithDue(dateOffset(-5))
+  await member.api(`/api/assets/loans/${duePastReturned.id}/return`, { method: 'POST', json: {} })
+
+  const memberLoansOverdue = await member.api('/api/assets/loans?mine=1&overdue=1&limit=1000')
+  const memberLoansSoon = await member.api('/api/assets/loans?mine=1&dueWithin=3&limit=1000')
+  const memberAllTodos = await member.api('/api/todos')
+
+  assert(memberAllTodos.status === 200, '成员能读待办接口')
+  const assetsTodo = memberAllTodos.body.todos.assets
+
+  assert(
+    assetsTodo.overdue.count === (memberLoansOverdue.body.loans ?? []).length,
+    '逾期的角标 == 列表 mine=1&overdue=1 的条数',
+    `待办 ${assetsTodo.overdue.count} / 列表 ${(memberLoansOverdue.body.loans ?? []).length}`,
+  )
+  assert(
+    assetsTodo.dueSoon.count === (memberLoansSoon.body.loans ?? []).length,
+    '即将到期的角标 == 列表 mine=1&dueWithin=3 的条数',
+    `待办 ${assetsTodo.dueSoon.count} / 列表 ${(memberLoansSoon.body.loans ?? []).length}`,
+  )
+  assert(assetsTodo.dueSoonDays === 3, '「即将到期」的窗口是 3 天，并由服务端告诉前端', String(assetsTodo.dueSoonDays))
+
+  const overdueIds = (memberLoansOverdue.body.loans ?? []).map((l) => l.id)
+  const soonIds = (memberLoansSoon.body.loans ?? []).map((l) => l.id)
+  assert(
+    !overdueIds.includes(dueToday.id),
+    '**当天到期不算逾期**（逾期必须是应还日期 < 今天）',
+    `dueToday=${dueToday.dueOn}`,
+  )
+  assert(
+    soonIds.includes(dueToday.id),
+    '但当天到期算「即将到期」——否则它两边都不提醒，就是漏掉了',
+  )
+  assert(overdueIds.includes(duePast.id), '过了应还日期的在逾期里')
+  assert(!soonIds.includes(duePast.id), '已逾期的不重复算进「即将到期」（两段区间不重叠）')
+  assert(soonIds.includes(dueSoon2.id), '2 天后到期在「即将到期」里')
+  assert(!soonIds.includes(dueFar.id) && !overdueIds.includes(dueFar.id), '10 天后到期两边都不算')
+  assert(
+    !overdueIds.includes(duePastReturned.id),
+    '已归还的不算逾期（哪怕应还日期早就过了）',
+  )
+  assert(soonIds.includes(dueSoon2.id) && assetsTodo.dueSoon.ids.includes(dueSoon2.id), '待办 id 里能直达这条记录')
+
+  // 权限隔离：别人的借出不进我的待办
+  const adminAllTodos = await admin.api('/api/todos')
+  assert(
+    adminAllTodos.body.todos.assets.overdue.count === 0 &&
+      adminAllTodos.body.todos.assets.dueSoon.count === 0,
+    '别人的借出不会出现在我的待办里（只算"我借的"）',
+    `管理员 ${adminAllTodos.body.todos.assets.overdue.count} / ${adminAllTodos.body.todos.assets.dueSoon.count}`,
+  )
+  assert(
+    adminAllTodos.body.todos.assets.total === 0,
+    '上面这些借出都是成员借的，管理员的财物待办合计为 0',
+  )
+
+  // 参数非法时不能把筛选静默变成"全部"
+  const badWindow = await member.api('/api/assets/loans?mine=1&dueWithin=abc&limit=1000')
+  assert(
+    (badWindow.body.loans ?? []).length === (await member.api('/api/assets/loans?mine=1&limit=1000')).body.loans.length,
+    'dueWithin 非法值被忽略（不会变成 NaN 拼进 SQL、也不会把筛选弄丢）',
+  )
+
+  // 收尾：还掉这一节借出的东西，别影响以后
+  for (const loan of [dueToday, dueSoon2, dueFar, duePast]) {
+    await member.api(`/api/assets/loans/${loan.id}/return`, { method: 'POST', json: {} })
+  }
+  assert(true, '待办测试已收尾（归还临时借出）')
+
   console.log(`\n\x1b[1m结果\x1b[0m  通过 \x1b[32m${passed}\x1b[0m  失败 \x1b[31m${failed}\x1b[0m\n`)
   process.exit(failed === 0 ? 0 : 1)
 }

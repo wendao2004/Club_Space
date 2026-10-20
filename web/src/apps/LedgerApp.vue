@@ -24,6 +24,7 @@ import type {
   LedgerStatus,
 } from '@/api'
 import { useAuth } from '@/stores/auth'
+import { useTodos } from '@/stores/todos'
 import { useUi } from '@/stores/ui'
 import { useWindows } from '@/stores/windows'
 import { useLedger } from '@/stores/ledger'
@@ -37,6 +38,7 @@ const auth = useAuth()
 const ui = useUi()
 const windows = useWindows()
 const ledger = useLedger()
+const todos = useTodos()
 
 // ---------------------------------------------------------------- 常量与文案
 
@@ -169,6 +171,36 @@ function resetFilters(): void {
     mine: false,
     pending: false,
   })
+}
+
+// ---------------------------------------------------------------- 待办
+//
+// 角标上的数字是服务端按**一组固定筛选条件**算出来的（见 server/src/ledger.ts
+// 的 ledgerTodo）。所以"点角标进来"必须把那组条件**原样**套上 ——
+// 如果保留着用户上次的日期区间 / 搜索词，角标写 3、列表只有 1 条，
+// 看起来就是功能坏了。这里先清掉全部条件，再只开这一项。
+
+type LedgerTodoIntent = 'review' | 'rejected'
+
+function todoFilters(intent: LedgerTodoIntent): Partial<LedgerFilters> {
+  return {
+    from: null,
+    to: null,
+    kind: null,
+    categoryId: null,
+    eventId: null,
+    search: '',
+    mine: intent === 'rejected',
+    status: intent === 'rejected' ? 'rejected' : null,
+    pending: intent === 'review',
+  }
+}
+
+function applyTodo(intent: LedgerTodoIntent): void {
+  view.value = 'entries'
+  ledger.setFilters(todoFilters(intent))
+  // 刚点过待办，角标数字顺手对齐一次（用户可能刚在别处审批过）
+  void todos.refresh()
 }
 
 // --- 筛选控件接线。
@@ -1069,6 +1101,8 @@ onMounted(() => {
   // 用户很可能一进来就直接点"记一笔"、根本没进过活动视图），别再单独调一次 ——
   // 那是同一份数据在同一秒里请求两遍。
   void ledger.reload()
+  // 打开应用时刷新待办：角标与列表必须来自同一时刻的口径
+  void todos.refresh()
 
   const el = rootEl.value
   if (el) {
@@ -1237,6 +1271,32 @@ onBeforeUnmount(() => {
           />
           <span>待我审批</span>
         </label>
+        <!--
+          待办一键筛出：数字来自 /api/todos，套的也是同一组筛选条件。
+          0 不显示 —— 不挂一个永远为 0 的按钮在筛选栏里。
+        -->
+        <button
+          v-if="auth.isAdmin && todos.data.ledger.review.count > 0"
+          class="todochip"
+          :class="{ 'todochip--on': ledger.filters.pending }"
+          :title="`${todos.data.ledger.review.count} 笔等你审批`"
+          @click="applyTodo('review')"
+        >
+          <Icon name="clock" :size="13" />
+          <span>待我审批</span>
+          <span class="todochip__n">{{ todos.data.ledger.review.count > 99 ? '99+' : todos.data.ledger.review.count }}</span>
+        </button>
+        <button
+          v-if="todos.data.ledger.rejected.count > 0"
+          class="todochip"
+          :class="{ 'todochip--on': ledger.filters.mine && ledger.filters.status === 'rejected' }"
+          :title="`${todos.data.ledger.rejected.count} 笔记被驳回，等你修改`"
+          @click="applyTodo('rejected')"
+        >
+          <Icon name="alert" :size="13" />
+          <span>待修改</span>
+          <span class="todochip__n">{{ todos.data.ledger.rejected.count > 99 ? '99+' : todos.data.ledger.rejected.count }}</span>
+        </button>
         <button class="wl-btn wl-btn--ghost" @click="resetFilters">
           <Icon name="refresh" :size="14" />
           <span>重置筛选</span>
@@ -2287,6 +2347,52 @@ onBeforeUnmount(() => {
 
 .check input {
   accent-color: var(--accent);
+}
+
+/* 待办一键筛选：比 wl-btn 更紧凑，能塞进已经排满的筛选栏 */
+.todochip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.todochip:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.todochip--on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.todochip__n {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+[data-theme='dark'] .todochip__n {
+  color: #3a1116;
 }
 
 .link-btn {

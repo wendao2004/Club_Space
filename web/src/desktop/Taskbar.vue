@@ -12,6 +12,7 @@ import { findApp } from '@/apps/registry'
 import { previewSystem, setMuted, setVolume, soundState } from '@/lib/sfx'
 import { useAuth } from '@/stores/auth'
 import { useChat } from '@/stores/chat'
+import { badgeText, useTodos } from '@/stores/todos'
 import { useUi } from '@/stores/ui'
 import { useWindows, type WindowInstance } from '@/stores/windows'
 
@@ -22,6 +23,7 @@ const windows = useWindows()
 const auth = useAuth()
 const ui = useUi()
 const chat = useChat()
+const todos = useTodos()
 
 // 未读角标：连接一次就够，任务栏是常驻的。
 // 放在 onMounted 而不是 setup 里，避免组件还没挂载就发起网络请求。
@@ -88,6 +90,24 @@ function onGroupClick(group: TaskGroup): void {
   }
   // 多窗口：点击循环切换，右键出列表 —— 简化处理，这里用循环
   windows.cycleSameApp(group.appId)
+}
+
+/**
+ * 任务栏按钮上的角标数字。
+ *
+ * 聊天用未读数，记账/财物用待办数（服务端算，口径与列表筛选一致）。
+ * 其它应用没有角标 —— 不要为了"每个图标都有点东西"造一个假数字。
+ */
+function groupBadge(appId: string): number {
+  if (appId === 'chat') return chat.totalUnread
+  return todos.badgeFor(appId)
+}
+
+function groupBadgeTitle(group: TaskGroup, count: number): string {
+  if (group.appId === 'chat') return `${count} 条未读消息`
+  if (group.appId === 'ledger') return `${group.name}：${count} 项待办（待审批 / 被驳回待修改）`
+  if (group.appId === 'assets') return `${group.name}：${count} 项待办（逾期未还 / ${todos.dueSoonDays} 天内到期）`
+  return `${group.name}：${count} 项待办`
 }
 
 function onStartClick(event: MouseEvent): void {
@@ -218,13 +238,13 @@ onBeforeUnmount(() => {
         <span class="taskbar__app-icon" :style="group.tint ? { '--tint': group.tint } : undefined">
           <Icon :name="group.icon" :size="20" />
         </span>
-        <!-- 聊天未读角标：直接读服务端算的 totalUnread，不在前端自己估算 -->
+        <!-- 角标：聊天未读数 / 记账·财物的待办数。数字都来自服务端，0 不显示 -->
         <span
-          v-if="group.appId === 'chat' && chat.totalUnread > 0"
+          v-if="groupBadge(group.appId) > 0"
           class="taskbar__badge"
-          :title="`${chat.totalUnread} 条未读消息`"
+          :title="groupBadgeTitle(group, groupBadge(group.appId))"
         >
-          {{ chat.totalUnread > 99 ? '99+' : chat.totalUnread }}
+          {{ badgeText(groupBadge(group.appId)) }}
         </span>
         <span v-else-if="group.windows.length > 1" class="taskbar__count">{{ group.windows.length }}</span>
         <span class="taskbar__indicator" :class="{ 'taskbar__indicator--on': !group.minimized }" />

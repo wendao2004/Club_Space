@@ -147,6 +147,7 @@ import {
   exportEventCsv,
   getEntry,
   getEvent,
+  ledgerTodo,
   listCategories,
   listEntries,
   listEvents,
@@ -168,6 +169,7 @@ import {
 // 账目分类，一个查的是物品分类，搞混了不会报错，只会查错东西。
 import {
   archiveCategory as archiveAssetCategory,
+  assetTodo,
   createCategory as createAssetCategory,
   createItem,
   exportItemsCsv,
@@ -2438,9 +2440,13 @@ app.get('/api/assets/loans', async (req) => {
     mine?: string
     open?: string
     overdue?: string
+    dueWithin?: string
     search?: string
     limit?: string
   }
+  // dueWithin：与待办角标同一个「即将到期」窗口（天）。非法值直接忽略，
+  // 不要退化成 NaN 拼进 SQL —— 那会让筛选条件静默失效、列表变成全部。
+  const dueWithin = q.dueWithin ? Number.parseInt(q.dueWithin, 10) : undefined
   return {
     loans: listLoans({
       itemId: q.itemId,
@@ -2449,6 +2455,7 @@ app.get('/api/assets/loans', async (req) => {
       q: q.search?.trim().slice(0, 60) || undefined,
       open: q.open === '1',
       overdue: q.overdue === '1',
+      dueWithin: dueWithin !== undefined && Number.isFinite(dueWithin) ? dueWithin : undefined,
       limit: q.limit ? Number.parseInt(q.limit, 10) : undefined,
     }),
   }
@@ -3591,6 +3598,46 @@ app.post(
     'game-werewolf-chat',
   ),
 )
+
+// ---------------------------------------------------------------- 待办
+
+/**
+ * 当前登录用户的待办汇总（一个聚合接口，不按模块拆三个）。
+ *
+ * 为什么要有它：记账的「待审批 / 被驳回」和财物的「逾期归还」过去都是沉默的 ——
+ * 状态变了只写一条审计，人必须主动打开应用、翻到对应页面才会发现。
+ * 结果是"功能都有，但用起来会卡住"。
+ *
+ * ⚠️ **口径只有一个**：每个数字都复用列表接口那份筛选条件
+ * （ledger.ts 的 entryWhere / assets.ts 的 loanWhere），前端点进去用的也是
+ * 同一组查询参数。绝不在这里另写一套"待办"判定 —— 角标 3、列表 2 条
+ * 是最容易被用户判定为"坏了"的那类 bug。
+ *
+ * 权限：
+ *   - review（待我审批）只有管理员/创建者非零 —— 审批动作本身就是 admin 专属；
+ *   - rejected 只算自己提交的；
+ *   - 财物的逾期/即将到期只算"我借的"，不替管理员看别人的。
+ */
+app.get('/api/todos', async (req) => {
+  const user = requireUser(req)
+  const isAdmin = roleAtLeast(user.role, 'admin')
+  const ledger = ledgerTodo(user.id, isAdmin)
+  const assets = assetTodo(user.id)
+  return {
+    todos: {
+      ledger: {
+        ...ledger,
+        /** 角标用它：审批 + 待修改，都是"要你动手"的事 */
+        total: ledger.review.count + ledger.rejected.count,
+      },
+      assets: {
+        ...assets,
+        total: assets.overdue.count + assets.dueSoon.count,
+      },
+    },
+    asOf: now(),
+  }
+})
 
 // ---------------------------------------------------------------- 静态资源
 

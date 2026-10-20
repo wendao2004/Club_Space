@@ -16,11 +16,13 @@ import Icon from '@/components/Icon.vue'
 import ModalShell from '@/components/ModalShell.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { api, type AssetCondition, type AssetItem, type AssetItemInput, type AssetLoan } from '@/api'
-import { useAssets } from '@/stores/assets'
+import { useAssets, type LoanFilter } from '@/stores/assets'
 import { useAuth } from '@/stores/auth'
+import { useTodos } from '@/stores/todos'
 
 const assets = useAssets()
 const auth = useAuth()
+const todos = useTodos()
 
 type Tab = 'items' | 'loans'
 const tab = ref<Tab>('items')
@@ -59,6 +61,8 @@ function formatDate(ts: number | null): string {
 
 onMounted(() => {
   void assets.refresh()
+  // 打开应用时刷新待办：角标与列表必须来自同一时刻的口径
+  void todos.refresh()
   // 「代谁借」的下拉需要成员列表，单独拉一份
   void assets.loadMembers()
 })
@@ -439,12 +443,28 @@ function download(url: string): void {
 const summary = computed(() => assets.summary)
 
 /** 借还记录的筛选标签。 */
-const LOAN_TABS: Array<{ key: 'all' | 'open' | 'overdue' | 'mine'; label: string }> = [
+const LOAN_TABS: Array<{ key: LoanFilter; label: string }> = [
   { key: 'all', label: '全部' },
   { key: 'open', label: '未归还' },
   { key: 'overdue', label: '已逾期' },
   { key: 'mine', label: '我借的' },
+  { key: 'myOverdue', label: '我的逾期' },
+  { key: 'myDueSoon', label: '即将到期' },
 ]
+
+/**
+ * 待办一键筛出。
+ *
+ * 角标上的数字由服务端按 `mine=1&overdue=1` / `mine=1&dueWithin=N` 算出来，
+ * 这里点下去切到的就是同一组条件（见 stores/assets.ts 的 loadLoans）。
+ * 绝不能在界面上另加日期/搜索条件 —— 那会让条数和角标对不上。
+ */
+function applyTodo(intent: 'overdue' | 'dueSoon'): void {
+  tab.value = 'loans'
+  assets.loanQ = ''
+  assets.setLoanFilter(intent === 'overdue' ? 'myOverdue' : 'myDueSoon')
+  void todos.refresh()
+}
 
 const editing = computed(() => editOpen.value)
 </script>
@@ -470,6 +490,33 @@ const editing = computed(() => editOpen.value)
         </button>
       </div>
     </header>
+
+    <!-- ------------------------------------------------------------ 我的待办 -->
+    <!--
+      只显示"等我处理的事"，数字来自 /api/todos，点下去切到同一个筛选条件。
+      0 不显示 —— 不挂一个永远为 0 的提醒条。
+    -->
+    <div v-if="todos.data.assets.total > 0" class="assets__todo">
+      <span class="assets__todo-label">我借的</span>
+      <button
+        v-if="todos.data.assets.overdue.count > 0"
+        class="todopill todopill--bad"
+        :title="`${todos.data.assets.overdue.count} 件东西已经过了应还日期还没还`"
+        @click="applyTodo('overdue')"
+      >
+        已逾期
+        <span class="todopill__n">{{ todos.data.assets.overdue.count > 99 ? '99+' : todos.data.assets.overdue.count }}</span>
+      </button>
+      <button
+        v-if="todos.data.assets.dueSoon.count > 0"
+        class="todopill"
+        :title="`${todos.data.assets.dueSoon.count} 件东西将在 ${todos.dueSoonDays} 天内到期`"
+        @click="applyTodo('dueSoon')"
+      >
+        {{ todos.dueSoonDays }} 天内到期
+        <span class="todopill__n">{{ todos.data.assets.dueSoon.count > 99 ? '99+' : todos.data.assets.dueSoon.count }}</span>
+      </button>
+    </div>
 
     <!-- ------------------------------------------------------------ 逾期提醒 -->
     <div v-if="assets.overdue.length > 0" class="assets__alert">
@@ -1078,6 +1125,52 @@ const editing = computed(() => editOpen.value)
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+/* ---------------------------------------------------------------- 我的待办 */
+.assets__todo {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+.assets__todo-label {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+.todopill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+.todopill:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.todopill--bad {
+  border-color: color-mix(in srgb, var(--danger, #d9534f) 40%, transparent);
+  color: var(--danger, #d9534f);
+}
+.todopill__n {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger, #d9534f);
+  color: #ffffff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
 }
 
 /* ---------------------------------------------------------------- 逾期提醒 */

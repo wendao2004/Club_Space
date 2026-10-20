@@ -217,6 +217,28 @@ function daysBetween(from: string, to: string): number {
   return Math.max(0, Math.round((b - a) / 86_400_000))
 }
 
+/**
+ * 在 YYYY-MM-DD 上加减天数（本地时区，与 today() 同源）。
+ *
+ * 不直接用 Date 的 toISOString：那会切到 UTC，在东八区的晚上会差一天，
+ * 而"3 天内到期"差一天就是一条漏提醒。
+ */
+function addDays(date: string, days: number): string {
+  const [y, m, d] = date.split('-').map((v) => Number.parseInt(v, 10))
+  const dt = new Date(y!, m! - 1, d!)
+  dt.setDate(dt.getDate() + days)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`
+}
+
+/**
+ * 「即将到期」的窗口天数。
+ *
+ * 与待办接口、借还列表的 dueWithin 参数共用同一个常量：角标写 3、点进去
+ * 列表按 2 天筛，比一个坏按钮更让人困惑。
+ */
+export const DUE_SOON_DAYS = 3
+
 function toItem(row: RawItem): AssetItemView {
   return {
     id: row.id,
@@ -796,10 +818,21 @@ export interface LoanQuery {
   open?: boolean
   /** 只看逾期的。 */
   overdue?: boolean
+  /**
+   * 只看「N 天内到期、且还没逾期」的（未归还、未作废、应还日期 >= 今天）。
+   * 默认窗口见 DUE_SOON_DAYS；单独做成参数是为了让待办角标和列表筛选能对上。
+   */
+  dueWithin?: number
   limit?: number
 }
 
-export function listLoans(options: LoanQuery = {}): AssetLoanView[] {
+/**
+ * 借还记录的筛选条件 → WHERE 片段。
+ *
+ * ⚠️ 列表、计数、待办三处共用。逾期/未归还的判定只写一遍 ——
+ * 角标的口径和列表一旦分叉，用户点进去就会发现数量对不上。
+ */
+function loanWhere(options: LoanQuery): { whereSql: string; params: Array<string | number> } {
   const where: string[] = []
   const params: Array<string | number> = []
   if (options.itemId) {
@@ -821,21 +854,100 @@ export function listLoans(options: LoanQuery = {}): AssetLoanView[] {
   if (options.open) where.push('l.returned_at IS NULL AND l.voided_at IS NULL')
   if (options.overdue) {
     // 逾期 = 没还（且没作废） 且 应还日期早于今天。字符串比较即可，YYYY-MM-DD 是按字典序排列的。
+    // 「刚好今天到期」不算逾期（严格小于），它落在下面的"即将到期"里。
     where.push('l.returned_at IS NULL AND l.voided_at IS NULL AND l.due_on IS NOT NULL AND l.due_on < ?')
     params.push(today())
   }
+  if (options.dueWithin !== undefined) {
+    const days = Math.max(0, Math.min(365, Math.trunc(options.dueWithin)))
+    where.push(
+      'l.returned_at IS NULL AND l.voided_at IS NULL AND l.due_on IS NOT NULL AND l.due_on >= ? AND l.due_on <= ?',
+    )
+    params.push(today(), addDays(today(), days))
+  }
+  return { whereSql: where.join(' AND '), params }
+}
+
+export function listLoans(options: LoanQuery = {}): AssetLoanView[] {
+  const { whereSql, params } = loanWhere(options)
   const limit = Math.min(Math.max(options.limit ?? 200, 1), 1000)
   params.push(limit)
 
   const rows = getDb()
     .prepare(
       `${LOAN_SELECT}
-       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ${whereSql ? `WHERE ${whereSql}` : ''}
        ORDER BY (l.returned_at IS NULL) DESC, l.due_on IS NOT NULL AND l.due_on < '${today()}' DESC, l.lent_at DESC
        LIMIT ?`,
     )
     .all(...params) as unknown as RawLoan[]
   return rows.map(toLoan)
+}
+
+/** 按同样的筛选条件数条数（待办角标用；不拉行）。 */
+export function countLoans(options: LoanQuery = {}): number {
+  const { whereSql, params } = loanWhere(options)
+  return (
+    getDb()
+      .prepare(
+        `SELECT COUNT(*) AS n
+           FROM asset_loans l
+           JOIN asset_items i ON i.id = l.item_id
+           JOIN users b ON b.id = l.borrower_id
+          ${whereSql ? `WHERE ${whereSql}` : ''}`,
+      )
+      .get(...params) as { n: number }
+  ).n
+}
+
+/** 借还记录里最多带多少个待办 id。 */
+export const LOAN_TODO_ID_LIMIT = 20
+
+/** 按同样条件取前几条 id，顺序与 listLoans 的前几条一致。 */
+export function listLoanIds(options: LoanQuery = {}, limit = LOAN_TODO_ID_LIMIT): string[] {
+  const { whereSql, params } = loanWhere(options)
+  const rows = getDb()
+    .prepare(
+      `${LOAN_SELECT}
+       ${whereSql ? `WHERE ${whereSql}` : ''}
+       ORDER BY (l.returned_at IS NULL) DESC, l.due_on IS NOT NULL AND l.due_on < '${today()}' DESC, l.lent_at DESC
+       LIMIT ?`,
+    )
+    .all(...params, Math.max(1, Math.min(limit, 200))) as unknown as RawLoan[]
+  return rows.map((r) => r.id)
+}
+
+export interface AssetTodoBucket {
+  count: number
+  ids: string[]
+}
+
+export interface AssetTodo {
+  /** 我借的、未还、已逾期 */
+  overdue: AssetTodoBucket
+  /** 我借的、未还、DUE_SOON_DAYS 天内到期（不含已逾期） */
+  dueSoon: AssetTodoBucket
+  dueSoonDays: number
+}
+
+/**
+ * 财物待办（只算"我借的"，不替管理员操心别人的逾期）。
+ *
+ * 口径逐条对应列表筛选条件（GET /api/assets/loans）：
+ *   - overdue == `?mine=1&overdue=1`
+ *   - dueSoon == `?mine=1&dueWithin=3`
+ *
+ * 为什么不做"全社团逾期"的角标：那是管理视角的统计（/api/assets/summary
+ * 已经有 overdueLoans），而这里要回答的是"**我**该做什么"。
+ */
+export function assetTodo(userId: string): AssetTodo {
+  const overdue = { borrowerId: userId, overdue: true }
+  const dueSoon = { borrowerId: userId, dueWithin: DUE_SOON_DAYS }
+  return {
+    overdue: { count: countLoans(overdue), ids: listLoanIds(overdue) },
+    dueSoon: { count: countLoans(dueSoon), ids: listLoanIds(dueSoon) },
+    dueSoonDays: DUE_SOON_DAYS,
+  }
 }
 
 // ---------------------------------------------------------------- 汇总

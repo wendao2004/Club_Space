@@ -10,6 +10,7 @@ import { computed, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { APPS, type AppDef } from '@/apps/registry'
 import { useAuth } from '@/stores/auth'
+import { badgeText, useTodos } from '@/stores/todos'
 import { useUi } from '@/stores/ui'
 import { useWindows } from '@/stores/windows'
 
@@ -19,6 +20,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
 const windows = useWindows()
 const auth = useAuth()
 const ui = useUi()
+const todos = useTodos()
 
 const query = ref('')
 const searchRef = ref<HTMLInputElement | null>(null)
@@ -28,11 +30,24 @@ watch(
   (open) => {
     if (open) {
       query.value = ''
+      // 打开开始菜单顺带刷一次待办角标（带 5 秒节流，连续开关不会重复请求）
+      void todos.refresh()
       // 打开后自动聚焦搜索框，键盘用户可以直接输入
       requestAnimationFrame(() => searchRef.value?.focus())
     }
   },
 )
+
+/** 待办角标：只有"等我处理的事"才显示，0 不显示（与桌面图标、任务栏同一口径）。 */
+function todoBadge(appId: string): number {
+  return todos.badgeFor(appId)
+}
+
+function todoTitle(app: AppDef): string {
+  if (app.id === 'ledger') return `${todoBadge(app.id)} 项待办：待审批 / 被驳回待修改`
+  if (app.id === 'assets') return `${todoBadge(app.id)} 项待办：逾期未还 / ${todos.dueSoonDays} 天内到期`
+  return `${todoBadge(app.id)} 项待办`
+}
 
 const visibleApps = computed<AppDef[]>(() =>
   APPS.filter((app) => app.inStartMenu).filter((app) => {
@@ -117,6 +132,13 @@ async function signOut(): Promise<void> {
               <button v-for="app in filtered" :key="app.id" class="start__tile" @click="launch(app)">
                 <span class="start__tile-icon" :style="app.tint ? { '--tint': app.tint } : undefined">
                   <Icon :name="app.icon" :size="24" />
+                  <span
+                    v-if="todoBadge(app.id) > 0"
+                    class="start__tile-badge"
+                    :title="todoTitle(app)"
+                  >
+                    {{ badgeText(todoBadge(app.id)) }}
+                  </span>
                 </span>
                 <span class="start__tile-name">{{ app.name }}</span>
               </button>
@@ -129,6 +151,13 @@ async function signOut(): Promise<void> {
               <button v-for="app in apps" :key="app.id" class="start__result" @click="launch(app)">
                 <span class="start__result-icon" :style="app.tint ? { '--tint': app.tint } : undefined">
                   <Icon :name="app.icon" :size="18" />
+                  <span
+                    v-if="todoBadge(app.id) > 0"
+                    class="start__tile-badge"
+                    :title="todoTitle(app)"
+                  >
+                    {{ badgeText(todoBadge(app.id)) }}
+                  </span>
                 </span>
                 <span class="start__result-text">
                   <span class="start__result-name">{{ app.name }}</span>
@@ -253,12 +282,35 @@ async function signOut(): Promise<void> {
 
 /* 瓦片不再坐色块：主色线性字形直接落在面板上（Windows 11 的做法） */
 .start__tile-icon {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   width: 30px;
   height: 30px;
   color: var(--tint, var(--text-secondary));
+}
+
+/* 待办角标：与任务栏/桌面图标同一种红点，坐在字形右上角 */
+.start__tile-badge {
+  position: absolute;
+  top: -6px;
+  right: -10px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--surface-raised);
+}
+
+[data-theme='dark'] .start__tile-badge {
+  color: #3a1116;
 }
 
 [data-theme='dark'] .start__tile-icon {
@@ -299,6 +351,7 @@ async function signOut(): Promise<void> {
 }
 
 .start__result-icon {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;

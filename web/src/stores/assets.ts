@@ -9,6 +9,7 @@
 import { defineStore } from 'pinia'
 import { api, ApiError, type AssetCategory, type AssetItem, type AssetItemInput, type AssetLoan, type AssetSummary } from '@/api'
 import { useAuth } from '@/stores/auth'
+import { useTodos } from '@/stores/todos'
 import { useUi } from '@/stores/ui'
 
 function messageOf(err: unknown): string {
@@ -24,14 +25,23 @@ export interface AssetFilters {
   onlyOnLoan: boolean
 }
 
+/**
+ * 借还记录的视图。
+ *
+ * 'myOverdue' / 'myDueSoon' 是给待办角标准备的**组合条件**，对应的仍是
+ * 列表接口已有的那组参数（mine + overdue / mine + dueWithin），
+ * 不是另写一套查询 —— 否则角标和列表会各数一套。
+ */
+export type LoanFilter = 'all' | 'open' | 'overdue' | 'mine' | 'myOverdue' | 'myDueSoon'
+
 interface State {
   categories: AssetCategory[]
   items: AssetItem[]
   /** 当前打开的物品详情；为 null 时显示列表。 */
   detail: { item: AssetItem; loans: AssetLoan[] } | null
   loans: AssetLoan[]
-  /** 借还记录的视图：全部 / 未归还 / 逾期 / 我借的。 */
-  loanFilter: 'all' | 'open' | 'overdue' | 'mine'
+  /** 借还记录的视图：全部 / 未归还 / 逾期 / 我借的 / 我的逾期 / 我的即将到期。 */
+  loanFilter: LoanFilter
   /** 借还记录的搜索词（物品名/编号、借用人、用途）。 */
   loanQ: string
   summary: AssetSummary | null
@@ -102,16 +112,28 @@ export const useAssets = defineStore('assets', {
     },
 
     async loadLoans(): Promise<void> {
+      const filter = this.loanFilter
       try {
         const res = await api.assets.loans({
-          mine: this.loanFilter === 'mine' || undefined,
-          open: this.loanFilter === 'open' || undefined,
-          overdue: this.loanFilter === 'overdue' || undefined,
+          // "我的逾期 / 我的即将到期"是组合条件：仍然走列表接口的同名参数，
+          // 服务端那边与待办角标共用 loanWhere()，所以条数一定对得上。
+          mine: filter === 'mine' || filter === 'myOverdue' || filter === 'myDueSoon' || undefined,
+          open: filter === 'open' || undefined,
+          overdue: filter === 'overdue' || filter === 'myOverdue' || undefined,
+          dueWithin:
+            filter === 'myDueSoon'
+              ? // 窗口天数由服务端在 /api/todos 里给出，前端不硬编码 3
+                useTodos().dueSoonDays
+              : undefined,
           search: this.loanQ.trim() || undefined,
           limit: 200,
         })
         this.loans = res.loans
       } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          useAuth().handleUnauthorized()
+          return
+        }
         useUi().notify('error', '加载借还记录失败', messageOf(err))
       }
     },
@@ -218,6 +240,8 @@ export const useAssets = defineStore('assets', {
         const res = await api.assets.lend(input)
         useUi().notify('success', '已借出', `${res.loan.itemName} × ${res.loan.qty}`)
         await Promise.all([this.loadItems(), this.loadLoans(), this.loadSummary()])
+        // 借出一件带应还日期的物品，可能立刻进入"即将到期/逾期"待办
+        void useTodos().refresh(true)
         if (this.detail) await this.openItem(this.detail.item.id)
         return true
       } catch (err) {
@@ -236,6 +260,8 @@ export const useAssets = defineStore('assets', {
         const res = await api.assets.returnLoan(id, input)
         useUi().notify('success', '已归还', `${res.loan.itemName} × ${res.loan.qty}`)
         await Promise.all([this.loadItems(), this.loadLoans(), this.loadSummary()])
+        // 还掉一件，逾期/即将到期的待办立刻清掉一条
+        void useTodos().refresh(true)
         if (this.detail) await this.openItem(this.detail.item.id)
         return true
       } catch (err) {
@@ -253,6 +279,8 @@ export const useAssets = defineStore('assets', {
         await api.assets.updateLoan(id, input)
         useUi().notify('success', '记录已更正')
         await Promise.all([this.loadItems(), this.loadLoans(), this.loadSummary()])
+        // 改了应还日期/借用人，待办归属可能变了
+        void useTodos().refresh(true)
         if (this.detail) await this.openItem(this.detail.item.id)
         return true
       } catch (err) {
@@ -267,6 +295,8 @@ export const useAssets = defineStore('assets', {
         await api.assets.voidLoan(id)
         useUi().notify('success', '记录已作废')
         await Promise.all([this.loadItems(), this.loadLoans(), this.loadSummary()])
+        // 作废后这条不再算"在外"，也就不该再出现在逾期待办里
+        void useTodos().refresh(true)
         if (this.detail) await this.openItem(this.detail.item.id)
         return true
       } catch (err) {
@@ -281,6 +311,8 @@ export const useAssets = defineStore('assets', {
         await api.assets.restoreLoan(id)
         useUi().notify('success', '记录已恢复', '重新计入账面')
         await Promise.all([this.loadItems(), this.loadLoans(), this.loadSummary()])
+        // 恢复一条未归还的旧记录，可能立刻变成逾期
+        void useTodos().refresh(true)
         if (this.detail) await this.openItem(this.detail.item.id)
         return true
       } catch (err) {

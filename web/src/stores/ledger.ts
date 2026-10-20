@@ -36,6 +36,7 @@ import type {
   LedgerSummary,
 } from '@/api'
 import { useUi } from '@/stores/ui'
+import { useTodos } from '@/stores/todos'
 
 export interface LedgerFilters {
   from: string | null
@@ -357,6 +358,8 @@ export const useLedger = defineStore('ledger', {
         await api.ledger.deleteEntry(id)
         useUi().notify('success', '已删除')
         await this.reload()
+        // 删掉一笔待审批/被驳回的账，角标要跟着减 —— 强制刷新，绕过 5 秒节流
+        void useTodos().refresh(true)
         return true
       } catch (err) {
         useUi().notify('error', '删除失败', describe(err))
@@ -372,6 +375,8 @@ export const useLedger = defineStore('ledger', {
         await api.ledger.submitEntry(id)
         useUi().notify('success', '操作已完成')
         await this.reload()
+        // 提交后这笔进入管理员的「待我审批」（自己的驳回待办则清零）
+        void useTodos().refresh(true)
       } catch (err) {
         useUi().notify('error', '操作失败', describe(err))
       } finally {
@@ -385,6 +390,7 @@ export const useLedger = defineStore('ledger', {
         await api.ledger.withdrawEntry(id)
         useUi().notify('success', '操作已完成')
         await this.reload()
+        void useTodos().refresh(true)
       } catch (err) {
         useUi().notify('error', '操作失败', describe(err))
       } finally {
@@ -401,6 +407,8 @@ export const useLedger = defineStore('ledger', {
         await api.ledger.decideEntry(id, decision, note)
         useUi().notify('success', decision === 'approve' ? '操作已完成' : '已驳回')
         await this.reload()
+        // 审完一笔，"待我审批"立刻少一条；被驳回的那笔进对方的待办
+        void useTodos().refresh(true)
         return true
       } catch (err) {
         useUi().notify('error', decision === 'approve' ? '操作失败' : '驳回失败', describe(err))
@@ -416,6 +424,7 @@ export const useLedger = defineStore('ledger', {
         await api.ledger.payEntry(id)
         useUi().notify('success', '操作已完成')
         await this.reload()
+        void useTodos().refresh(true)
       } catch (err) {
         useUi().notify('error', '操作失败', describe(err))
       } finally {

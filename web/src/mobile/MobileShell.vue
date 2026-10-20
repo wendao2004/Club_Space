@@ -9,7 +9,7 @@
   Tab 切换只是切换 ref，不重建组件、不动路由，因此横竖屏旋转不会丢状态。
 -->
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { APPS, appComponents, findApp, type AppDef } from '@/apps/registry'
 import {
@@ -22,12 +22,14 @@ import {
   type JobView,
 } from '@/api'
 import { useAuth } from '@/stores/auth'
+import { badgeText, useTodos } from '@/stores/todos'
 import { useUi } from '@/stores/ui'
 import { playSystem } from '@/lib/sfx'
 import type { WindowInstance } from '@/stores/windows'
 
 const auth = useAuth()
 const ui = useUi()
+const todos = useTodos()
 
 // ---------------------------------------------------------------- Tab
 
@@ -76,6 +78,8 @@ const openWin = computed<WindowInstance>(() => ({
 }))
 
 function launchApp(app: AppDef): void {
+  // 打开记账/财物时刷一次待办：进应用看到的角标和列表必须是同一时刻的数字
+  if (app.id === 'ledger' || app.id === 'assets') void todos.refresh()
   openAppId.value = app.id
 }
 
@@ -213,6 +217,30 @@ watch(activeTab, (tab) => {
     void loadJobs()
   }
 })
+
+/**
+ * 待办角标：数字来自 /api/todos（服务端按列表筛选条件算的），
+ * 0 不显示、超过 99 显示 99+ —— 与桌面端的约定一致。
+ */
+function todoBadge(appId: string): number {
+  return todos.badgeFor(appId)
+}
+
+function todoTitle(app: AppDef): string {
+  const count = todoBadge(app.id)
+  if (app.id === 'ledger') return `${count} 项待办：待审批 / 被驳回待修改`
+  if (app.id === 'assets') return `${count} 项待办：逾期未还 / ${todos.dueSoonDays} 天内到期`
+  return `${count} 项待办`
+}
+
+onMounted(() => {
+  // 登录后（外壳挂载）拉一次；之后靠窗口聚焦 / SSE 重连 / 各模块写操作刷新，不轮询
+  todos.start()
+})
+
+onBeforeUnmount(() => {
+  todos.stop()
+})
 </script>
 
 <template>
@@ -230,6 +258,9 @@ watch(activeTab, (tab) => {
           >
             <span class="apps__icon" :style="app.tint ? { '--tint': app.tint } : undefined">
               <Icon :name="app.icon" :size="24" />
+              <span v-if="todoBadge(app.id) > 0" class="apps__badge" :title="todoTitle(app)">
+                {{ badgeText(todoBadge(app.id)) }}
+              </span>
             </span>
             <span class="apps__name">{{ app.name }}</span>
           </button>
@@ -426,6 +457,9 @@ watch(activeTab, (tab) => {
       >
         <Icon :name="tab.icon" :size="22" />
         <span class="tabs__label">{{ tab.label }}</span>
+        <span v-if="tab.id === 'apps' && todos.overall > 0" class="tabs__badge">
+          {{ badgeText(todos.overall) }}
+        </span>
       </button>
     </nav>
 
@@ -503,6 +537,7 @@ watch(activeTab, (tab) => {
 
 /* 与桌面同源的图标语言：主色 15% 淡底 + 主色线性字形 */
 .apps__icon {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -512,6 +547,28 @@ watch(activeTab, (tab) => {
   background: rgba(127, 140, 156, 0.14);
   background: color-mix(in srgb, var(--tint, #6b7686) 15%, transparent);
   color: var(--tint, #6b7686);
+}
+
+/* 待办角标：坐在图标右上角，0 不显示 */
+.apps__badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--surface-0);
+}
+
+[data-theme='dark'] .apps__badge {
+  color: #3a1116;
 }
 
 [data-theme='dark'] .apps__icon {
@@ -913,6 +970,7 @@ watch(activeTab, (tab) => {
 }
 
 .tabs__item {
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -922,6 +980,27 @@ watch(activeTab, (tab) => {
   min-height: 44px;
   color: var(--text-tertiary);
   transition: color var(--dur-fast) var(--ease-out);
+}
+
+/* Tab 上的待办总数：整个「应用」抽屉里等我处理的事 */
+.tabs__badge {
+  position: absolute;
+  top: 4px;
+  left: calc(50% + 6px);
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+[data-theme='dark'] .tabs__badge {
+  color: #3a1116;
 }
 
 .tabs__item--on {

@@ -1177,6 +1177,102 @@ async function main() {
   }
   assert(true, '封账闸门测试已收尾（解封并清理）')
 
+  // ---------------------------------------------------------------- 待办接口
+  //
+  // 产品侧的结论：提交/审批过去是**沉默的** —— 状态变了只写一条审计，
+  // 没人知道"有一笔等我审批"。这一节钉住两件最容易出错的事：
+  //   1. 角标的数字必须和列表按同样条件筛出来的条数**一模一样**；
+  //   2. 普通成员看不到"待我审批"（他点进去也审不了），也看不到别人的驳回。
+  console.log('\n【待办接口：口径一致 + 权限隔离】')
+
+  /** 造一笔账并提交，返回 id。 */
+  async function makeSubmitted(client, title) {
+    const created = await client.api('/api/ledger/entries', {
+      method: 'POST',
+      json: { kind: 'expense', amount: '3.00', title, occurredOn: daysAgo(1) },
+    })
+    await client.api(`/api/ledger/entries/${created.body.entry.id}/submit`, { json: {} })
+    return created.body.entry.id
+  }
+
+  const todoA = await makeSubmitted(member, '待办测试·会被驳回')
+  const todoB = await makeSubmitted(member, '待办测试·继续待审批')
+  const todoC = await makeSubmitted(other, '待办测试·别人的待审批')
+
+  // 驳回 A：它应立刻从"待我审批"移到提交者自己的"待修改"
+  const rejectA = await admin.api(`/api/ledger/entries/${todoA}/decide`, {
+    json: { decision: 'reject', note: '待办测试：请补充说明' },
+  })
+  assert(rejectA.status === 200, '驳回一笔用于待办测试的账目')
+
+  const adminTodos = await admin.api('/api/todos')
+  assert(adminTodos.status === 200, '管理员能读待办接口')
+  const adminReview = adminTodos.body.todos.ledger.review
+
+  const adminPendingList = await admin.api('/api/ledger/entries?pending=1&limit=200')
+  assert(
+    adminReview.count === adminPendingList.body.total,
+    '待我审批的角标 == 列表 pending=1 的 total（没有另定一套口径）',
+    `待办 ${adminReview.count} / 列表 ${adminPendingList.body.total}`,
+  )
+  assert(
+    adminReview.ids.every((id) => adminPendingList.body.entries.some((e) => e.id === id)),
+    '待办返回的 id 全部能在 pending=1 的列表里找到',
+  )
+  assert(
+    adminReview.ids.length === Math.min(adminReview.count, 20),
+    'ids 数量 = min(条数, 20)（角标只要数字，id 是为了直达）',
+    `${adminReview.ids.length} 条 / 共 ${adminReview.count} 条`,
+  )
+  assert(
+    adminReview.ids.includes(todoB) && adminReview.ids.includes(todoC),
+    '两笔「待审批」都在管理员的待办里',
+  )
+
+  const memberTodos = await member.api('/api/todos')
+  assert(
+    memberTodos.body.todos.ledger.review.count === 0 &&
+      memberTodos.body.todos.ledger.review.ids.length === 0,
+    '普通成员的「待我审批」恒为 0（审批权在路由层就是 admin 专属，不给他点不动的角标）',
+    `count=${memberTodos.body.todos.ledger.review.count}`,
+  )
+  assert(
+    !memberTodos.body.todos.ledger.review.ids.includes(todoC),
+    '普通成员的待办里不会出现别人的待审批账目',
+  )
+
+  const memberRejectedList = await member.api('/api/ledger/entries?mine=1&status=rejected&limit=200')
+  assert(
+    memberTodos.body.todos.ledger.rejected.count === memberRejectedList.body.total,
+    '「被驳回待修改」的角标 == 列表 mine=1&status=rejected 的 total',
+    `待办 ${memberTodos.body.todos.ledger.rejected.count} / 列表 ${memberRejectedList.body.total}`,
+  )
+  assert(
+    memberTodos.body.todos.ledger.rejected.ids.includes(todoA),
+    '刚被驳回的那笔在提交者的待修改待办里',
+  )
+
+  const otherTodos = await other.api('/api/todos')
+  assert(
+    otherTodos.body.todos.ledger.rejected.count === 0,
+    '别人的驳回待办看不到（只算自己提交的）',
+    `count=${otherTodos.body.todos.ledger.rejected.count}`,
+  )
+  assert(
+    adminTodos.body.todos.ledger.rejected.count === 0,
+    '管理员自己没有被驳回的账目，待修改数为 0（不是"把所有人的都算给他"）',
+    `count=${adminTodos.body.todos.ledger.rejected.count}`,
+  )
+
+  const anonTodos = await fetch(`${BASE}/api/todos`)
+  assert(anonTodos.status === 401, '未登录不能读待办（401）', `状态 ${anonTodos.status}`)
+
+  // 收尾：清掉这一节造的账目，别把后面的断言带歪
+  await admin.api(`/api/ledger/entries/${todoB}/decide`, { json: { decision: 'approve' } })
+  await admin.api(`/api/ledger/entries/${todoC}/decide`, { json: { decision: 'approve' } })
+  await member.api(`/api/ledger/entries/${todoA}`, { method: 'DELETE' })
+  assert(true, '待办测试已收尾（审批/删除临时账目）')
+
   // ---------------------------------------------------------------- 结果
   console.log(
     `\n\x1b[1m结果\x1b[0m  通过 \x1b[32m${passed}\x1b[0m  失败 \x1b[31m${failed}\x1b[0m\n`,

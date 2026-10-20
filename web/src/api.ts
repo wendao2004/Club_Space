@@ -297,6 +297,14 @@ export const api = {
   adminRevokeSessions: (id: string) =>
     request<{ ok: boolean }>(`/api/admin/users/${id}/sessions/revoke`, { json: {} }),
 
+  /**
+   * 当前用户的待办汇总（记账的待审批/被驳回、财物的逾期/即将到期）。
+   *
+   * 数字由服务端按**列表接口同一套筛选条件**算出来，前端只负责显示 ——
+   * 前端自己再数一遍迟早会分叉，而"角标 3、点进去 2 条"会被直接判定成坏了。
+   */
+  todos: () => request<{ todos: TodoPayload; asOf: number }>('/api/todos'),
+
   // ---------------------------------------------------------------- 聊天
   chat: {
     /** SSE 事件流的地址。用 EventSource 连它，不要用 fetch。 */
@@ -526,6 +534,8 @@ export const api = {
         mine?: boolean
         open?: boolean
         overdue?: boolean
+        /** 只看「N 天内到期、且还没逾期」的（服务端与待办角标共用同一个窗口） */
+        dueWithin?: number
         /** 物品名/编号、借用人、用途的模糊搜索 */
         search?: string
         limit?: number
@@ -536,6 +546,7 @@ export const api = {
       if (options.mine) params.set('mine', '1')
       if (options.open) params.set('open', '1')
       if (options.overdue) params.set('overdue', '1')
+      if (options.dueWithin !== undefined) params.set('dueWithin', String(options.dueWithin))
       if (options.search) params.set('search', options.search)
       if (options.limit !== undefined) params.set('limit', String(options.limit))
       const qs = params.toString()
@@ -995,6 +1006,38 @@ export interface AssetSummary {
     itemCount: number
     totalValueCents: number
   }>
+}
+
+// ---------------------------------------------------------------- 待办
+
+/** 一个待办分类：条数 + 前若干条 id（服务端最多给 20 条，够"点进去直接定位"）。 */
+export interface TodoBucket {
+  /** 与列表接口同一筛选条件下的条数 */
+  count: number
+  ids: string[]
+}
+
+export interface LedgerTodo {
+  /** 待我审批（仅管理员/创建者非零） */
+  review: TodoBucket
+  /** 我提交的、被驳回待修改 */
+  rejected: TodoBucket
+  total: number
+}
+
+export interface AssetsTodo {
+  /** 我借的、未还、已逾期 */
+  overdue: TodoBucket
+  /** 我借的、未还、dueSoonDays 天内到期（不含已逾期） */
+  dueSoon: TodoBucket
+  /** 「即将到期」的窗口天数，服务端给 —— 前端不硬编码，否则两边会漂 */
+  dueSoonDays: number
+  total: number
+}
+
+export interface TodoPayload {
+  ledger: LedgerTodo
+  assets: AssetsTodo
 }
 
 // ---------------------------------------------------------------- 狼人杀

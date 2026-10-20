@@ -370,10 +370,18 @@ export interface ListOptions {
   offset?: number
 }
 
-export function listEntries(userId: string, isAdmin: boolean, options: ListOptions = {}): {
-  entries: EntryView[]
-  total: number
-} {
+/**
+ * 筛选条件 → WHERE 片段。
+ *
+ * ⚠️ **列表、导出、待办计数三处必须共用这一份**。
+ * 待办角标最怕的就是"自己另定一套口径"：角标写 3，点进去列表只有 2 条，
+ * 用户会直接认定这个功能坏了。所以这里不复制粘贴条件，只被复用。
+ */
+function entryWhere(
+  userId: string,
+  isAdmin: boolean,
+  options: ListOptions,
+): { whereSql: string; params: Array<string | number | null> } {
   const vis = visibilityClause(userId, isAdmin)
   const where: string[] = [vis.sql]
   const params: Array<string | number | null> = [...vis.params]
@@ -417,7 +425,15 @@ export function listEntries(userId: string, isAdmin: boolean, options: ListOptio
     where.push("e.status = 'submitted'")
   }
 
-  const whereSql = where.join(' AND ')
+  return { whereSql: where.join(' AND '), params }
+}
+
+export function listEntries(userId: string, isAdmin: boolean, options: ListOptions = {}): {
+  entries: EntryView[]
+  total: number
+} {
+  const { whereSql, params } = entryWhere(userId, isAdmin, options)
+
   const total = (
     getDb()
       .prepare(`SELECT COUNT(*) AS n FROM ledger_entries e WHERE ${whereSql}`)
@@ -438,6 +454,89 @@ export function listEntries(userId: string, isAdmin: boolean, options: ListOptio
     .all(...params, limit, offset) as unknown as RawEntry[]
 
   return { entries: rows.map(attachChildren), total }
+}
+
+/**
+ * 按筛选条件数条数（不拉行）。
+ *
+ * 存在的唯一理由是待办角标：它必须和列表的 `total` **完全一致**，
+ * 所以和 listEntries 共用 entryWhere，而不是另写一个 COUNT。
+ */
+export function countEntries(userId: string, isAdmin: boolean, options: ListOptions = {}): number {
+  const { whereSql, params } = entryWhere(userId, isAdmin, options)
+  return (
+    getDb()
+      .prepare(`SELECT COUNT(*) AS n FROM ledger_entries e WHERE ${whereSql}`)
+      .get(...params) as { n: number }
+  ).n
+}
+
+/** 待办里最多带多少个 id。角标只需要一个数字，id 是为了"点进去直接定位"。 */
+export const TODO_ID_LIMIT = 20
+
+/**
+ * 按筛选条件取前几条 id，顺序与列表完全一致（同 ORDER BY）。
+ * 用 LIMIT 而不是把全部 id 都吐出来：真实待办通常个位数，上万条时也不该把响应撑大。
+ */
+export function listEntryIds(
+  userId: string,
+  isAdmin: boolean,
+  options: ListOptions = {},
+  limit = TODO_ID_LIMIT,
+): string[] {
+  const { whereSql, params } = entryWhere(userId, isAdmin, options)
+  const rows = getDb()
+    .prepare(
+      `SELECT e.id FROM ledger_entries e WHERE ${whereSql}
+        ORDER BY e.occurred_on DESC, e.created_at DESC
+        LIMIT ?`,
+    )
+    .all(...params, Math.max(1, Math.min(limit, 200))) as unknown as Array<{ id: string }>
+  return rows.map((r) => r.id)
+}
+
+export interface TodoBucket {
+  /** 与列表同一筛选条件下的 total */
+  count: number
+  /** 该筛选条件下的前若干条 id（≤ TODO_ID_LIMIT） */
+  ids: string[]
+}
+
+export interface LedgerTodo {
+  /** 待我审批：仅管理员/创建者有审批权（decide 路由是 requireRole admin） */
+  review: TodoBucket
+  /** 我提交的、被驳回待修改 */
+  rejected: TodoBucket
+}
+
+/**
+ * 记账待办。
+ *
+ * 口径逐条对应列表筛选条件（见 server/src/index.ts 的 /api/ledger/entries）：
+ *   - review   == `?pending=1`          （管理员；与列表的「待我审批」勾选框同一条件）
+ *   - rejected == `?mine=1&status=rejected`
+ *
+ * 普通成员的 review 恒为 0：账目的审批动作在路由层就是管理员专属
+ * （POST /api/ledger/entries/:id/decide 用 requireRole('admin')），
+ * 给成员一个他点进去也审不了的角标只会制造挫败感。
+ */
+export function ledgerTodo(userId: string, isAdmin: boolean): LedgerTodo {
+  const reviewFilters: ListOptions = { pendingReview: true }
+  const review: TodoBucket = isAdmin
+    ? {
+        count: countEntries(userId, true, reviewFilters),
+        ids: listEntryIds(userId, true, reviewFilters),
+      }
+    : { count: 0, ids: [] }
+
+  const rejectedFilters: ListOptions = { mine: true, status: 'rejected' }
+  return {
+    review,
+    rejected: {
+      count: countEntries(userId, isAdmin, rejectedFilters),
+      ids: listEntryIds(userId, isAdmin, rejectedFilters),
+    },
+  }
 }
 
 export interface EntryInput {

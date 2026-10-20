@@ -22,10 +22,12 @@ import { appComponents, findApp } from '@/apps/registry'
 import { shouldYieldKeyboard } from '@/desktop/keyboard'
 import { playSystem } from '@/lib/sfx'
 import { useUi } from '@/stores/ui'
+import { useTodos } from '@/stores/todos'
 import { useWindows } from '@/stores/windows'
 
 const windows = useWindows()
 const ui = useUi()
+const todos = useTodos()
 
 const startOpen = ref(false)
 
@@ -129,6 +131,9 @@ function onGlobalPointerDown(event: PointerEvent): void {
 onMounted(() => {
   window.addEventListener('keydown', handleHotkey)
   window.addEventListener('pointerdown', onGlobalPointerDown)
+  // 待办角标：进桌面（= 登录后）拉一次，之后靠窗口聚焦 / 重连 / 各模块写操作刷新。
+  // 没有轮询 —— 这几条待办都是 COUNT 查询，为角标准备一个每秒的心跳不划算。
+  todos.start()
   // 恢复上次的窗口布局：刷新页面不该丢掉工作区
   windows.restoreLayout()
 
@@ -150,6 +155,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleHotkey)
   window.removeEventListener('pointerdown', onGlobalPointerDown)
+  todos.stop()
 })
 </script>
 
