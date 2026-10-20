@@ -107,6 +107,10 @@ async function openStream(client, sink) {
       }
     } catch {
       /* 主动关闭时抛错属正常 */
+    } finally {
+      // 用一个哨兵事件记录"这条流结束了"。登出/强制下线的断言靠它 ——
+      // 没有它就只能靠"等一段时间看有没有新事件"，那既慢又不可靠。
+      sink.push({ type: '__closed', data: {} })
     }
   })()
   return () => controller.abort()
@@ -348,6 +352,77 @@ async function main() {
       '服务端能发的每个事件名，前端都注册了监听',
       missing.length ? `前端事件表里缺少：${missing.join('、')}` : serverEvents.join('、'),
     )
+  }
+
+  // ---------------------------------------------------------------- 登出必须断流
+  //
+  // 这一节防的是"看起来安全，其实没有"：SSE 只在建连那一刻鉴权一次，
+  // 之后就是一条长活连接。会话行被删掉、cookie 被清掉，**都不会通知这条流**。
+  // 于是共用电脑上点了"注销"，那个标签页还在继续收新消息与未读数；
+  // 更严重的是"强制下线"对被偷走的 EventSource 完全无效，它会一直收到
+  // 新消息直到进程重启。
+  console.log('\n【登出 / 强制下线必须终止已建立的 SSE】')
+  {
+    const c = makeClient()
+    const regC = await c.api('/api/auth/register', {
+      method: 'POST',
+      json: {
+        username: `rtc${SUFFIX}`,
+        displayName: '丙',
+        password: 'realtime-test-2026',
+        inviteCode: (await a.api('/api/admin/invites', {
+          method: 'POST',
+          json: { role: 'member', maxUses: 1, expiresInDays: 1 },
+        })).body.code,
+      },
+    })
+    if (regC.status !== 200 && regC.status !== 201) {
+      bad('注册账号丙', `状态 ${regC.status}：${JSON.stringify(regC.body)}`)
+      process.exit(1)
+    }
+    const idC = regC.body.user.id
+
+    // 1) 自己点"注销"
+    const sinkC = []
+    const closeC = await openStream(c, sinkC)
+    const helloC = await waitFor(sinkC, (e) => e.type === 'hello')
+    assert(helloC !== null, '丙的 SSE 已建立')
+
+    await c.api('/api/auth/logout', { method: 'POST', json: {} })
+    const closedAfterLogout = await waitFor(sinkC, (e) => e.type === '__closed', 3000)
+    assert(
+      closedAfterLogout !== null,
+      '登出后 3 秒内这条流被服务端关闭（不再是"退出登录但还在收消息"）',
+      `收到的事件：${sinkC.map((e) => e.type).join('、')}`,
+    )
+    closeC()
+
+    // 2) 管理员强制下线（revokeAllSessions）
+    const relogin = await c.api('/api/auth/login', {
+      method: 'POST',
+      json: { username: `rtc${SUFFIX}`, password: 'realtime-test-2026' },
+    })
+    assert(relogin.status === 200, '丙重新登录')
+
+    const sinkC2 = []
+    const closeC2 = await openStream(c, sinkC2)
+    const helloC2 = await waitFor(sinkC2, (e) => e.type === 'hello')
+    assert(helloC2 !== null, '丙的第二条流已建立')
+
+    const revoke = await a.api(`/api/admin/users/${idC}/sessions/revoke`, {
+      method: 'POST',
+      json: {},
+    })
+    assert(revoke.status === 200, '管理员强制下线丙', `状态 ${revoke.status}`)
+
+    const closedAfterRevoke = await waitFor(sinkC2, (e) => e.type === '__closed', 3000)
+    assert(
+      closedAfterRevoke !== null,
+      '强制下线后 3 秒内流被关闭（否则"踢下线"对已建立的流等于没生效）',
+      `收到的事件：${sinkC2.map((e) => e.type).join('、')}`,
+    )
+    closeC2()
+    await sleep(200)
   }
 
   console.log(`\n\x1b[1m结果\x1b[0m  通过 \x1b[32m${passed}\x1b[0m  失败 \x1b[31m${failed}\x1b[0m\n`)

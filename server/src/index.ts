@@ -19,6 +19,7 @@ import {
   createSession,
   createUser,
   currentUser,
+  currentSessionId,
   destroySession,
   findUserByUsername,
   getUserById,
@@ -571,7 +572,15 @@ const loginTotpSchema = z.object({
  */
 app.post('/api/auth/login/totp', async (req, reply) => {
   const body = loginTotpSchema.parse(req.body)
-  enforceRateLimit(req, 'totp', `:login`, true)
+
+  // 第一道：按**来源 IP** 限流（键含 IP）。
+  //
+  // 这里曾经是 `enforceRateLimit(req, 'totp', ':login', true)` —— 第三个参数让
+  // 键里不含 IP，于是全站共用一个桶。后果是：任何人**不需要任何凭据**，
+  // 每 15 分钟发 20 个伪造请求，就能让所有绑了 2FA 的账号第二步全部 429，
+  // 包括做运维必须用 TOTP 的管理员；持续发就能无限锁死登录。
+  // 带上 IP 之后，滥用者只能锁住自己那一个出口。
+  enforceRateLimit(req, 'totpLoginIp', ':login')
 
   const verdict = verifyLoginChallenge(body.challenge)
   if (!verdict.ok || !verdict.userId) {
@@ -588,6 +597,17 @@ app.post('/api/auth/login/totp', async (req, reply) => {
   const record = getUserById(verdict.userId)
   if (!record) throw new HttpError(401, '账号不存在')
   if (record.status !== 'active') throw new HttpError(403, '该账号已被停用')
+
+  // 第二道：按**账号**限流（键不含 IP）。
+  //
+  // challenge 已通过签名校验，所以这里的 userId 是可信的。这一维度防的是
+  // 另一种场景：口令已经泄漏、TOTP 是最后一道防线 —— 攻击者换 IP 也绕不过
+  // 针对这个账号的 20 次上限。放在这里而不是上面，是因为上面还拿不到
+  // 可信的 userId；而放在 IP 那道之后，匿名洪水在更便宜的地方就被挡住了。
+  //
+  // 打错一位不会被这次限流"连累"到要重输口令：verifyLoginChallenge 本身
+  // 不消费令牌（见下面的注释），所以用户可以在窗口内继续重试。
+  enforceRateLimit(req, 'totp', `:login:user:${record.id}`, true)
 
   const secret = activeTotpSecret(record.id)
   if (!secret) {
@@ -613,6 +633,11 @@ app.post('/api/auth/login/totp', async (req, reply) => {
 
   // 口令正确 → 消费令牌（一次性），再发会话
   if (verdict.nonce) consumeLoginChallenge(verdict.nonce)
+
+  // 成功就把两个维度的计数清掉：否则一个只是偶尔手滑的正常用户，
+  // 会被自己之前几次失败拖着，离阈值越来越近（与账号密码登录的处理一致）。
+  clearRateLimit(`totpLoginIp:${actorIp(req) ?? 'unknown'}:login`)
+  clearRateLimit(`totp:login:user:${record.id}`)
 
   createSession(reply, record.id, req)
   touchLastLogin(record.id)
@@ -1435,10 +1460,14 @@ app.get('/api/admin/audit', async (req) => {
  */
 app.get('/api/chat/stream', async (req, reply) => {
   const user = requireUser(req)
+  // 会话 id 要和连接绑在一起：登出 / 强制下线时靠它精确关掉这条流。
+  // requireUser 已经验证过会话有效，这里理论上不会为 null。
+  const sessionId = currentSessionId(req)
+  if (!sessionId) throw new HttpError(401, '会话无效，请重新登录')
   reply.hijack()
   // hijack 之后要自己处理错误：连接建立阶段就失败的话，至少给个状态码
   try {
-    const unsubscribe = subscribe(user.id, reply)
+    const unsubscribe = subscribe(user.id, sessionId, reply)
     // subscribe 返回 null 表示连接数超限。这里必须明确拒绝 ——
     // 否则会留下一个已经写了 200 头、但没有任何东西喂给它的空响应。
     if (!unsubscribe) {

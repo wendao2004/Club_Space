@@ -21,6 +21,7 @@
  */
 import type { FastifyReply } from 'fastify'
 import { touchPresence, markPresenceOffline } from './chat.ts'
+import { getDb } from './db.ts'
 
 export type RealtimeEvent =
   | { type: 'hello'; data: { connectionId: string; serverTime: number } }
@@ -73,6 +74,19 @@ export type RealtimeEvent =
 interface Connection {
   id: string
   userId: string
+  /**
+   * 建立这条连接时用的**会话 id**。
+   *
+   * 为什么要记它：SSE 只在建连那一刻鉴权一次，之后就是一条长活连接。
+   * 不记会话的话，"登出""改口令""管理员强制下线"这些动作只能删掉库里的
+   * 会话行，而**已经建立的流仍然在收消息** —— 共用电脑上点了登出，
+   * 那个标签页还能继续看到新消息和未读数；被偷走的那条 EventSource
+   * 更是能一直收到进程重启为止。
+   *
+   * 记下来之后，destroySession / revokeAllSessions 可以精确找到并关掉
+   * 对应的连接（见 disconnectSession / disconnectUser）。
+   */
+  sessionId: string
   reply: FastifyReply
   heartbeat: NodeJS.Timeout
   closed: boolean
@@ -100,10 +114,20 @@ function writeEvent(conn: Connection, event: RealtimeEvent | { type: 'ping' }): 
   }
 }
 
-function closeConnection(conn: Connection): void {
+function closeConnection(conn: Connection, endResponse = false): void {
   if (conn.closed) return
   conn.closed = true
   clearInterval(conn.heartbeat)
+  // 主动关闭（登出/强制下线）时要把 HTTP 响应真正结束掉，
+  // 否则客户端那条 EventSource 会一直挂着、并且按浏览器的重连策略反复重试。
+  // 被动路径（socket 已经 close）不需要这一步。
+  if (endResponse) {
+    try {
+      conn.reply.raw.end()
+    } catch {
+      // 已经断了，忽略
+    }
+  }
   const set = connections.get(conn.userId)
   if (set) {
     set.delete(conn)
@@ -115,6 +139,28 @@ function closeConnection(conn: Connection): void {
       markPresenceOffline(conn.userId)
       broadcastPresence(conn.userId, false)
     }
+  }
+}
+
+/**
+ * 会话是否仍然有效（存在且未过期）。
+ *
+ * 成本：每 25 秒 × 每条连接一次主键点查。500 条连接约 20 qps，
+ * 全部命中页缓存、且 WAL 下读不阻塞写，可以忽略。
+ * 换来的是：会话过期或被人从库里删掉之后，连接最多再活 25 秒。
+ *
+ * 查不到证据时**放行**：数据库短暂 busy（SQLite 会抛 SQLITE_BUSY）
+ * 不该被当成"会话失效"把全站用户一起踢下线。真正的撤销走
+ * disconnectSession / disconnectUser 主动关闭，这里只是兜底。
+ */
+function sessionStillValid(sessionId: string): boolean {
+  try {
+    const row = getDb().prepare('SELECT expires_at FROM sessions WHERE id = ?').get(sessionId) as
+      | { expires_at: number }
+      | undefined
+    return row !== undefined && row.expires_at > Date.now()
+  } catch {
+    return true
   }
 }
 
@@ -139,7 +185,11 @@ const MAX_CONNECTIONS_PER_USER = 12
 const MAX_TOTAL_CONNECTIONS = 500
 
 /** 建立一条 SSE 连接。返回一个用于手动关闭的函数（超限时返回 null）。 */
-export function subscribe(userId: string, reply: FastifyReply): (() => void) | null {
+export function subscribe(
+  userId: string,
+  sessionId: string,
+  reply: FastifyReply,
+): (() => void) | null {
   // 先判上限，再写响应头 —— 超限时应该干净地拒绝，而不是先建立连接再掐掉
   const own = connections.get(userId)
   if (own && own.size >= MAX_CONNECTIONS_PER_USER) {
@@ -162,8 +212,16 @@ export function subscribe(userId: string, reply: FastifyReply): (() => void) | n
   const conn: Connection = {
     id,
     userId,
+    sessionId,
     reply,
     heartbeat: setInterval(() => {
+      // 心跳同时承担"复核会话"的职责：会话被删/过期之后，这条连接最多再活
+      // 一个心跳周期。主动关闭（登出、强制下线）会立刻断，这里是漏网兜底 ——
+      // 比如会话行是被别的路径删掉的、或者某次主动关闭因为异常没走到。
+      if (!sessionStillValid(conn.sessionId)) {
+        closeConnection(conn, true)
+        return
+      }
       // ⚠️ 心跳必须**同时续期在线状态**，不能只发 ping。
       //
       // 出过的故障：touchPresence 只在连接建立时调用一次，而在线判定窗口是
@@ -203,6 +261,43 @@ function totalConnections(): number {
   let total = 0
   for (const set of connections.values()) total += set.size
   return total
+}
+
+/**
+ * 关掉某个会话建立的所有连接（登出 / 单条会话被撤销）。
+ *
+ * 为什么必须主动关而不是等心跳：心跳最快也要 25 秒。共用电脑上点了"登出"，
+ * 那 25 秒里消息照样推进来、未读数照样变 —— 用户以为已经退出了。
+ *
+ * 返回被关闭的连接数（测试与审计用）。
+ */
+export function disconnectSession(sessionId: string): number {
+  let closed = 0
+  // 先复制一份：closeConnection 会从 connections 里删条目，
+  // 边遍历边删虽然对 Map 是安全的，但读起来容易让人怀疑。
+  for (const set of [...connections.values()]) {
+    for (const conn of [...set]) {
+      if (conn.sessionId !== sessionId) continue
+      closeConnection(conn, true)
+      closed++
+    }
+  }
+  return closed
+}
+
+/**
+ * 关掉某个用户的**所有**连接（强制下线 / 改口令 / 停用账号 / 删除账号）。
+ *
+ * 这些动作调用的 revokeAllSessions 会把该用户的会话行全删掉，
+ * 但库里删行不会通知一条已经建好的 SSE 流 —— 所以必须在这里配套关闭，
+ * 否则"强制下线"对被偷走的那条 EventSource 完全无效。
+ */
+export function disconnectUser(userId: string): number {
+  const set = connections.get(userId)
+  if (!set) return 0
+  const list = [...set]
+  for (const conn of list) closeConnection(conn, true)
+  return list.length
 }
 
 /** 推给指定用户的所有连接。 */

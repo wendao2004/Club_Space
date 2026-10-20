@@ -3,6 +3,7 @@
  */
 import { defineStore } from 'pinia'
 import { api, ApiError, type Bootstrap, type CurrentUser } from '@/api'
+import { useRealtime } from '@/stores/realtime'
 
 interface State {
   ready: boolean
@@ -95,6 +96,15 @@ export const useAuth = defineStore('auth', {
     },
 
     async logout(): Promise<void> {
+      // 先断开实时流，再请求后端。
+      //
+      // 服务端现在也会在登出时主动关闭这条 SSE（见 server/src/auth.ts 的
+      // destroySession），但客户端不该等它：
+      //   1. 断开是即时的，用户点了"注销"就不该再多收哪怕一条消息；
+      //   2. EventSource 在 cookie 被清掉之后会自动重连 → 401 → 再重连，
+      //      在控制台和网络面板留下一串无意义的请求。
+      // 主动 close 是确定性的，不依赖服务端行为的时序。
+      useRealtime().disconnect()
       try {
         await api.logout()
       } catch (err) {
@@ -106,6 +116,8 @@ export const useAuth = defineStore('auth', {
 
     /** 某个请求返回 401 时调用：把界面切回登录页。 */
     handleUnauthorized(): void {
+      // 会话已经不可用了，那条 SSE 继续挂着只会不断收到 401 重连失败。
+      useRealtime().disconnect()
       this.user = null
     },
   },

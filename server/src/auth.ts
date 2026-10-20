@@ -15,6 +15,10 @@ import { createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import { SESSION_DAYS, loadSessionSecret } from './config.ts'
 import { getDb, newId, now, transaction } from './db.ts'
+// 会话撤销时必须**同步关掉已经建立的 SSE 连接** —— 只删库里的会话行
+// 对一条已经建好的长连接没有任何作用（详见 realtime.ts 的 Connection.sessionId）。
+// 依赖方向是 auth → realtime → chat → db，没有环。
+import { disconnectSession, disconnectUser } from './realtime.ts'
 
 const SESSION_COOKIE = 'wl_session'
 const SCRYPT_KEYLEN = 64
@@ -124,12 +128,29 @@ export function createSession(
   return { id, expiresAt }
 }
 
+/**
+ * 从 cookie 里解析当前会话 id（不查库）。
+ *
+ * 只给"已经过 requireUser 的请求"用 —— 它不验证会话是否有效，
+ * 验证由 requireUser / currentUser 负责。SSE 路由需要它把连接与会话绑起来。
+ */
+export function currentSessionId(req: FastifyRequest): string | null {
+  const raw = req.cookies[SESSION_COOKIE]
+  if (!raw) return null
+  return unsignSessionId(raw)
+}
+
 /** 销毁会话（登出）。 */
 export function destroySession(req: FastifyRequest, reply: FastifyReply): void {
   const raw = req.cookies[SESSION_COOKIE]
   if (raw) {
     const id = unsignSessionId(raw)
-    if (id) getDb().prepare('DELETE FROM sessions WHERE id = ?').run(id)
+    if (id) {
+      getDb().prepare('DELETE FROM sessions WHERE id = ?').run(id)
+      // 库里那行没了，但这条会话开着的 SSE 还活着 —— 不关掉它，
+      // 用户点了登出之后那个标签页仍在收新消息与未读数。
+      disconnectSession(id)
+    }
   }
   reply.clearCookie(SESSION_COOKIE, { path: '/' })
 }
@@ -137,6 +158,9 @@ export function destroySession(req: FastifyRequest, reply: FastifyReply): void {
 /** 让某个用户的全部会话失效（改密码 / 停用账号 / 强制下线）。 */
 export function revokeAllSessions(userId: string): void {
   getDb().prepare('DELETE FROM sessions WHERE user_id = ?').run(userId)
+  // 同上，而且这里更重要：强制下线如果断不了已建立的流，对被偷走的
+  // EventSource 就等于没生效 —— 它会一直收到新消息直到进程重启。
+  disconnectUser(userId)
 }
 
 /** 从请求里解析当前用户；未登录返回 null。 */

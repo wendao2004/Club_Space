@@ -71,6 +71,10 @@ const ONLINE_TESTS = [
     serverEnv: { WL_MIN_FREE_BYTES: String(1024 ** 5) },
   },
   { name: 'ratelimit-test', label: '速率限制（真打满阈值）' },
+  // 第二步登录的限流曾经是**全站单桶**：匿名者打满它就能让所有人（含管理员）
+  // 登不进去。这个测试用 node:http 的 localAddress 从 127.0.0.x 发请求，
+  // 真的模拟多个源 IP —— 普通 fetch 做不到这件事，所有请求都来自 127.0.0.1。
+  { name: 'totp-ratelimit-test', label: '两步登录限流（按 IP / 按账号分桶）' },
   { name: 'image-tools-test', label: '图片工具（格式/缩放/压缩）' },
   { name: 'tools-extra-test', label: '工具集扩展（PDF/图片/文本/抽签）' },
   { name: 'chat-test', label: '聊天（含 SSE 实时推送）' },
