@@ -669,6 +669,163 @@ async function main() {
     assert(as.inputCleared, '发送成功后输入框被清空')
     assert(as.messageCount >= 2, '消息区里有两条以上消息', `${as.messageCount} 条`)
 
+    // ---- 引用回复 / @ 提醒 / 成员管理 ----
+    //
+    // 这三件事都靠"服务端算、界面呈现"，所以必须真跑一遍浏览器：
+    // 纯接口测试只能证明字段在，证明不了"用户看得见"。
+    console.log('\n【引用回复与 @ 提醒】')
+
+    const meNow = await apiAs(sessionCookie, '/api/auth/me')
+    const myDisplayName = meNow.body?.user?.displayName ?? ''
+    const peerNow = await apiAs(peerCookie, '/api/auth/me')
+    const peerId2 = peerNow.body?.user?.id
+
+    const groupRes = await apiAs(sessionCookie, '/api/chat/conversations/group', {
+      method: 'POST',
+      json: { title: '界面测试群', memberIds: [peerId2] },
+    })
+    const groupConvId = groupRes.body?.conversation?.id
+    if (!groupConvId) bad('建群', JSON.stringify(groupRes.body).slice(0, 200))
+
+    // 对方 @ 我 + 一条"被引用的原话" + 一条带引用的回复
+    await apiAs(peerCookie, `/api/chat/conversations/${groupConvId}/messages`, {
+      method: 'POST',
+      json: { kind: 'text', body: `@${myDisplayName} 这条要在界面上高亮` },
+    })
+    const origin = await apiAs(peerCookie, `/api/chat/conversations/${groupConvId}/messages`, {
+      method: 'POST',
+      json: { kind: 'text', body: '被引用的原话' },
+    })
+    const originId = origin.body?.message?.id
+    await apiAs(peerCookie, `/api/chat/conversations/${groupConvId}/messages`, {
+      method: 'POST',
+      json: { kind: 'text', body: '这是引用的回复', replyTo: originId },
+    })
+
+    // SSE 的 conversation 事件应该让侧栏出现这个新群（不用刷新页面）
+    await sleep(2000)
+    const groupInList = await evaluate(`JSON.stringify({
+      titles: [...document.querySelectorAll('.conv__name')].map(n => n.textContent.trim()),
+      atBadges: document.querySelectorAll('.conv__at').length
+    })`)
+    const gil = JSON.parse(groupInList)
+    assert(gil.titles.includes('界面测试群'), '新建的群通过实时推送出现在会话列表里（没刷新页面）', gil.titles.join('、'))
+    assert(gil.atBadges >= 1, '会话列表上出现了「有人@你」的红 @', `${gil.atBadges} 个`)
+
+    // 点开这个群
+    await evaluate(`
+      (() => {
+        const conv = [...document.querySelectorAll('.conv')].find(c => c.textContent.includes('界面测试群'))
+        if (conv) conv.click()
+        return !!conv
+      })()
+    `)
+    await sleep(2500)
+
+    const mentionView = await evaluate(`JSON.stringify({
+      atMe: document.querySelectorAll('.msg__at--me').length,
+      atText: document.querySelector('.msg__at--me')?.textContent ?? '',
+      replyBlocks: document.querySelectorAll('.msg__reply').length,
+      replyText: document.querySelector('.msg__reply-text')?.textContent ?? '',
+      badgesAfterOpen: document.querySelectorAll('.conv__at').length
+    })`)
+    const mv = JSON.parse(mentionView)
+    assert(mv.atMe >= 1, '@我的消息在气泡里被单独标出来了', mv.atText)
+    assert(mv.atText === `@${myDisplayName}`, '@高亮的就是我的显示名', mv.atText)
+    assert(mv.replyBlocks >= 1, '带引用的消息渲染出了引用块')
+    assert(mv.replyText === '被引用的原话', '引用块里是被引用那条的原文', mv.replyText)
+    assert(mv.badgesAfterOpen === 0, '打开会话后 @角标消失（已读即清）', `剩 ${mv.badgesAfterOpen} 个`)
+
+    // 用界面的"回复"按钮引用对方那条，再发出去
+    const replyStarted = await evaluate(`
+      (() => {
+        // 明确点"被引用的原话"那一条上的回复按钮，而不是 DOM 里第一个 ——
+        // 第一条是 @我 的消息，点它当然也能回复，但断言就没法对齐了。
+        const row = [...document.querySelectorAll('.msg')].find((m) =>
+          m.textContent.includes('被引用的原话') && !m.querySelector('.msg__reply'),
+        )
+        const btn = row?.querySelector('.msg__actions button[title="回复"]')
+        if (!btn) return false
+        btn.click()
+        return true
+      })()
+    `)
+    assert(replyStarted === true, '消息悬停操作里有「回复」按钮')
+    await sleep(400)
+    const replyBar = await evaluate(`JSON.stringify({
+      visible: !!document.querySelector('.chat__reply'),
+      text: document.querySelector('.chat__reply-text')?.textContent ?? ''
+    })`)
+    const rb = JSON.parse(replyBar)
+    assert(rb.visible, '点「回复」后输入区上方出现引用条')
+    assert(rb.text === '被引用的原话', '引用条里显示的是被引用那条的内容', rb.text)
+
+    const typedQuote = await evaluate(`
+      (() => {
+        const ta = document.querySelector('.chat__input')
+        if (!ta) return false
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+        setter.call(ta, '界面里发出的引用回复')
+        ta.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()
+    `)
+    assert(typedQuote === true, '在引用状态下输入了文字')
+    await evaluate(`document.querySelector('.chat__send')?.click()`)
+    await sleep(2500)
+
+    const ownReply = await evaluate(`JSON.stringify({
+      textThere: document.body.innerText.includes('界面里发出的引用回复'),
+      ownBubbleWithReply: document.querySelectorAll('.msg--own .msg__reply').length,
+      barGone: !document.querySelector('.chat__reply')
+    })`)
+    const or = JSON.parse(ownReply)
+    assert(or.textThere, '引用回复发出去了')
+    assert(or.ownBubbleWithReply >= 1, '自己发的那条也带着引用块')
+    assert(or.barGone, '发送后引用条自动收起（下一条不会莫名带引用）')
+
+    // 成员面板：邀请与退出
+    await evaluate(`
+      (() => {
+        const btn = [...document.querySelectorAll('.chat__members-btn')][0]
+        if (btn) btn.click()
+        return !!btn
+      })()
+    `)
+    await sleep(1500)
+    const memberPanel = await evaluate(`JSON.stringify({
+      invite: !!document.querySelector('.chat__modal-foot .wl-btn--primary'),
+      leave: [...document.querySelectorAll('.chat__modal-foot .wl-btn')].some(b => b.textContent.includes('退出群聊')),
+      count: document.querySelectorAll('.member').length
+    })`)
+    const mp = JSON.parse(memberPanel)
+    assert(mp.count >= 2, '成员面板列出了群成员', `${mp.count} 人`)
+    assert(mp.invite, '成员面板里有「邀请成员」')
+    assert(mp.leave, '成员面板里有「退出群聊」')
+
+    const inviteOpened = await evaluate(`
+      (() => {
+        const btn = [...document.querySelectorAll('.chat__modal-foot .wl-btn')].find(b => b.textContent.includes('邀请成员'))
+        if (!btn) return false
+        btn.click()
+        return true
+      })()
+    `)
+    await sleep(800)
+    const inviteView = await evaluate(`JSON.stringify({
+      header: document.querySelector('.chat__modal-head')?.textContent?.trim() ?? '',
+      hasPickList: document.querySelectorAll('.member--pick').length,
+      hasFoot: !!document.querySelector('.chat__modal-foot')
+    })`)
+    const iv = JSON.parse(inviteView)
+    assert(inviteOpened === true, '点了「邀请成员」')
+    assert(iv.header.includes('邀请成员'), '面板切到邀请视图', iv.header)
+    assert(iv.hasFoot, '邀请视图有确认按钮（没人可选时是禁用的，而不是消失）')
+    // 邀请视图用完关掉，别把窗口留在这儿影响后面的用例
+    await evaluate(`document.querySelector('.chat__modal-head .wl-icon-btn')?.click()`)
+    await sleep(300)
+
+
     // ---- 回归：全局键盘不该抢输入框 ----
     //
     // 真实故障：桌面图标把 Enter 监听挂在 window 上，于是「选中一个桌面图标 +

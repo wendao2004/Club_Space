@@ -607,6 +607,241 @@ async function main() {
     '整个列表仍按最后活跃时间倒序',
   )
 
+
+  // ---------------------------------------------------------------- 成员管理
+  console.log('\n【群的成员管理】')
+
+  const mgGroup = await jia.api('/api/chat/conversations/group', {
+    method: 'POST',
+    json: { title: '项目组', memberIds: [yiId] },
+  })
+  const mgId = mgGroup.body.conversation.id
+  assert(
+    mgGroup.status === 200 && mgGroup.body.conversation.memberCount === 2,
+    '建群：2 名成员',
+    `memberCount=${mgGroup.body.conversation.memberCount}`,
+  )
+  // 建群本身会写一条系统消息，这里记下它的 seq，后面用来判断"重复加人不会多写一条"
+  const mgAfterCreate = await jia.api(`/api/chat/conversations/${mgId}`)
+  const mgSysSeq = mgAfterCreate.body.conversation.lastMessage?.seq ?? 0
+
+  // 不在群里的人不能往群里加人（requireMember 拦的是调用者）
+  const mgOutsider = await bing.api(`/api/chat/conversations/${mgId}/members`, {
+    method: 'POST',
+    json: { userIds: [bingId] },
+  })
+  assert(mgOutsider.status === 403, '非成员不能往群里加人（403）', `状态 ${mgOutsider.status}`)
+
+  const mgAdd = await jia.api(`/api/chat/conversations/${mgId}/members`, {
+    method: 'POST',
+    json: { userIds: [bingId] },
+  })
+  assert(
+    mgAdd.status === 200 && mgAdd.body.added.length === 1,
+    '加人成功，返回新增 1 人',
+    `状态 ${mgAdd.status}，added=${JSON.stringify(mgAdd.body.added)}`,
+  )
+  assert(mgAdd.body.members.length === 3, '接口返回的成员列表立刻包含新人', `${mgAdd.body.members.length} 人`)
+
+  const mgAfterAdd = await jia.api(`/api/chat/conversations/${mgId}`)
+  assert(mgAfterAdd.body.conversation.memberCount === 3, '会话的 memberCount 同步变成 3')
+  assert(
+    mgAfterAdd.body.conversation.lastMessage?.seq > mgSysSeq,
+    '加人写了一条系统消息（seq 前进了）',
+    `${mgSysSeq} → ${mgAfterAdd.body.conversation.lastMessage?.seq}`,
+  )
+  assert(
+    (mgAfterAdd.body.conversation.lastMessage?.preview ?? '').includes('丙同学'),
+    '系统消息里点了新成员的名字',
+    mgAfterAdd.body.conversation.lastMessage?.preview,
+  )
+
+  // 被拉进来的人：会话列表里出现这个群，且**不背历史未读**
+  const mgBingConvs = await bing.api('/api/chat/conversations')
+  const mgBingGroup = mgBingConvs.body.conversations.find((c) => c.id === mgId)
+  assert(mgBingGroup !== undefined, '被拉进群后，丙的会话列表里出现这个群')
+  // 恰好 1 条 —— 就是那条"某某邀请你加入群聊"的系统消息。
+  // 这条刻意留着未读：静默进群的话用户只会看到一个陌生的群凭空出现，不知道发生了什么。
+  // 而加入之前的历史消息一条都不能算进来，那才是水位线要挡的东西。
+  assert(
+    mgBingGroup?.unread === 1,
+    '新人进群只看到 1 条未读（邀请他进来的那条系统消息），不背历史未读',
+    `unread=${mgBingGroup?.unread}，最后一条=${mgBingGroup?.lastMessage?.preview}`,
+  )
+  assert(
+    mgBingGroup?.lastMessage?.kind === 'system',
+    '那条未读就是系统消息本身（不是别人之前聊的内容）',
+    mgBingGroup?.lastMessage?.kind,
+  )
+
+  // 重复加同一个人：不重复插入，也不再多一条系统消息
+  const mgAddAgain = await jia.api(`/api/chat/conversations/${mgId}/members`, {
+    method: 'POST',
+    json: { userIds: [bingId] },
+  })
+  assert(mgAddAgain.body.added.length === 0, '重复加同一个人不会重复插入（added 为空）')
+  const mgAfterDup = await jia.api(`/api/chat/conversations/${mgId}`)
+  assert(
+    mgAfterDup.body.conversation.lastMessage?.seq === mgAfterAdd.body.conversation.lastMessage?.seq,
+    '重复加人不产生系统消息（seq 没动）',
+  )
+
+  // 单聊加人：语义上不成立，必须明确拒绝
+  const mgDirectAdd = await jia.api(`/api/chat/conversations/${convId}/members`, {
+    method: 'POST',
+    json: { userIds: [bingId] },
+  })
+  assert(mgDirectAdd.status === 400, '单聊不能添加成员（400）', `状态 ${mgDirectAdd.status}`)
+
+  // 退群
+  const mgLeave = await yi.api(`/api/chat/conversations/${mgId}/leave`, {
+    method: 'POST',
+    json: {},
+  })
+  assert(mgLeave.status === 200, '乙退出群聊', `状态 ${mgLeave.status}`)
+  const mgYiConvs = await yi.api('/api/chat/conversations')
+  assert(
+    !mgYiConvs.body.conversations.some((c) => c.id === mgId),
+    '退群后这个会话从乙的列表里消失',
+  )
+  const mgAfterLeave = await jia.api(`/api/chat/conversations/${mgId}`)
+  assert(mgAfterLeave.body.conversation.memberCount === 2, '退群后群成员剩 2 人')
+  assert(
+    (mgAfterLeave.body.conversation.lastMessage?.preview ?? '').includes('退出'),
+    '退群也写了一条系统消息',
+    mgAfterLeave.body.conversation.lastMessage?.preview,
+  )
+  const mgYiRead = await yi.api(`/api/chat/conversations/${mgId}/messages`)
+  assert(mgYiRead.status === 403, '退群后读不到群消息（403）', `状态 ${mgYiRead.status}`)
+
+  const mgDirectLeave = await jia.api(`/api/chat/conversations/${convId}/leave`, {
+    method: 'POST',
+    json: {},
+  })
+  assert(
+    mgDirectLeave.status === 400,
+    '单聊不能退出（400，否则会凭空多出第二个单聊）',
+    `状态 ${mgDirectLeave.status}`,
+  )
+
+  // ---------------------------------------------------------------- 引用回复
+  console.log('\n【引用回复】')
+
+  const mgQuoted = await jia.api(`/api/chat/conversations/${mgId}/messages`, {
+    method: 'POST',
+    json: { kind: 'text', body: '这条是要被引用的' },
+  })
+  const mgQuotedId = mgQuoted.body.message.id
+
+  const mgReply = await bing.api(`/api/chat/conversations/${mgId}/messages`, {
+    method: 'POST',
+    json: { kind: 'text', body: '收到，我来跟进', replyTo: mgQuotedId },
+  })
+  assert(mgReply.status === 200, '带 replyTo 发消息成功', `状态 ${mgReply.status}`)
+  assert(mgReply.body.message.reply?.id === mgQuotedId, '返回的消息带上了引用快照')
+  assert(
+    mgReply.body.message.reply?.senderName === '甲同学',
+    '引用快照里有被引用者的名字',
+    mgReply.body.message.reply?.senderName,
+  )
+  assert(
+    mgReply.body.message.reply?.preview === '这条是要被引用的',
+    '引用快照里有被引用的原文',
+    mgReply.body.message.reply?.preview,
+  )
+
+  // 重新拉历史后引用快照仍在 —— 说明它是服务端查出来的，不是发送时前端拼的
+  const mgReload = await bing.api(`/api/chat/conversations/${mgId}/messages`)
+  const mgReloaded = mgReload.body.messages.find((m) => m.id === mgReply.body.message.id)
+  assert(mgReloaded?.reply?.id === mgQuotedId, '重新拉取历史后引用快照仍然完整')
+
+  // 撤回原消息：引用块降级成"原消息已撤回"，且不再泄露原文
+  await jia.api(`/api/chat/messages/${mgQuotedId}/recall`, { method: 'POST', json: {} })
+  const mgAfterRecall = await bing.api(`/api/chat/conversations/${mgId}/messages`)
+  const mgReplyAfterRecall = mgAfterRecall.body.messages.find((m) => m.id === mgReply.body.message.id)
+  assert(mgReplyAfterRecall?.reply?.recalled === true, '原消息撤回后，引用块标记为已撤回')
+  assert(
+    mgReplyAfterRecall?.reply?.preview === '原消息已撤回',
+    '引用块不再显示被撤回的原文',
+    mgReplyAfterRecall?.reply?.preview,
+  )
+
+  // 跨会话引用 = 越权读取的入口，必须拒绝
+  const mgCross = await jia.api('/api/chat/conversations/direct', {
+    method: 'POST',
+    json: { peerId: bingId },
+  })
+  const mgCrossId = mgCross.body.conversation.id
+  const mgCrossQuote = await jia.api(`/api/chat/conversations/${mgCrossId}/messages`, {
+    method: 'POST',
+    json: { kind: 'text', body: '越权引用', replyTo: mgQuotedId },
+  })
+  assert(
+    mgCrossQuote.status === 400,
+    '不能引用别的会话里的消息（400，否则引用块会把那边的内容带出来）',
+    `状态 ${mgCrossQuote.status}`,
+  )
+
+  // ---------------------------------------------------------------- @ 提醒
+  console.log('\n【@ 提醒】')
+
+  const mgMention = await jia.api(`/api/chat/conversations/${mgId}/messages`, {
+    method: 'POST',
+    json: { kind: 'text', body: '@丙同学 麻烦看下这条' },
+  })
+  assert(mgMention.status === 200, '发送带 @ 的消息')
+  const mgBingList = await bing.api('/api/chat/conversations')
+  const mgBingConv = mgBingList.body.conversations.find((c) => c.id === mgId)
+  assert(
+    mgBingConv?.mentionUnread === 1,
+    '@丙同学 之后，丙的会话列表里显示 1 条 @提醒',
+    `mentionUnread=${mgBingConv?.mentionUnread}`,
+  )
+
+  const mgJiaList = await jia.api('/api/chat/conversations')
+  assert(
+    mgJiaList.body.conversations.find((c) => c.id === mgId)?.mentionUnread === 0,
+    '自己发的 @ 不算提醒自己',
+  )
+
+  // 读了就清掉（服务端按 last_read_seq 算，打开会话即清零）
+  await bing.api(`/api/chat/conversations/${mgId}/read`, {
+    method: 'POST',
+    json: { seq: mgMention.body.message.seq },
+  })
+  const mgBingRead = await bing.api('/api/chat/conversations')
+  assert(
+    mgBingRead.body.conversations.find((c) => c.id === mgId)?.mentionUnread === 0,
+    '@提醒随已读一起清零',
+  )
+
+  // 显示名里带 % 的成员：LIKE 会把它当通配符，这里必须是字面匹配（instr）
+  const mgPctName = `百分%${SUFFIX}`
+  const mgInvite = await jia.api('/api/admin/invites', {
+    method: 'POST',
+    json: { role: 'member', maxUses: 1, expiresInDays: 1 },
+  })
+  const mgPct = makeClient()
+  const mgPctReg = await registerUser(mgPct, `pct${SUFFIX}`, mgPctName, mgInvite.body.code)
+  if (mgPctReg.status === 200 || mgPctReg.status === 201) {
+    const mgPctId = (await mgPct.api('/api/auth/me')).body.user.id
+    await jia.api(`/api/chat/conversations/${mgId}/members`, {
+      method: 'POST',
+      json: { userIds: [mgPctId] },
+    })
+    await jia.api(`/api/chat/conversations/${mgId}/messages`, {
+      method: 'POST',
+      json: { kind: 'text', body: '这条没有任何点名' },
+    })
+    const mgPctList = await mgPct.api('/api/chat/conversations')
+    assert(
+      mgPctList.body.conversations.find((c) => c.id === mgId)?.mentionUnread === 0,
+      '显示名带 % 的成员不会被"没有 @"的消息误提醒（instr 字面匹配）',
+    )
+  } else {
+    bad('显示名带 % 的成员用例', `注册失败 ${mgPctReg.status}：${JSON.stringify(mgPctReg.body)}`)
+  }
+
   // ---------------------------------------------------------------- 结果
   console.log(
     `\n\x1b[1m结果\x1b[0m  通过 \x1b[32m${passed}\x1b[0m  失败 \x1b[31m${failed}\x1b[0m\n`,
