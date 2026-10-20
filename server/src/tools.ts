@@ -2110,6 +2110,27 @@ export function jobView(job: Job): JobView {
  * inline 工具虽然轻，但保持简单比压榨吞吐更重要 —— 这是社团工具站，不是高并发服务。
  */
 export function startJobRunner(): void {
+  // ---------------------------------------------------------------- 崩溃恢复
+  //
+  // 先处理上一条命留下的烂摊子：进程被强杀（OOM、docker kill、断电）时，
+  // 正在执行的那个任务会永远停在 state='running'，而下面只捞 'queued' ——
+  // 于是它再也不会被捡起来，用户在界面上看到一个 1% 的进度条转到天荒地老，
+  // 既不能重试也不能取消（没有"取消"这个能力）。
+  //
+  // 把它放回队列是最小可行的修法：任务本身是幂等的（重新生成输出文件），
+  // 代价是可能重复做一次已经做完的计算，收益是不会有任务永久卡死。
+  // progress 与 started_at 一起清掉，否则界面会从 1% 或者一个旧的开始时间算起。
+  const recovered = getDb()
+    .prepare(
+      "UPDATE jobs SET state = 'queued', progress = 0, started_at = NULL, error = NULL WHERE state = 'running'",
+    )
+    .run()
+  if (Number(recovered.changes) > 0) {
+    console.warn(
+      `[tools] 上次进程异常退出，把 ${recovered.changes} 个停在 running 的任务放回队列`,
+    )
+  }
+
   let running = false
 
   const tick = async (): Promise<void> => {
@@ -2140,7 +2161,13 @@ export function startJobRunner(): void {
   }
 
   const timer = setInterval(() => {
-    void tick()
+    // `void tick()` 会把 tick 内部抛出的异常变成 **unhandled rejection**。
+    // 在 Node 的默认配置下那会直接杀掉进程 —— 也就是"一次数据库瞬时 busy
+    // 导致整个平台下线"。这里必须自己接住并降级成一条日志：下一轮 1 秒后
+    // 会重新尝试，任务状态仍是 queued，没有数据丢失。
+    void tick().catch((err) => {
+      console.error('[tools] 任务调度失败（下一轮会重试）:', err)
+    })
   }, 1000)
   // 不要让这个定时器把进程钉住不退出
   timer.unref?.()

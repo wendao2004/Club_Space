@@ -300,6 +300,25 @@ export function disconnectUser(userId: string): number {
   return list.length
 }
 
+/**
+ * 关掉**所有**连接（进程退出前调用）。
+ *
+ * 为什么必须在 `app.close()` 之前做：SSE 是长活连接，Fastify 的 close
+ * 会等所有在途连接自然结束。不先断开的话，一次 `docker compose down`
+ * 会一直卡到编排层的 SIGKILL —— 那样 SQLite 的 WAL 没有机会 checkpoint，
+ * 正在跑的任务也没机会把状态收尾。
+ */
+export function disconnectAll(): number {
+  let closed = 0
+  for (const set of [...connections.values()]) {
+    for (const conn of [...set]) {
+      closeConnection(conn, true)
+      closed++
+    }
+  }
+  return closed
+}
+
 /** 推给指定用户的所有连接。 */
 export function pushTo(userIds: Iterable<string>, event: RealtimeEvent): void {
   for (const userId of userIds) {
