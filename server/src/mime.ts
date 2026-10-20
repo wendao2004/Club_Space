@@ -140,12 +140,31 @@ export function sniffMime(head: Uint8Array): string {
       const text = new TextDecoder('utf-8', { fatal: false }).decode(sample)
       if (/^\s*<(\?xml|svg)/i.test(text)) return 'image/svg+xml'
       if (/^\s*#|^\s*[-*]\s|^\s*>/.test(text)) return 'text/markdown'
-      if (text.includes(',') && text.split('\n').every((l) => l.split(',').length > 1)) return 'text/csv'
+      if (isLikelyCsv(text)) return 'text/csv'
       return 'text/plain'
     }
   }
 
   return ''
+}
+
+/**
+ * 像不像 CSV。
+ *
+ * 判据刻意宽松（只要"至少两行、每行都有逗号"），因为认错成 CSV 的代价
+ * 只是预览时多画一个表格，而漏认的代价是表格型文件被当成一大坨纯文本。
+ *
+ * ⚠️ 空行必须先滤掉。原来的写法是 `text.split('\n').every(...)`：
+ * 任何以换行结尾的文件（**几乎所有导出的 CSV 都带**）最后都会多出一个空串，
+ * 它 split 出来长度是 1，于是 `every` 恒为 false —— 结果就是真实的 CSV
+ * 一律被判成 text/plain，表格预览永远走不到。这个 bug 藏得很深：
+ * 文件照样能上传、能下载、能用纯文本打开，只有"预览是表格还是文本"这一处不同。
+ */
+function isLikelyCsv(text: string): boolean {
+  if (!text.includes(',')) return false
+  const lines = text.split('\n').filter((line) => line.trim() !== '')
+  // 只要求两行：单行文本里出现一个逗号（"你好,世界"）不该被当成表格
+  return lines.length >= 2 && lines.every((line) => line.split(',').length > 1)
 }
 
 /**
