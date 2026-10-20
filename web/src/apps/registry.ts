@@ -200,6 +200,32 @@ export const APPS: AppDef[] = [
     component: () => import('@/apps/AboutApp.vue'),
   },
   {
+    // 在线表格编辑器：由文件管理器按需拉起（双击 .xlsx / 右键「编辑」）。
+    //
+    // 和预览窗口一样不进桌面、不进开始菜单 —— 它不是"一个应用"，
+    // 是某个文件的一个打开方式，没有"打开一个空的表格编辑器"这种操作
+    // （新建表格是文件管理器的事，它先生成文件再开这个窗口）。
+    id: 'sheet-editor',
+    name: '表格编辑',
+    icon: 'sheet',
+    description: '在线编辑 .xlsx 表格',
+    tint: '#1f8a51',
+    defaultSize: { w: 1100, h: 660 },
+    minSize: { w: 560, h: 380 },
+    component: () => import('@/apps/SheetEditorApp.vue'),
+  },
+  {
+    // 在线文档编辑器：由文件管理器按需拉起（双击 .docx / 右键「编辑」）。
+    id: 'doc-editor',
+    name: '文档编辑',
+    icon: 'doc',
+    description: '在线编辑 .docx 文档',
+    tint: '#2b6cd4',
+    defaultSize: { w: 1000, h: 700 },
+    minSize: { w: 520, h: 380 },
+    component: () => import('@/apps/DocEditorApp.vue'),
+  },
+  {
     // 文件预览窗口：由文件管理器按需拉起（双击文件 / 右键「预览」）。
     // 刻意不进桌面、不进开始菜单 —— 它不是"应用"，是文件的一个视图，
     // 所以也不该出现在桌面图标和开始菜单的自动化断言里。

@@ -857,6 +857,90 @@ async function writeFileAtomic(path: string, data: Uint8Array): Promise<void> {
   await rename(tmp, path)
 }
 
+/**
+ * 在线编辑器能产出、也允许回写的类型。
+ *
+ * ⚠️ 这份名单必须与 `web/src/lib/file-kinds.ts` 里的 `editableKind()` 对齐：
+ * 前端那一侧决定"哪些文件给「编辑」入口"，这一侧决定"哪些文件允许被改写"。
+ * 两边不一致的表现是：界面上点了编辑、改完保存，服务端回 415。
+ *
+ * 为什么要有白名单而不是"任何文件都能被覆盖写"：
+ * 在线编辑的产物只有这三类（表格 / 文档 / 纯文本）。把它收窄到这三类，
+ * "编辑"这个动作就不会变成一条绕过上传流程的任意写通道 —— 例如把一份
+ * 已归档的 PDF 或视频悄悄换成别的内容，而审计里只留下一句"编辑了文件"。
+ */
+export function isEditableMime(mime: string | null | undefined): boolean {
+  const m = mime ?? ''
+  return (
+    m === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    m === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    m.startsWith('text/')
+  )
+}
+
+export interface ReplaceContentResult {
+  node: Node
+  /** 新内容与旧内容完全一样时为 true：此时没有写新 blob，节点也没动。 */
+  unchanged: boolean
+}
+
+/**
+ * 用一段新内容**替换**节点的内容（在线编辑保存走这里）。
+ *
+ * 与"上传"的区别：上传是新建节点，这里是**原地改写**同一个节点 ——
+ * 文件还是那个文件（id、名字、位置、权限都不变），只是内容换了。
+ * 这对使用者是对的：编辑完一个共享表格，不应该在目录里多出一个同名副本。
+ *
+ * 存储层仍然走内容寻址：新内容按 sha256 落成新 blob、引用计数 +1，
+ * 旧内容的引用计数 -1（归零才真删盘）。所以：
+ *   - 改回原来的内容时不会留下垃圾（sha256 命中已有 blob）；
+ *   - 别处引用着同一份内容的节点**不会**因为这次编辑而失效。
+ *
+ * ⚠️ 释放旧 blob 必须在事务**之外**做。releaseBlob 归零时会真的删盘，
+ * 而删盘不在事务里 —— 事务回滚也撤不回一个已经删掉的文件。
+ */
+export async function replaceNodeContent(
+  node: Node,
+  buffer: Uint8Array,
+): Promise<ReplaceContentResult> {
+  if (node.kind !== 'file') throw new HttpError(400, '只能改写文件的内容')
+
+  const sha256 = createHash('sha256').update(buffer).digest('hex')
+  const size = buffer.byteLength
+  if (node.sha256 === sha256) return { node, unchanged: true }
+
+  // 类型仍然**按内容**判定（见 mime.ts 的策略说明）。
+  //
+  // 但这里有一个刻意的例外：认不出来时**保留节点原来的类型**，而不是改成
+  // octet-stream。原因是 OOXML 靠"前 4KB 里有没有 xl/ / word/ 这些条目名"来认，
+  // 打包器的条目顺序一变就可能认成 application/zip —— 那会让一个好端端的
+  // .xlsx 在界面上突然"变成压缩包"，从此点不出编辑入口。
+  // 内容确实是别的东西（例如文本）时，采用新判定的类型才是安全的那一侧。
+  const sniffed = classifyUpload(buffer.subarray(0, 4096))
+  const mime = isEditableMime(sniffed) ? sniffed : (node.mime ?? sniffed)
+
+  const oldSha = node.sha256
+  await ensureBlobDir(sha256)
+  const target = blobPath(sha256)
+  if ((await fileSize(target)) !== size) {
+    await writeFileAtomic(target, buffer)
+  }
+
+  const updated = transaction(() => {
+    retainBlob(sha256, size)
+    getDb()
+      .prepare(
+        `UPDATE nodes SET sha256 = ?, storage_key = ?, size = ?, mime = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(sha256, sha256, size, mime, now(), node.id)
+    return getNode(node.id)!
+  })
+
+  if (oldSha) await releaseBlob(oldSha)
+  return { node: updated, unchanged: false }
+}
+
 /** 读取节点的完整内容到内存。仅用于中小文件。 */
 export async function readNodeBuffer(node: Node): Promise<Buffer> {
   if (node.kind !== 'file' || !node.storage_key) throw new HttpError(400, '该节点不是文件')

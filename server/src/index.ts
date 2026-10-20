@@ -195,6 +195,7 @@ import {
   HEALTH_MIN_FREE_BYTES,
   HOST,
   IS_PROD,
+  MAX_EDIT_BYTES,
   MAX_UPLOAD_BYTES,
   PORT,
   SITE_NAME,
@@ -202,6 +203,7 @@ import {
 } from './config.ts'
 import {
   appendChunk,
+  assertDiskSpace,
   breadcrumb,
   canRead,
   auditBlobRefCounts,
@@ -219,6 +221,8 @@ import {
   moveNode,
   openNodeStream,
   renameNode,
+  isEditableMime,
+  replaceNodeContent,
   storageStats,
   type Space,
 } from './files.ts'
@@ -988,6 +992,106 @@ app.delete('/api/files/:id', async (req) => {
     payload: { name: node.name, kind: node.kind },
   })
   return { ok: true }
+})
+
+/**
+ * 在线编辑保存：用一份新内容**改写**已有文件。
+ *
+ * 请求体是裸字节（application/octet-stream），不是 JSON —— 一份带样式的
+ * .xlsx 有几 MB，走 JSON + base64 会先把它撑大三分之一再解析。
+ *
+ * ────────────────────────────────────────────────────────────────────────────
+ * 三道闸门，缺一不可
+ * ────────────────────────────────────────────────────────────────────────────
+ * 1. **写权限**（canWrite）：与删除/重命名同一条规则，不是"能读就能写"。
+ * 2. **类型白名单**（isEditableMime）：只有表格 / 文档 / 文本能被改写。
+ *    没有它，"编辑"就成了绕过上传流程的任意写通道。
+ * 3. **乐观并发**（?base=）：见下面的说明。
+ *
+ * 此外还过限流与磁盘余量守卫（assertDiskSpace）—— 保存同样会在盘上写一份新
+ * blob，和上传一样能把它写满。
+ */
+app.put('/api/files/:id/content', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  // 按账号限流：IP 维度在 NAT 后面会把一群人算成一个人，
+  // 而"谁在疯狂保存"这件事按账号看才有意义。
+  enforceRateLimit(req, 'edit', `:${user.id}`)
+
+  const node = getNode(id)
+  if (!node) throw new HttpError(404, '文件不存在')
+  if (node.kind !== 'file') throw new HttpError(400, '只有文件能被编辑')
+  if (!canWrite(node, user.id, roleAtLeast(user.role, 'admin'))) {
+    throw new HttpError(403, '只能修改自己上传的内容')
+  }
+  if (!isEditableMime(node.mime)) {
+    throw new HttpError(415, '这个文件不是可以在线编辑的类型（只支持表格、文档与文本）')
+  }
+
+  if (!Buffer.isBuffer(req.body)) {
+    throw new HttpError(400, '请以 application/octet-stream 提交文件内容')
+  }
+  const content = req.body as Buffer
+  if (content.length === 0) throw new HttpError(400, '内容为空，没有保存')
+  if (content.length > MAX_EDIT_BYTES) {
+    throw new HttpError(
+      413,
+      `内容超过 ${Math.round(MAX_EDIT_BYTES / 1024 / 1024)} MB，` +
+        `在线编辑保存不了这么大的文件（太大的文档请下载后用本地软件编辑）。`,
+    )
+  }
+
+  /**
+   * 乐观并发：`?base=` 是**打开文件时**拿到的 updatedAt。
+   *
+   * 为什么必须有它：两个人同时编辑同一份共享表格是真实会发生的事。
+   * 没有这道校验时，后保存的人会**静默覆盖**前一个人的全部修改 ——
+   * 而界面上看起来是"保存成功"。那比保存失败危险得多：
+   * 失败会让人去找原因，静默覆盖要等某天发现数据不对时才暴露。
+   *
+   * 有它之后，后一个人会拿到 409 和一句说明，可以选择"重新加载看看别人改了什么"。
+   * 这不是协同编辑（那需要 OT/CRDT 与常驻服务，不在本项目的内存预算内），
+   * 只是把"会丢数据"变成"会告诉你可能会丢数据"。
+   */
+  const base = Number.parseInt((req.query as { base?: string }).base ?? '0', 10)
+  if (Number.isFinite(base) && base > 0 && node.updated_at !== base) {
+    throw new HttpError(
+      409,
+      '这个文件在你编辑期间被改动过（可能是别人也编辑了它）。' +
+        '为避免覆盖别人的修改，请先重新加载文件再改。',
+    )
+  }
+
+  // 与上传同一道守卫：写完之后盘上必须还留有余量
+  await assertDiskSpace(content.length)
+
+  const result = await replaceNodeContent(node, content)
+
+  audit({
+    actorId: user.id,
+    actorIp: actorIp(req),
+    category: 'file',
+    action: 'edit-save',
+    target: id,
+    payload: {
+      name: node.name,
+      size: result.node.size,
+      previousSize: node.size,
+      // 内容没变时前端本不该提交；记下来是为了发现"编辑器反复提交同一份内容"这种失控
+      unchanged: result.unchanged,
+    },
+  })
+
+  return {
+    node: {
+      id: result.node.id,
+      name: result.node.name,
+      size: result.node.size,
+      mime: result.node.mime,
+      sha256: result.node.sha256,
+      updatedAt: result.node.updated_at,
+    },
+  }
 })
 
 /** 下载（attachment）。 */

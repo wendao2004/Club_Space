@@ -60,6 +60,22 @@ export const IS_PROD = process.env.NODE_ENV === 'production'
 export const MAX_UPLOAD_BYTES = envInt('WL_MAX_UPLOAD_BYTES', 0)
 
 /**
+ * 在线编辑器单次提交的内容上限（字节）。**默认 32MiB。**
+ *
+ * 这道上限和上传那边的取舍**不一样**：上传走分片、按磁盘余量守卫（见
+ * MIN_FREE_BYTES），没有"单文件多大"这个概念；而在线编辑是一次性把整份文档
+ * 从浏览器发回来，必须先落进内存才能算 sha256 再落盘 —— 所以这里需要一个
+ * 明确的数字兜住"一个几十 MB 的表格把容器内存吃穿"。
+ *
+ * ⚠️ 它**不能**超过 index.ts 里 `application/octet-stream` 解析器的
+ * bodyLimit（32MiB）：调大这个值却不调 bodyLimit，超限的请求会在解析器那一层
+ * 被 Fastify 先拒掉，这里的中文提示根本没机会说出去。
+ *
+ * 32MiB 对社团文档是宽裕的：一个几千行带样式的 .xlsx 通常在 100KB-2MB。
+ */
+export const MAX_EDIT_BYTES = envInt('WL_MAX_EDIT_BYTES', 32 * 1024 * 1024)
+
+/**
  * 上传后必须保留的磁盘余量（字节）。**默认 2GiB。**
  *
  * 这是取代"单文件上限"的那道闸门：上传前算一次

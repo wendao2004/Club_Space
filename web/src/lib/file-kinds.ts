@@ -60,6 +60,37 @@ export function isDelimitedText(mime: string | null | undefined): boolean {
   return mime === 'text/csv'
 }
 
+/** 在线编辑：这个文件该用哪个编辑器打开。 */
+export type EditKind = 'sheet' | 'doc'
+
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+
+/**
+ * 判断一个文件能不能在线编辑、用哪个编辑器。
+ *
+ * ⚠️ 这份名单必须与服务端两处对齐：
+ *   - `server/src/files.ts` 的 `isEditableMime()` —— 那边决定"允许被改写"；
+ *   - `server/src/index.ts` 里 `PUT /api/files/:id/content` 的类型闸门。
+ * 只在前端加一种类型而服务端没加，表现是"界面上有编辑按钮，保存时 415"。
+ *
+ * 服务端的白名单比这里多一类（text/*）—— 纯文本在线编辑还没做界面，
+ * 先把口子留着；在界面给出入口之前它不会被人用到。
+ *
+ * 只认 **.xlsx / .docx**（OOXML）：
+ *   - 旧版 .doc/.xls 是 OLE2 二进制格式，浏览器里没有可靠的读写实现，
+ *     硬做的产物十有八九打不开 —— 所以它们仍然只能下载后用本地软件改，
+ *     或者用工具集里已有的「转为 PDF」看内容；
+ *   - .ods/.odt（OpenDocument）同理：它们虽然是 zip + XML，但结构与 OOXML 不同，
+ *     这里没有对应的实现。宁可不给入口，也不给一个会损坏文件的入口。
+ */
+export function editableKind(mime: string | null | undefined): EditKind | null {
+  const m = mime ?? ''
+  if (m === XLSX_MIME) return 'sheet'
+  if (m === DOCX_MIME) return 'doc'
+  return null
+}
+
 /** 预览窗口能直接渲染的（与服务端 inline 名单一致）。 */
 export function isInlinePreviewable(mime: string | null | undefined): boolean {
   const m = mime ?? ''

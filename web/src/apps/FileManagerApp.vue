@@ -29,7 +29,7 @@ import { useAuth } from '@/stores/auth'
 import { useUi, type ContextMenuItem } from '@/stores/ui'
 import { useWindows, type WindowInstance } from '@/stores/windows'
 import { playSystem } from '@/lib/sfx'
-import { isPreviewable } from '@/lib/file-kinds'
+import { editableKind, isPreviewable } from '@/lib/file-kinds'
 
 const props = defineProps<{ win: WindowInstance }>()
 const auth = useAuth()
@@ -648,10 +648,70 @@ function canPreview(entry: FileEntry): boolean {
 function openEntry(entry: FileEntry): void {
   if (entry.kind === 'folder') {
     enter(entry)
+  } else if (editableKind(entry.mime)) {
+    // 表格 / 文档双击直接进编辑器 —— 双击一个 .xlsx 的人想的是"改它"，
+    // 不是"看它"。要只看不改的话，右键菜单里的「预览」还在。
+    openEditor(entry)
   } else if (canPreview(entry)) {
     openPreview(entry)
   } else {
     download(entry)
+  }
+}
+
+/**
+ * 在线编辑 = 打开对应的编辑器窗口。
+ *
+ * 每种类型一个窗口、每个文件一个实例：可以同时开两张表格对比着改，
+ * 和桌面应用的行为一致。
+ */
+function openEditor(entry: FileEntry): void {
+  const kind = editableKind(entry.mime)
+  if (!kind) return
+  const sheet = kind === 'sheet'
+  windows.open({
+    appId: sheet ? 'sheet-editor' : 'doc-editor',
+    title: entry.name,
+    args: { node: entry },
+    w: sheet ? 1100 : 1000,
+    h: sheet ? 660 : 700,
+    minW: sheet ? 560 : 520,
+    minH: 380,
+    force: true,
+  })
+}
+
+/**
+ * 新建一个空白表格 / 文档。
+ *
+ * 产物是**真的文件**（不是内存里的草稿）：先生成一份空白文件传到当前目录，
+ * 再打开编辑器。这样"保存"永远是对一个真实节点做替换，编辑器里不需要
+ * 第二种"还没有文件"的状态。
+ *
+ * 两个库按需加载（`import()`）：只有真的点了"新建表格"，那 950KB 的
+ * ExcelJS 才会被下载 —— 打开文件管理器本身不该为它付代价。
+ */
+async function createOfficeFile(kind: 'sheet' | 'doc'): Promise<void> {
+  const base = kind === 'sheet' ? '新建表格' : '新建文档'
+  const ext = kind === 'sheet' ? '.xlsx' : '.docx'
+  const used = new Set(entries.value.map((e) => e.name))
+  let name = `${base}${ext}`
+  for (let i = 1; used.has(name) && i < 1000; i++) name = `${base} (${i})${ext}`
+
+  try {
+    const bytes =
+      kind === 'sheet'
+        ? await (await import('@/lib/xlsx')).createSpreadsheet().toBytes()
+        : (await import('@/lib/docx')).createDocument().toBytes()
+    const file = new File([bytes as unknown as BlobPart], name, {
+      type: 'application/octet-stream',
+    })
+    const { nodeId } = await uploadFile(file, parentId.value, space.value)
+    await load()
+    const created = entries.value.find((e) => e.id === nodeId)
+    if (created) openEditor(created)
+  } catch (err) {
+    ui.notify('error', `新建${kind === 'sheet' ? '表格' : '文档'}失败`, err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -689,6 +749,9 @@ function entryContextMenu(event: MouseEvent, entry: FileEntry): void {
     if (entry.kind === 'folder') {
       items.push({ label: '打开', icon: 'folder-open', action: () => enter(entry) })
     } else {
+      if (editableKind(entry.mime)) {
+        items.push({ label: '编辑', icon: 'text', action: () => openEditor(entry) })
+      }
       if (canPreview(entry)) {
         items.push({ label: '预览', icon: 'eye', action: () => openPreview(entry) })
       }
@@ -748,6 +811,8 @@ function blankContextMenu(event: MouseEvent): void {
   event.preventDefault()
   ui.openContextMenu(event.clientX, event.clientY, [
     { label: '新建文件夹', icon: 'plus', action: () => (showNewFolder.value = true) },
+    { label: '新建表格', icon: 'sheet', action: () => void createOfficeFile('sheet') },
+    { label: '新建文档', icon: 'doc', action: () => void createOfficeFile('doc') },
     { label: '上传文件', icon: 'upload', action: () => fileInput.value?.click() },
     { separator: true, label: '' },
     { label: '全选', icon: 'list', disabled: filtered.value.length === 0, action: selectAll },
@@ -846,6 +911,12 @@ watch(
 
       <button class="wl-icon-btn" :title="view === 'grid' ? '切换列表视图' : '切换网格视图'" @click="view = view === 'grid' ? 'list' : 'grid'">
         <Icon :name="view === 'grid' ? 'list' : 'grid'" :size="16" />
+      </button>
+      <button class="wl-icon-btn" title="新建表格（.xlsx）" @click="createOfficeFile('sheet')">
+        <Icon name="sheet" :size="16" />
+      </button>
+      <button class="wl-icon-btn" title="新建文档（.docx）" @click="createOfficeFile('doc')">
+        <Icon name="doc" :size="16" />
       </button>
       <button class="wl-btn" @click="showNewFolder = true">
         <Icon name="plus" :size="15" />

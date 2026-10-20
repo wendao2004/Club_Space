@@ -216,6 +216,24 @@ export const api = {
   downloadUrl: (id: string) => `/api/files/${id}/download`,
   previewUrl: (id: string) => `/api/files/${id}/preview`,
 
+  /**
+   * 在线编辑保存：把整份新内容发回去，**改写**同一个文件。
+   *
+   * @param base 打开文件时拿到的 `updatedAt`。服务端拿它做乐观并发校验：
+   *             期间被别人改过就回 409，而不是把别人的修改静默覆盖掉。
+   *             不传则跳过这道校验（只有"新建后第一次保存"才该这样）。
+   */
+  saveFileContent: (id: string, bytes: Uint8Array, base?: number) => {
+    const query = base ? `?base=${encodeURIComponent(String(base))}` : ''
+    return request<{
+      node: { id: string; name: string; size: number; mime: string | null; sha256: string | null; updatedAt: number }
+    }>(`/api/files/${id}/content${query}`, {
+      method: 'PUT',
+      body: bytes as unknown as BodyInit,
+      headers: { 'content-type': 'application/octet-stream' },
+    })
+  },
+
   listTools: () => request<{ tools: ToolDescriptor[] }>('/api/tools'),
 
   runTool: (toolId: string, input: {

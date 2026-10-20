@@ -39,6 +39,15 @@ export interface WindowInstance {
 /** 任务栏高度，参与可用工作区计算。 */
 export const TASKBAR_HEIGHT = 48
 
+/**
+ * 关闭守卫（窗口 id → 钩子）。
+ *
+ * 放在 store 外面、刻意**不进 state**：它是一组函数，参与响应式追踪没有任何好处，
+ * 反而会让 Pinia 尝试代理这些闭包。它也不需要被持久化 —— 窗口都关了，
+ * 守卫自然无处可挂。
+ */
+const closeGuards = new Map<string, () => boolean | Promise<boolean>>()
+
 let seq = 0
 function nextId(): string {
   seq += 1
@@ -151,7 +160,30 @@ export const useWindows = defineStore('windows', {
       return id
     },
 
-    close(id: string): void {
+    /**
+     * 注册一个"关闭前询问"的钩子。
+     *
+     * 为什么需要它：编辑器里改了几处还没保存，点窗口右上角的 × ——
+     * 在桌面隐喻里"关掉窗口"说的是"这事做完了"，没人会预期它等于"丢弃改动"。
+     * 而窗口框架本身不知道内容脏不脏，所以把这个判断交给内容自己：
+     * 返回 false 就不关。
+     *
+     * 只在真的需要时才注册（编辑器在加载完成后挂上，卸载时摘掉），
+     * 没有守卫的窗口行为完全不变。
+     */
+    setCloseGuard(id: string, guard: (() => boolean | Promise<boolean>) | null): void {
+      if (guard) closeGuards.set(id, guard)
+      else closeGuards.delete(id)
+    },
+
+    async close(id: string): Promise<void> {
+      const guard = closeGuards.get(id)
+      if (guard) {
+        const mayClose = await guard()
+        // 守卫说"先别关" —— 窗口留在原处，焦点也不动
+        if (!mayClose) return
+        closeGuards.delete(id)
+      }
       const index = this.windows.findIndex((w) => w.id === id)
       if (index < 0) return
       this.windows.splice(index, 1)

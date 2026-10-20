@@ -167,4 +167,16 @@ export const RATE_RULES = {
    * 而一个失控的循环仍然会被挡住。
    */
   upload: { windowMs: 10 * 60_000, max: 600 },
+  /**
+   * 在线编辑保存：每次都会写一份新 blob 并重写节点。
+   *
+   * 给到 60 次/分钟（每秒一次）是刻意的宽：编辑器的保存是**显式点击**触发的，
+   * 正常使用一分钟点不了几次；但"改一格存一下"的习惯会让人连续点，
+   * 卡太紧会让"保存"这个动作本身变得不可靠 —— 那比多写几个 blob 危险得多
+   * （用户会以为存上了，其实被拒了）。
+   *
+   * 真正的资源保护不在这里：内容大小由 MAX_EDIT_BYTES 挡，
+   * 磁盘由 assertDiskSpace 挡（保存同样要过那道守卫）。
+   */
+  edit: { windowMs: 60_000, max: 60 },
 } as const satisfies Record<string, RateLimitRule>
