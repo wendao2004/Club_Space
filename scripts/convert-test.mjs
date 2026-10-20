@@ -272,21 +272,37 @@ async function main() {
     )
     fake.setMode('ok')
 
-    // 视频转码还没实现 —— 必须明确说"没实现"，而不是给一个看不懂的超时
-    const transcode = await client.api('/api/tools/media.transcode/run', {
+    // 视频转码：**即使转换服务已配置**也必须显示为不可用。
+    //
+    // 这里曾经是个"骗人"的入口：可用性按「有没有配 WL_CONVERT_SERVICE_URL」判断，
+    // 于是配了地址就把视频工具显示成可用，点下去一路走到 runExternalJob 才 501。
+    // 而那个地址接的是 Gotenberg，它只有 /forms/libreoffice/convert，没有 ffmpeg ——
+    // 配不配地址都不可能让转码变得可用。
+    const transcode = (tools.body.tools ?? []).find((t) => t.id === 'media.transcode')
+    assert(!!transcode, '「视频转码」出现在工具清单里（是"规划中"，不是"藏起来"）')
+    assert(
+      transcode?.available === false,
+      '配了转换服务也不把视频转码显示为可用',
+      `available=${transcode?.available}`,
+    )
+    assert(
+      /规划中|尚未/.test(transcode?.unavailableReason ?? ''),
+      '不可用原因里说明了"规划中/尚未接入"，而不是让用户以为自己配错了地址',
+      String(transcode?.unavailableReason).slice(0, 80),
+    )
+    assert(
+      !(tools.body.tools ?? []).filter((t) => t.available).some((t) => t.id === 'media.transcode'),
+      '视频转码不在"可用工具"里',
+    )
+
+    const runTranscode = await client.api('/api/tools/media.transcode/run', {
       method: 'POST',
       json: { nodeIds: [inputId], params: { preset: 'compressed' }, space: 'shared' },
     })
-    if (transcode.status === 200) {
-      const job3 = await waitForJob(client, transcode.body.jobId)
-      assert(
-        job3?.state === 'failed' && String(job3.error).includes('还没有可用的服务端实现'),
-        '未实现的工具明确报"没有实现"',
-        String(job3?.error).slice(0, 120),
-      )
-    } else {
-      ok('未实现的工具在提交阶段就被拒', `状态 ${transcode.status}`)
-    }
+    // 关键：入口就拒（503），而不是排进队列、转一圈再报 501 ——
+    // 后者在界面上表现为"任务失败"，用户会以为是自己的文件有问题。
+    assert(runTranscode.status === 503, '提交视频转码在入口就被拒（不会创建任务）', `状态 ${runTranscode.status}`)
+    assert(runTranscode.body?.jobId === undefined, '没有为未实现的工具创建任务')
 
     // ------------------------------------------------------------ 体积闸门
     console.log('\n【体积闸门】')

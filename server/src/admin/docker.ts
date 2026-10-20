@@ -80,7 +80,21 @@ export function loadAdminConfig(env: NodeJS.ProcessEnv = process.env): AdminDock
     enabled: env.WL_ADMIN_DOCKER_ENABLED === '1' || env.WL_ADMIN_DOCKER_ENABLED === 'true',
     composeFile: env.WL_ADMIN_COMPOSE_FILE ?? '/compose/docker-compose.yml',
     templatesDir: env.WL_ADMIN_TEMPLATES_DIR ?? '/compose/templates',
-    allowedServices: (env.WL_ADMIN_ALLOWED_SERVICES ?? 'convert')
+    /**
+     * 默认**为空**。
+     *
+     * 这里原来写的是 'convert'，但主 compose 文件（WL_ADMIN_COMPOSE_FILE 指向的
+     * deploy/docker-compose.yml）里**根本没有 convert 这个服务** —— 它定义在
+     * deploy/heavy-tools.compose.yml，是一份独立的、按需拉起的重任务编排。
+     * 而执行器只会跑 `docker compose -f <主文件> up -d <服务>`，
+     * 于是界面上那个「启动转换服务」按钮点下去必然得到 `no such service: convert`。
+     *
+     * 主文件里只有 caddy / app / ops-runner 三个服务，而它们都不适合从网页上停：
+     * 停 app 或 caddy 就失去访问入口，停 ops-runner 就失去这个页面本身。
+     * 所以默认什么都不列 —— 只有当你**自己**往主文件里加了别的服务、
+     * 并且停掉它也无所谓时，才需要往这里填。
+     */
+    allowedServices: (env.WL_ADMIN_ALLOWED_SERVICES ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
@@ -246,6 +260,28 @@ export interface AdminOperation {
   build(config: AdminDockerConfig, args: Record<string, string>): string[]
 }
 
+/**
+ * 「转换服务在另一份编排里」这件事的固定说法。
+ *
+ * 抽成常量是因为它要在三个地方出现，而且**必须逐字一致**：
+ *   1. 服务名被白名单拒掉时的错误（403）
+ *   2. 白名单里真的写了 convert、命令执行失败时的补充说明（stderr）
+ *   3. 测试里的断言
+ * 如果哪天转换服务被接进主文件，只需要改这里一处就能看出哪里还在说旧话。
+ */
+const CONVERT_COMPOSE_FILES = '-f docker-compose.yml -f heavy-tools.compose.yml'
+const CONVERT_UP_COMMAND = `docker compose ${CONVERT_COMPOSE_FILES} --profile convert up -d convert`
+const CONVERT_STOP_COMMAND = `docker compose ${CONVERT_COMPOSE_FILES} --profile convert stop convert`
+
+const CONVERT_ELSEWHERE =
+  '转换服务（convert）不在主 compose 文件（deploy/docker-compose.yml）里：' +
+  '它定义在 deploy/heavy-tools.compose.yml，是一份按需拉起的独立编排，' +
+  '而运维页固定只操作主文件，无法跨文件启停它。\n' +
+  `需要在 NAS 的 deploy 目录下手动执行：\n  ${CONVERT_UP_COMMAND}\n` +
+  `用完停掉（末尾的 convert 不能省，否则会连整站一起停）：\n  ${CONVERT_STOP_COMMAND}\n` +
+  '拉起后在 .env 里设置 WL_CONVERT_SERVICE_URL=http://wl-convert:3000，' +
+  '并 docker compose up -d app 重建应用容器 —— 只启容器、不改这个变量，工具集里仍然是「未启用」。'
+
 /** 校验服务名必须来自白名单。 */
 function checkService(config: AdminDockerConfig, name: string | undefined): string {
   if (!name) throw new AdminError(400, '缺少服务名')
@@ -253,9 +289,13 @@ function checkService(config: AdminDockerConfig, name: string | undefined): stri
     throw new AdminError(400, `服务名格式不合法：${name}`)
   }
   if (!config.allowedServices.includes(name)) {
+    // 单独给 convert 一句准确的解释：它是这套界面上最容易被误配的一个名字
+    // （旧版 .env.example 和白名单默认值都写着它），而"不在清单里"本身
+    // 完全不解释"那我该怎么把它跑起来"。
+    const hint = name === 'convert' ? ` ${CONVERT_ELSEWHERE}` : ''
     throw new AdminError(
       403,
-      `服务「${name}」不在允许操作的清单里。允许的有：${config.allowedServices.join('、') || '（空）'}`,
+      `服务「${name}」不在允许操作的清单里。允许的有：${config.allowedServices.join('、') || '（空）'}。${hint}`,
     )
   }
   return name
@@ -454,7 +494,60 @@ export async function executeOperation(
   assertNoShell(argv)
 
   const result = await deps.runner(argv, config.timeoutMs)
-  return { operationId, argv, result }
+  return { operationId, argv, result: explainFailure(result, args) }
+}
+
+/**
+ * 把「命令失败了」翻译成「接下来该做什么」。
+ *
+ * 只往 **stderr 末尾追加**一段说明：退出码、stdout、原始错误都原样保留 ——
+ * 管理员看到的仍然是真实结果，只是多了一条能照着做的下一步。
+ * 直接替换错误信息是不行的：那等于把 docker 的原话藏起来，
+ * 以后排查"到底是哪个环节坏了"就没有依据了。
+ *
+ * 覆盖的三种失败都对应部署文档里的一个具体坑，而且光看原始报错几乎猜不到原因：
+ *   - `no such service`      → 服务不在这份 compose 文件里（convert 就是这一类）
+ *   - `permission denied`    → 执行器打不开 docker.sock（WL_DOCKER_GID 填错）
+ *   - 连不上执行器            → ops-runner 没起 / 令牌不一致
+ */
+export function explainFailure(
+  result: CommandResult,
+  args: Record<string, string> = {},
+): CommandResult {
+  if (result.code === 0) return result
+  const text = `${result.stderr}\n${result.stdout}`
+  const hints: string[] = []
+
+  if (/no such service|service .* not found/i.test(text)) {
+    if (args.service === 'convert') {
+      hints.push(`docker compose 找不到服务「convert」。${CONVERT_ELSEWHERE}`)
+    } else {
+      hints.push(
+        `docker compose 找不到服务「${args.service ?? '（未指定）'}」。` +
+          '先执行「查看服务清单」看这份 compose 文件里实际定义了哪些服务（主文件里是 caddy / app / ops-runner），' +
+          '再把要操作的服务名填进 .env 的 WL_ADMIN_ALLOWED_SERVICES。',
+      )
+    }
+  }
+
+  if (/permission denied.*docker|docker\.sock.*permission denied/i.test(text)) {
+    hints.push(
+      '执行器打不开 /var/run/docker.sock：宿主机 docker 组的 GID 与容器里的对不上。' +
+        '在 NAS 上执行 `getent group docker | cut -d: -f3`，把结果填进 .env 的 WL_DOCKER_GID，' +
+        '再 `docker compose --profile admin up -d ops-runner` 重建执行器。',
+    )
+  }
+
+  if (/无法连接执行器|执行器返回 \d{3}/.test(text)) {
+    hints.push(
+      '执行器没连上：确认它已启动（docker compose --profile admin up -d），' +
+        '且 .env 里的 WL_ADMIN_RUNNER_TOKEN 在 app 与 ops-runner 两边一致；' +
+        '必要时看 `docker compose logs ops-runner`。',
+    )
+  }
+
+  if (hints.length === 0) return result
+  return { ...result, stderr: `${result.stderr.trimEnd()}\n\n${hints.join('\n\n')}` }
 }
 
 /**

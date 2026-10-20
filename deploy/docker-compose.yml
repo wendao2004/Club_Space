@@ -158,9 +158,19 @@ services:
       WL_ADMIN_DOCKER_ENABLED: ${WL_ADMIN_DOCKER_ENABLED:-0}
       WL_ADMIN_COMPOSE_FILE: /compose/docker-compose.yml
       WL_ADMIN_TEMPLATES_DIR: /compose/templates
-      # 允许操作的服务白名单。**只列你确实需要从网页上启停的服务**，
-      # 尤其不要把承载这个应用自身的服务列进来（停了自己就访问不了了）。
-      WL_ADMIN_ALLOWED_SERVICES: ${WL_ADMIN_ALLOWED_SERVICES:-convert}
+      # 允许操作的服务白名单。**默认空。**
+      #
+      # 这里原来默认写的是 `convert` —— 但这份文件里**根本没有 convert 这个服务**。
+      # 转换服务定义在 deploy/heavy-tools.compose.yml（按需拉起的重任务编排），
+      # 而 ops-runner 只会执行 `docker compose -f /compose/docker-compose.yml up -d <服务>`。
+      # 于是运维页会显示"启动转换服务"，点下去必然得到 `no such service: convert`，
+      # 而界面上没有任何地方说明"这需要另一份 compose 文件 / 另一个 profile"。
+      #
+      # 本文件里只有 caddy / app / ops-runner 三个服务，而它们都不该从网页上停：
+      # 停 app 或 caddy 就失去访问入口，停 ops-runner 就失去运维页本身。
+      # 所以默认留空 —— 只有当你自己往本文件里加了别的服务、停掉也无所谓时才填。
+      # 转换服务请按 docs/部署指南.md 第 9 节在 NAS 上按需拉起。
+      WL_ADMIN_ALLOWED_SERVICES: ${WL_ADMIN_ALLOWED_SERVICES:-}
       # 可选：限制来源 IP（逗号分隔）。内网平台建议填管理员的固定 IP。
       WL_ADMIN_ALLOWED_IPS: ${WL_ADMIN_ALLOWED_IPS:-}
       WL_ADMIN_TIMEOUT_MS: ${WL_ADMIN_TIMEOUT_MS:-30000}
@@ -233,7 +243,12 @@ services:
       OPS_COMPOSE_FILE: /compose/docker-compose.yml
       OPS_TEMPLATES_DIR: /compose/templates
       # 执行器侧的服务白名单（与应用的清单保持一致，两边都要校验）
-      OPS_ALLOWED_SERVICES: ${WL_ADMIN_ALLOWED_SERVICES:-convert}
+      #
+      # 默认同样为空：执行器能跑的命令形状是固定的
+      # `docker compose -f /compose/docker-compose.yml <verb> <service>`，
+      # 白名单里放一个这份文件里不存在的服务（例如 convert），
+      # 只会让"看起来能点"的按钮必然失败。
+      OPS_ALLOWED_SERVICES: ${WL_ADMIN_ALLOWED_SERVICES:-}
     # ⚠️ 执行器里的进程以非 root 用户运行（见 ops-runner/Dockerfile 的 USER ops），
     # 而宿主机的 /var/run/docker.sock 是 root:docker 权限 0660 的 bind mount ——
     # 不把宿主机的 docker 组 GID 附加进来，进程根本打不开 socket，

@@ -713,6 +713,55 @@ onMounted(() => {
             </div>
           </div>
 
+          <!--
+            转换服务**不在这套编排里**。
+
+            这是"界面上看着有、点下去必然失败"的来源：主 compose 文件只有
+            caddy / app / ops-runner，convert 定义在 deploy/heavy-tools.compose.yml，
+            而运维页固定只操作主文件。所以这里必须把"本页做不到这件事"和
+            "该跑什么命令"直接写出来 —— 而不是等管理员点了按钮、看见
+            `no such service: convert` 再去猜自己是不是配错了。
+          -->
+          <div class="wl-card ops__hint">
+            <h3 class="ops__card-title">
+              <Icon name="alert" :size="16" />
+              转换服务不从这里启停
+            </h3>
+            <p class="ops__note">
+              「转为 PDF」依赖的转换服务（Gotenberg）单实例要 1–2GB 内存，因此被放在
+              <strong>另一份编排</strong> <code>deploy/heavy-tools.compose.yml</code> 里，
+              由管理员在 NAS 上按需拉起。本页只操作主文件
+              <code>deploy/docker-compose.yml</code> 里的服务（目前是 caddy / app / ops-runner），
+              不能跨文件启停它。
+            </p>
+            <code class="ops__argv-text selectable">docker compose -f docker-compose.yml -f heavy-tools.compose.yml --profile convert up -d convert</code>
+            <p class="ops__note">
+              停掉：把上面的 <code>up -d</code> 换成 <code>stop</code>（末尾的 <code>convert</code>
+              不能省，否则会连整站一起停）。拉起后还要在 <code>.env</code> 里设置
+              <code>WL_CONVERT_SERVICE_URL=http://wl-convert:3000</code>，并
+              <code>docker compose up -d app</code> 重建应用容器 —— 只启容器、不改这个变量，
+              工具集里仍然显示「未启用」。
+            </p>
+          </div>
+
+          <!--
+            白名单为空时下拉框里一个选项都没有。不解释的话，管理员会以为界面坏了。
+            默认空是刻意的，理由见 deploy/docker-compose.yml 里那段注释。
+          -->
+          <div v-if="opsInfo && allowedServices.length === 0" class="wl-card ops__hint">
+            <h3 class="ops__card-title">
+              <Icon name="tools" :size="16" />
+              当前没有可从网页启停的服务
+            </h3>
+            <p class="ops__note">
+              <code>WL_ADMIN_ALLOWED_SERVICES</code> 为空（默认值），所以下面「启动/停止/重启/查看日志」
+              的服务下拉是空的。这不是故障：主文件里只有 caddy / app / ops-runner，
+              停掉其中任何一个你都会失去访问入口或这个页面本身。
+              只有当你在主文件里另加了服务、且停掉也无所谓时，才需要把它的服务名填进
+              <code>deploy/.env</code> 并 <code>docker compose up -d app</code>。
+            </p>
+          </div>
+
           <div v-if="opsLoading && !opsInfo" class="wl-empty">
             <span class="wl-spinner" />
             <span>正在加载操作清单</span>
@@ -1151,6 +1200,14 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+/* 说明卡片（转换服务不在此页 / 白名单为空）：和操作卡片同宽同内边距 */
+.ops__hint {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   padding: var(--space-4);
 }
 

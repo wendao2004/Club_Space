@@ -1943,13 +1943,15 @@ const externalTools: ToolDef[] = [
         : {
             available: false,
             reason:
-              '转换服务未启用。它需要 LibreOffice，单实例内存 1-2GB，在 NAS 上按需拉起而不是常驻。部署时配置 WL_CONVERT_SERVICE_URL 后这里会自动可用。',
+              '转换服务未启用（没有配置 WL_CONVERT_SERVICE_URL）。它需要 LibreOffice，单实例内存 1-2GB，' +
+              '在 NAS 上按需拉起而不是常驻：管理员按 docs/部署指南.md 第 9 节部署并配置地址后，这里会自动变成可用。',
           },
   },
   {
     id: 'media.transcode',
     name: '视频转码 / 压缩',
-    description: '服务端 ffmpeg 处理：改分辨率、改码率、换封装。不做浏览器端多轨实时剪辑（NAS 硬件撑不住）。',
+    description:
+      '（规划中，尚未接入）服务端 ffmpeg 处理：改分辨率、改码率、换封装。不做浏览器端多轨实时剪辑（NAS 硬件撑不住）。',
     category: 'media',
     accepts: ['video/', 'audio/'],
     minInputs: 1,
@@ -1969,14 +1971,25 @@ const externalTools: ToolDef[] = [
       },
     ],
     kind: 'external',
-    availability: () =>
-      CONVERT_SERVICE_URL
-        ? { available: true }
-        : {
-            available: false,
-            reason:
-              '转码服务未启用。ffmpeg 转码会吃满 CPU 并与 NAS 自身的存储服务抢 IO，设计上按需拉起、用完即停。部署时配置后自动可用。',
-          },
+    /**
+     * ⚠️ 这里的可用性**不能**看 CONVERT_SERVICE_URL。
+     *
+     * 转换服务（Gotenberg）只提供 /forms/libreoffice/convert 这一条文档转换路由，
+     * 里面没有 ffmpeg，也没有视频相关的接口 —— 配了地址也变不出转码能力。
+     * 早先这里和「转为 PDF」共用同一个判断，于是只要配了地址，界面上就把
+     * 「视频转码」显示成可用，点下去一路走到 runExternalJob 才 501。
+     * 从用户视角这就是骗人：可以点的按钮就该真的能干活。
+     *
+     * 所以现在**无条件**返回不可用，并把状态说清楚（规划中 / 尚未实现），
+     * 而不是让用户以为是自己配错了地址。等真的接了 ffmpeg 服务再改成
+     * 按那个独立服务的地址判断。
+     */
+    availability: () => ({
+      available: false,
+      reason:
+        '规划中：视频转码还没有服务端实现。配置 WL_CONVERT_SERVICE_URL 也不会让它变可用 —— ' +
+        '那个地址接的是只做文档转换的 Gotenberg，没有 ffmpeg。需要压缩视频请先用本地工具处理。',
+    }),
   },
 ]
 
@@ -2360,8 +2373,11 @@ async function runExternalJob(
     return
   }
 
-  // 其余 external 工具（视频转码）还没有服务端实现。
-  // 明确报"没有实现"，而不是丢一个看不懂的超时 —— 后者会被当成网络问题排查半天。
+  // 其余 external 工具还没有服务端实现（视频转码就是这一类）。
+  // 正常情况下走不到这里：它们的 availability() 已经无条件返回不可用，
+  // 提交阶段就会被 503 挡掉。留这条是为了万一有人新增了一个 external 工具
+  // 却忘了实现 —— 那时宁可明确报"没有实现"，也不要丢一个看不懂的超时，
+  // 后者会被当成网络问题排查半天。
   throw new HttpError(501, `「${tool.name}」还没有可用的服务端实现（当前只实现了「转为 PDF」）`)
 }
 
@@ -2438,10 +2454,16 @@ async function runDocToPdf(
       signal: AbortSignal.timeout(CONVERT_TIMEOUT_MS),
     })
   } catch (err) {
-    // 连不上和转换失败要分开报：前者是部署问题，后者是文件问题
+    // 连不上和转换失败要分开报：前者是部署问题，后者是文件问题。
+    //
+    // 这里同时给出"下一步该跑什么"：配置了地址但容器没起来，是这条链路最常见
+    // 的故障（转换服务按需拉起、用完就停），而原始报错只有一个 fetch failed。
     throw new HttpError(
       502,
-      `连不上转换服务（${CONVERT_SERVICE_URL}）：${err instanceof Error ? err.message : String(err)}`,
+      `连不上转换服务（${CONVERT_SERVICE_URL}）：${err instanceof Error ? err.message : String(err)}。` +
+        '若使用 deploy/heavy-tools.compose.yml，请先在 NAS 的 deploy 目录执行 ' +
+        'docker compose -f docker-compose.yml -f heavy-tools.compose.yml --profile convert up -d convert，' +
+        '并确认 .env 里 WL_CONVERT_SERVICE_URL=http://wl-convert:3000。',
     )
   }
 

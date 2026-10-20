@@ -11,6 +11,7 @@
  * 用法：node scripts/admin-test.mjs
  */
 
+import { readFileSync } from 'node:fs'
 import {
   AdminError,
   assertNoShell,
@@ -21,6 +22,43 @@ import {
   loadAdminConfig,
 } from '../server/src/admin/docker.ts'
 import { generateSecret, totpAt } from '../server/src/admin/totp.ts'
+
+/**
+ * 取 compose 文件里 `services:` 下第一层的键。
+ *
+ * 故意手写而不是引入 YAML 库：这里只需要"服务名列表"，而且开发机没有 Docker
+ * 也没有 YAML 依赖。缩进规则是 compose 文件自己保证的（两个空格一层）。
+ */
+function serviceNames(yaml) {
+  const names = []
+  let inside = false
+  for (const line of yaml.split(/\r?\n/)) {
+    if (/^services:\s*$/.test(line)) {
+      inside = true
+      continue
+    }
+    if (!inside) continue
+    if (line.trim() !== '' && /^\S/.test(line)) break // 回到顶格的顶层键，services 段结束
+    const match = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line)
+    if (match) names.push(match[1])
+  }
+  return names
+}
+
+/** 取某个 service 的整段文本（到下一个两空格键或顶层键为止）。 */
+function sectionOf(yaml, name) {
+  const lines = yaml.split(/\r?\n/)
+  const start = lines.findIndex((line) => new RegExp(`^ {2}${name}:\\s*$`).test(line))
+  if (start < 0) return ''
+  const out = [lines[start]]
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (/^ {2}[A-Za-z0-9_-]+:\s*$/.test(line)) break
+    if (line.trim() !== '' && /^\S/.test(line)) break
+    out.push(line)
+  }
+  return out.join('\n')
+}
 
 let passed = 0
 let failed = 0
@@ -78,7 +116,15 @@ async function main() {
 
   const defaults = loadAdminConfig({})
   assert(!defaults.enabled, '默认不启用（不会留一个默认可用的后门）')
-  assert(defaults.allowedServices.length > 0, '默认服务白名单非空', defaults.allowedServices.join(','))
+  // 回归：默认白名单里曾经写着 'convert'，而主 compose 文件里根本没有这个服务 ——
+  // 于是运维页显示"启动转换服务"，点下去必然 no such service。
+  // 现在默认是空的：宁可界面上没有这个按钮，也不要给一个必然失败的按钮。
+  assert(
+    !defaults.allowedServices.includes('convert'),
+    '默认白名单里没有 convert（它不在主 compose 文件里）',
+    defaults.allowedServices.join(',') || '（空）',
+  )
+  eq(defaults.allowedServices.length, 0, '默认不提供任何可从网页启停的服务')
   assert(
     !('totpSecret' in defaults),
     '配置里没有"服务器级 TOTP 秘密"——每个管理员各自绑定自己的（见下方门禁测试）',
@@ -376,7 +422,11 @@ async function main() {
   })
   const failedOp = await executeOperation({ runner: failing, config }, "start", { service: "app" })
   eq(failedOp.result.code, 1, '命令失败时把退出码原样返回（由上层记录审计并告知用户）')
-  eq(failedOp.result.stderr, "Error: No such service", '错误信息保留，便于用户看到真实原因')
+  assert(
+    failedOp.result.stderr.startsWith('Error: No such service'),
+    '原始错误信息保留在最前面（不藏掉 docker 的原话，便于排查）',
+    failedOp.result.stderr.slice(0, 60),
+  )
 
   const timingOut = async () => ({
     code: -1,
@@ -386,6 +436,149 @@ async function main() {
   })
   const timedOut = await executeOperation({ runner: timingOut, config }, 'start', { service: 'app' })
   assert(timedOut.result.timedOut, '超时的情况被标记出来')
+  assert(timedOut.result.stderr === '', '超时不硬塞说明（那时没有任何真实错误可引用）')
+
+  // ================================================================
+  console.log('\n【失败信息要能指导下一步】')
+
+  // 「服务不存在」是最常见的失败：白名单是管理员手填的，填错了只回一句
+  // `no such service` 等于把排查工作全丢给用户。
+  const noSuchConvert = await executeOperation(
+    {
+      runner: async () => ({ code: 1, stdout: '', stderr: 'no such service: convert', timedOut: false }),
+      config,
+    },
+    'start',
+    { service: 'convert' },
+  )
+  assert(
+    noSuchConvert.result.stderr.includes('heavy-tools.compose.yml') &&
+      noSuchConvert.result.stderr.includes('--profile convert up -d convert'),
+    'convert 不存在时，错误里直接给出该跑的命令（而不是只说 No such service）',
+    noSuchConvert.result.stderr.split('\n')[2] ?? '',
+  )
+
+  const noSuchOther = await executeOperation(
+    {
+      runner: async () => ({ code: 1, stdout: '', stderr: 'no such service: nginx', timedOut: false }),
+      // nginx 必须在白名单里，否则命令根本构造不出来（会先被 403 挡住），
+      // 也就走不到"服务不存在"这条失败路径上。
+      config: makeConfig({ allowedServices: [...config.allowedServices, 'nginx'] }),
+    },
+    'stop',
+    { service: 'nginx' },
+  )
+  assert(
+    noSuchOther.result.stderr.includes('查看服务清单'),
+    '其它服务不存在时，提示先查服务清单再填白名单',
+  )
+
+  const permissionDenied = await executeOperation(
+    {
+      runner: async () => ({
+        code: 1,
+        stdout: '',
+        stderr: 'permission denied while trying to connect to the Docker daemon socket',
+        timedOut: false,
+      }),
+      config,
+    },
+    'ps',
+    {},
+  )
+  assert(
+    permissionDenied.result.stderr.includes('WL_DOCKER_GID'),
+    'docker.sock 权限不足时，提示去改 WL_DOCKER_GID（而不是让用户以为是平台 bug）',
+  )
+
+  const runnerDown = await executeOperation(
+    {
+      runner: async () => ({ code: -1, stdout: '', stderr: '无法连接执行器：fetch failed', timedOut: false }),
+      config,
+    },
+    'ps',
+    {},
+  )
+  assert(
+    runnerDown.result.stderr.includes('--profile admin up -d'),
+    '执行器连不上时，提示怎么把 ops-runner 起起来',
+  )
+
+  const okResult = await executeOperation({ runner: makeRecorder().runner, config }, 'ps', {})
+  assert(
+    okResult.result.stderr === '' && okResult.result.stdout === 'ok',
+    '成功的命令不追加任何说明（不污染正常输出）',
+    JSON.stringify({ stdout: okResult.result.stdout, stderr: okResult.result.stderr }),
+  )
+
+  // 服务名不在白名单、且这个名字恰好是 convert 时，403 里也要有可执行的下一步
+  let convertMsg = ''
+  try {
+    await executeOperation({ runner: makeRecorder().runner, config: makeConfig({ allowedServices: [] }) }, 'start', {
+      service: 'convert',
+    })
+  } catch (err) {
+    convertMsg = err instanceof Error ? err.message : ''
+  }
+  assert(
+    convertMsg.includes('heavy-tools.compose.yml') && convertMsg.includes('--profile convert up -d convert'),
+    'convert 被白名单拒掉时，说明它在另一份编排里并给出命令',
+    convertMsg.slice(0, 90),
+  )
+
+  // ================================================================
+  console.log('\n【静态一致性：白名单 / compose 文件 / env 传递】')
+
+  // 没有 Docker 的环境也能查的东西：白名单里的名字必须在这份 compose 文件里真实存在，
+  // 否则就是"界面上看着有、点下去必然失败"。这里用最朴素的缩进解析，
+  // 不引入 YAML 依赖 —— 我们要的只是 services: 下第一层的键。
+  const mainCompose = readFileSync(new URL('../deploy/docker-compose.yml', import.meta.url), 'utf8')
+  const heavyCompose = readFileSync(new URL('../deploy/heavy-tools.compose.yml', import.meta.url), 'utf8')
+  const mainServices = serviceNames(mainCompose)
+  const heavyServices = serviceNames(heavyCompose)
+
+  assert(
+    mainServices.includes('caddy') && mainServices.includes('app') && mainServices.includes('ops-runner'),
+    '主 compose 的服务名解析正确（caddy / app / ops-runner）',
+    mainServices.join(', '),
+  )
+  assert(
+    !mainServices.includes('convert'),
+    '主 compose 里确实没有 convert（这就是"启动转换服务"必然失败的原因）',
+    mainServices.join(', '),
+  )
+  assert(heavyServices.includes('convert'), 'heavy-tools.compose.yml 里有 convert', heavyServices.join(', '))
+  assert(
+    /profiles:\s*\[\s*"convert"\s*\]/.test(heavyCompose),
+    'convert 在 convert profile 下（默认不会随 up -d 起来）',
+  )
+
+  const appSection = sectionOf(mainCompose, 'app')
+  const opsSection = sectionOf(mainCompose, 'ops-runner')
+  assert(
+    /WL_ADMIN_ALLOWED_SERVICES:\s*\$\{WL_ADMIN_ALLOWED_SERVICES:-\}/.test(appSection),
+    'app 把 WL_ADMIN_ALLOWED_SERVICES 透传给后端，且默认值为空',
+  )
+  assert(
+    /OPS_ALLOWED_SERVICES:\s*\$\{WL_ADMIN_ALLOWED_SERVICES:-\}/.test(opsSection),
+    '执行器与后端共用同一个白名单变量（两边都要校验）',
+  )
+  assert(
+    /\.\/docker-compose\.yml:\/compose\/docker-compose\.yml:ro/.test(opsSection) &&
+      /\.\/\.env:\/compose\/\.env:ro/.test(opsSection),
+    '执行器挂载了主 compose 文件与 .env（否则 compose 变量插值会在启动前就退出）',
+  )
+  assert(/group_add:/.test(opsSection) && /WL_DOCKER_GID/.test(opsSection), '执行器附带了 docker 组 GID')
+
+  // 默认白名单里的每个名字都必须在这份 compose 文件里 —— 这是本轮修复的核心断言。
+  // 现在默认为空，所以"空集 ⊆ 任何集合"必然成立；一旦有人把 convert 加回默认值，
+  // 这里会立刻炸出来。
+  const undeclared = defaults.allowedServices.filter((name) => !mainServices.includes(name))
+  assert(
+    undeclared.length === 0,
+    '默认白名单里的服务名全部在主 compose 里存在',
+    undeclared.length ? `多出来的：${undeclared.join(', ')}` : '（白名单为空）',
+  )
 
   // ================================================================
   console.log(
