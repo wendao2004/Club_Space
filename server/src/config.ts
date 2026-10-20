@@ -73,6 +73,16 @@ export const MAX_UPLOAD_BYTES = envInt('WL_MAX_UPLOAD_BYTES', 0)
  */
 export const MIN_FREE_BYTES = envInt('WL_MIN_FREE_BYTES', 2 * 1024 * 1024 * 1024)
 
+/**
+ * 健康检查判定"磁盘告急"的底线。
+ *
+ * 与上面的 MIN_FREE_BYTES 刻意分开、而且低得多：那个是"允许开始一次上传"的
+ * 门槛（默认 2GB，留足一次大文件上传的空间），这里是"服务已经写不下了"。
+ * 用同一个数字会让健康检查在磁盘还有 1.9GB 时就报红 —— 报得太早的红灯，
+ * 大家两天就学会忽略了，而那正是健康检查要避免的命运。
+ */
+export const HEALTH_MIN_FREE_BYTES = envInt('WL_HEALTH_MIN_FREE_BYTES', 256 * 1024 * 1024)
+
 /** 会话有效期（天）。 */
 export const SESSION_DAYS = envInt('WL_SESSION_DAYS', 30)
 

@@ -75,6 +75,16 @@ const ONLINE_TESTS = [
   // 登不进去。这个测试用 node:http 的 localAddress 从 127.0.0.x 发请求，
   // 真的模拟多个源 IP —— 普通 fetch 做不到这件事，所有请求都来自 127.0.0.1。
   { name: 'totp-ratelimit-test', label: '两步登录限流（按 IP / 按账号分桶）' },
+  // 健康检查原来恒返回 ok:true，等于装了个永远不响的报警器。
+  // 这个测试要读服务端的库去伪造一条坏审计记录，所以需要数据目录。
+  { name: 'health-test', label: '健康检查（写探针 / 磁盘 / 增量审计链）', passDataDir: true },
+  {
+    name: 'health-degraded-test',
+    label: '健康检查（磁盘告急时必须 503）',
+    // 把底线设成 1 PiB —— 大于任何真实磁盘，于是"磁盘不足"这条路必然触发。
+    // 断言因此是确定性的，不依赖测试机还剩多少空间。
+    serverEnv: { WL_HEALTH_MIN_FREE_BYTES: String(1024 ** 5) },
+  },
   { name: 'image-tools-test', label: '图片工具（格式/缩放/压缩）' },
   { name: 'tools-extra-test', label: '工具集扩展（PDF/图片/文本/抽签）' },
   { name: 'chat-test', label: '聊天（含 SSE 实时推送）' },
@@ -184,8 +194,10 @@ async function startServer(extraEnv = {}) {
   for (let i = 0; i < 40; i++) {
     await sleep(250)
     try {
-      const res = await fetch(`http://127.0.0.1:${TEST_PORT}/api/health`)
-      if (res.ok) return child
+      // 只要能拿到响应就说明在监听了。**不能用 `res.ok` 判断** ——
+      // health-degraded-test 会故意让服务端返回 503，那种情况同样是"已就绪"。
+      await fetch(`http://127.0.0.1:${TEST_PORT}/api/health`)
+      return child
     } catch {
       // 还没起来
     }

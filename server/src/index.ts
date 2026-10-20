@@ -9,6 +9,7 @@ import cookie from '@fastify/cookie'
 import fastifyStatic from '@fastify/static'
 import Fastify, { type FastifyError, type FastifyRequest } from 'fastify'
 import { existsSync } from 'node:fs'
+import { statfs } from 'node:fs/promises'
 import { ZodError, z } from 'zod'
 import {
   createInvite,
@@ -39,7 +40,14 @@ import {
   type Role,
   type User,
 } from './auth.ts'
-import { audit, chainHead, exportAudit, isAuditHealthy, verifyChain } from './audit.ts'
+import {
+  audit,
+  chainHead,
+  exportAudit,
+  isAuditHealthy,
+  verifyChain,
+  warmAuditChain,
+} from './audit.ts'
 import {
   conversationMembers,
   createGroup,
@@ -60,7 +68,14 @@ import {
   sendMessage,
   totalUnread,
 } from './chat.ts'
-import { pushTo, broadcast, realtimeStats, subscribe, connectedUserIds } from './realtime.ts'
+import {
+  pushTo,
+  broadcast,
+  realtimeStats,
+  subscribe,
+  connectedUserIds,
+  disconnectAll,
+} from './realtime.ts'
 import { RATE_RULES, checkRateLimit, clearRateLimit, rateLimitStats } from './ratelimit.ts'
 import {
   AdminError,
@@ -172,8 +187,10 @@ import {
   updateLoan,
   voidLoan,
 } from './assets.ts'
-import { getDb, now } from './db.ts'
+import { getDb, closeDb, now } from './db.ts'
 import {
+  DATA_DIR,
+  HEALTH_MIN_FREE_BYTES,
   HOST,
   IS_PROD,
   MAX_UPLOAD_BYTES,
@@ -364,44 +381,150 @@ app.setErrorHandler((err: FastifyError, req, reply) => {
  * 于是任何人（连账号都不需要）并发打这个端点就能把容器 CPU 打满，
  * 而 Docker 的 HEALTHCHECK 每 30 秒也会打它一次。
  *
- * 现在：全链校验的结果按时间缓存（默认 60 秒），健康检查只读缓存。
- * 管理员仍可随时在管理页触发一次真实校验（那个接口要登录）。
+ * 现在分三层：
+ *   1. 链校验走**增量**（只验上次之后新增的几十条），结果再缓存 60 秒；
+ *   2. 数据库写探针也缓存 60 秒 —— 每 30 秒真写两次会让 WAL 无谓地长；
+ *   3. 磁盘余量每次都查（statfs 是内存里的系统调用，几乎不要钱）。
+ *
+ * 还有一条更重要的原则：**健康检查必须能失败**。它原来恒定返回 `ok: true`，
+ * 于是"数据库属主被改、写不进任何东西"这种情况在监控上完全看不出来 ——
+ * 一个永远说 ok 的检查比没有检查更糟，因为它让人放弃了警惕。
  */
-let chainCheckCache: { at: number; result: ReturnType<typeof verifyChain> } | null = null
-const CHAIN_CHECK_TTL_MS = 60_000
+type Probe = { ok: boolean; detail?: string }
 
-function cachedChainCheck(): ReturnType<typeof verifyChain> {
-  const now = Date.now()
-  if (chainCheckCache && now - chainCheckCache.at < CHAIN_CHECK_TTL_MS) {
-    return chainCheckCache.result
+/**
+ * 数据库可写探针。
+ *
+ * 做法是往 settings 写一个探针键再删掉，而不是 `SELECT 1`：
+ * 只读的库能通过任何查询，却会在第一次 INSERT 时炸掉 —— 而"能读不能写"
+ * 正是最常见的故障形态（属主改错、磁盘只读重挂、inode 耗尽）。
+ * 用 settings 而不是新建一张表，是因为这张表本来就存在且极小，
+ * 探针键用完即删，不留痕迹。
+ */
+let dbProbeCache: { at: number; result: Probe } | null = null
+const DB_PROBE_TTL_MS = 60_000
+
+function cachedDbProbe(): Probe {
+  const at = Date.now()
+  if (dbProbeCache && at - dbProbeCache.at < DB_PROBE_TTL_MS) return dbProbeCache.result
+
+  let result: Probe
+  try {
+    const db = getDb()
+    db.prepare(
+      `INSERT INTO settings (key, value, updated_at) VALUES ('health.probe', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).run(String(at), at)
+    db.prepare("DELETE FROM settings WHERE key = 'health.probe'").run()
+    result = { ok: true }
+  } catch (err) {
+    result = { ok: false, detail: err instanceof Error ? err.message : String(err) }
   }
-  const result = verifyChain()
-  chainCheckCache = { at: now, result }
+  dbProbeCache = { at, result }
   return result
 }
 
-app.get('/api/health', async () => {
-  const chain = cachedChainCheck()
+/**
+ * 磁盘余量。
+ *
+ * 阈值（`HEALTH_MIN_FREE_BYTES`，默认 256MB）刻意比上传守卫的
+ * `MIN_FREE_BYTES`（默认 2GB）低得多，理由见 config.ts 的说明。
+ */
+async function probeDisk(): Promise<{
+  ok: boolean
+  freeBytes: number
+  totalBytes: number
+  minFreeBytes: number
+  detail?: string
+}> {
+  try {
+    const s = await statfs(DATA_DIR)
+    const freeBytes = Number(s.bavail) * Number(s.bsize)
+    const totalBytes = Number(s.blocks) * Number(s.bsize)
+    return {
+      ok: freeBytes >= HEALTH_MIN_FREE_BYTES,
+      freeBytes,
+      totalBytes,
+      minFreeBytes: HEALTH_MIN_FREE_BYTES,
+      detail:
+        freeBytes >= HEALTH_MIN_FREE_BYTES
+          ? undefined
+          : `剩余 ${Math.round(freeBytes / 1024 / 1024)}MB，低于底线 ${Math.round(HEALTH_MIN_FREE_BYTES / 1024 / 1024)}MB`,
+    }
+  } catch (err) {
+    // 查不到不等于磁盘满了。不因此判红，但要如实报出来（detail 里有原因）。
+    return {
+      ok: true,
+      freeBytes: -1,
+      totalBytes: -1,
+      minFreeBytes: HEALTH_MIN_FREE_BYTES,
+      detail: `读取磁盘余量失败：${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+}
+
+app.get('/api/health', async (_req, reply) => {
+  // 每次探活都做**增量**校验，不缓存结果。
+  //
+  // 为什么不缓存：增量在稳态下是"0 行"（基准已经追到链头），成本只有一次
+  // MAX(seq) 和一次区间查询，都是索引命中、微秒级；而缓存会让响应里的
+  // `records` / `chainOk` 滞后 —— 一个"看起来在监控、其实在看 60 秒前的旧值"
+  // 的健康检查，正是这个接口原来最大的问题。
+  //
+  // 真正需要避免的是"每次写一行基准"，那个在 audit.ts 里按"有没有新行"条件化了。
+  const chain = verifyChain({ incremental: true })
+  const dbProbe = cachedDbProbe()
+  const disk = await probeDisk()
+
+  // HTTP 状态只跟"现在能不能正常读写"走：数据库不可写、磁盘写不下 → 503。
+  //
+  // 审计链异常**故意不**让它变 503。理由：重启修不好一条断掉的哈希链，
+  // 而 Docker 会把 503 当成"容器坏了"反复重启 —— 结果是真正的线索（链在哪
+  // 一条断的）被重启日志淹没。链的状态照样在响应体里如实给出（chainOk），
+  // 管理页和监控都能看见。
+  const ok = dbProbe.ok && disk.ok
+  const degraded = !chain.ok || !isAuditHealthy()
+
+  if (!ok) reply.code(503)
+
   return {
-    ok: true,
-    audit: { healthy: isAuditHealthy(), chainOk: chain.ok, records: chain.checked },
+    ok,
+    status: ok ? (degraded ? 'degraded' : 'ok') : 'unhealthy',
+    audit: {
+      healthy: isAuditHealthy(),
+      chainOk: chain.ok,
+      /** 链上的总条数（不是本次重算的条数）。 */
+      records: chain.total,
+      /** 本次探活实际重算了几行（稳态下是 0，说明没有重复全表扫描）。 */
+      checked: chain.checked,
+      verifiedUpto: chain.upto,
+      incremental: chain.incremental,
+      reason: chain.reason,
+    },
+    db: dbProbe,
+    disk,
     realtime: realtimeStats(),
     rateLimit: rateLimitStats(),
     time: Date.now(),
   }
 })
 
-/** 管理页的"校验审计链"走这个，它每次都是真实计算（要登录，且管理员主动触发）。 */
+/**
+ * 管理页的"校验审计链"走这个：**每次都是全量真实计算**（要登录，管理员主动触发）。
+ *
+ * 这是增量校验的对照面。探活走增量是为了便宜，代价是"历史被整体改写"
+ * 检测不到（只从基准往后看）；管理员点这个按钮、以及进程启动时的预热，
+ * 都是从 seq=1 重算一遍，那才能发现历史层的问题。
+ */
 app.get('/api/admin/audit/verify', async (req) => {
   const user = requireRole(req, 'admin')
   const result = verifyChain()
-  chainCheckCache = { at: Date.now(), result }
   audit({
     actorId: user.id,
     actorIp: actorIp(req),
     category: 'admin',
     action: 'verify-audit-chain',
-    payload: { ok: result.ok, checked: result.checked },
+    payload: { ok: result.ok, checked: result.checked, total: result.total },
   })
   return result
 })
@@ -1168,12 +1291,14 @@ app.get('/api/admin/overview', async (req) => {
   const invites = getDb()
     .prepare('SELECT code, role, max_uses, uses, expires_at, created_at, note FROM invites ORDER BY created_at DESC')
     .all() as Array<Record<string, unknown>>
-  const chain = verifyChain()
+  // 用增量校验，不在这里跑全量：概览页会被反复打开，每次全量重算几十万行
+  // 是不必要的。要全量请用 /api/admin/audit/verify。
+  const chain = verifyChain({ incremental: true })
   return {
     stats,
     users,
     invites,
-    audit: { records: chain.checked, chainOk: chain.ok, head: chainHead() },
+    audit: { records: chain.total, chainOk: chain.ok, head: chainHead() },
     canManage: roleAtLeast(user.role, 'admin'),
     // 存储一致性自检。
     // 这个函数原本写了却从没被调用（等于装了报警器没接电源）——
@@ -3583,3 +3708,62 @@ try {
   app.log.error(err)
   process.exit(1)
 }
+
+/**
+ * 后台预热审计链校验。
+ *
+ * 刻意不 `await`：第一次（settings 里还没有基准）是全量，几十万行要几百毫秒，
+ * 放在监听之前会拖慢启动；放在监听之后但不 await，第一个探活请求就不会撞上它。
+ * 之后每个进程启动都只是增量（基准存在库里），基本是毫秒级。
+ */
+warmAuditChain()
+
+/**
+ * 优雅退出。
+ *
+ * 之前完全没有信号处理，于是 `docker compose down` / 升级重启时进程是被
+ * SIGTERM 直接打断的：SQLite 的 WAL 没机会 checkpoint（下次启动要重放），
+ * 正在跑的任务状态停在 running（虽然 startJobRunner 的恢复逻辑能兜住，
+ * 但那是"下次启动才修"，不是"这次收干净"）。
+ *
+ * **顺序很重要**：先关 SSE，再 app.close()。SSE 是长活连接，Fastify 的
+ * close 会等所有在途连接自然结束 —— 不先断开，这里会一直挂到编排层
+ * SIGKILL，等于什么都没做。
+ */
+let shuttingDown = false
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return
+  shuttingDown = true
+  // eslint-disable-next-line no-console
+  console.log(`\n  收到 ${signal}，正在退出…`)
+
+  // 兜底：无论下面卡在哪一步，5 秒后强制退出（Docker 默认 10 秒后 SIGKILL）。
+  // unref 让这个定时器本身不阻止进程退出。
+  setTimeout(() => process.exit(1), 5000).unref?.()
+
+  try {
+    const closed = disconnectAll()
+    if (closed > 0) console.log(`    已关闭 ${closed} 条实时连接`)
+  } catch (err) {
+    app.log.error({ err }, '关闭实时连接失败')
+  }
+  try {
+    await app.close()
+  } catch (err) {
+    app.log.error({ err }, '关闭 HTTP 服务失败')
+  }
+  try {
+    closeDb()
+  } catch (err) {
+    app.log.error({ err }, '关闭数据库失败')
+  }
+  process.exit(0)
+}
+
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM')
+})
+process.on('SIGINT', () => {
+  void shutdown('SIGINT')
+})
