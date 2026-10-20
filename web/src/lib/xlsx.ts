@@ -215,7 +215,10 @@ export function displayValue(value: CellVal): string {
   if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
   if (value instanceof Date) return dateText(value)
 
-  const obj = value as Record<string, unknown>
+  // 这里 value 是 exceljs 的 CellErrorValue / CellRichTextValue / CellFormulaValue 等
+  // 联合类型里剩下的那几支，它们没有共同的索引签名，直接转 Record 会被 TS 拦下。
+  // 只看 formula / sharedFormula / result 三个可选字段，用 unknown 中转是安全的。
+  const obj = value as unknown as Record<string, unknown>
   // 公式：文件里可能同时存着上次算出的结果，有就显示结果，
   // 没有（我们刚写进去的公式）就显示公式本身 —— 显示成空会让人以为格子坏了
   if (typeof obj.formula === 'string') {

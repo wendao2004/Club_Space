@@ -74,8 +74,11 @@ export function detectDelimiter(text: string): string {
     const counts = sample.map((line) => countOutsideQuotes(line, delimiter))
     const nonZero = counts.filter((c) => c > 0)
     if (nonZero.length === 0) continue
-    const consistent = nonZero.every((c) => c === nonZero[0])
-    const score = nonZero[0] * (consistent ? 10 : 1)
+    // 取第一个非零计数做基准：`nonZero[0]` 在 noUncheckedIndexedAccess 下是
+    // `number | undefined`（上面的 length 检查 TS 不认），所以显式兜一个 0。
+    const base = nonZero[0] ?? 0
+    const consistent = nonZero.every((c) => c === base)
+    const score = base * (consistent ? 10 : 1)
     if (score > bestScore) {
       bestScore = score
       best = delimiter

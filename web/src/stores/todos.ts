@@ -20,11 +20,15 @@
  *    失败就弹一个 toast，把人从正在做的事里打断。
  */
 import { defineStore } from 'pinia'
-import { api, ApiError, type TodoPayload } from '@/api'
+import { api, ApiError, type TodoBucket, type TodoPayload } from '@/api'
 import { useAuth } from '@/stores/auth'
 import { useRealtime } from '@/stores/realtime'
 
 // 类型定义在 api.ts（HTTP 契约都在那里），这里转出去，组件不必知道该从哪 import。
+//
+// ⚠️ 注意 `export type { X } from` 只做转发，**不把 X 引入本文件作用域** ——
+// 下面的 emptyBucket() 还要用它，所以必须另外 import 一次（这里就是这么来的：
+// 一度只有 export type，于是 `function emptyBucket(): TodoBucket` 报 TS2304）。
 export type { TodoBucket, LedgerTodo, AssetsTodo, TodoPayload } from '@/api'
 
 function emptyBucket(): TodoBucket {

@@ -621,8 +621,10 @@ function withPStyle(pPrXml: string, val: string | null): string {
     return pPrXml ? pPrXml.replace(pattern, '') : ''
   }
   if (pattern.test(pPrXml)) return pPrXml.replace(pattern, tag)
-  const open = /^(<w:pPr\b[^>]*>)/.exec(pPrXml)
-  if (open) return pPrXml.replace(open[1], `${open[1]}${tag}`)
+  // 正则里确实有捕获组，但 `open[1]` 在 noUncheckedIndexedAccess 下是
+  // `string | undefined`，所以走一个显式的局部判断而不是直接把下标喂给 replace。
+  const head = /^(<w:pPr\b[^>]*>)/.exec(pPrXml)?.[1]
+  if (head) return pPrXml.replace(head, `${head}${tag}`)
   return `<w:pPr>${tag}</w:pPr>`
 }
 
@@ -631,8 +633,8 @@ function withJc(pPrXml: string, align: Exclude<ParaAlign, null>): string {
   const tag = `<w:jc w:val="${val}"/>`
   const pattern = /<w:jc\b[^>]*\/?>(?:<\/w:jc>)?/
   if (pattern.test(pPrXml)) return pPrXml.replace(pattern, tag)
-  const open = /^(<w:pPr\b[^>]*>)/.exec(pPrXml)
-  if (open) return pPrXml.replace(open[1], `${open[1]}${tag}`)
+  const head = /^(<w:pPr\b[^>]*>)/.exec(pPrXml)?.[1]
+  if (head) return pPrXml.replace(head, `${head}${tag}`)
   return `<w:pPr>${tag}</w:pPr>`
 }
 
