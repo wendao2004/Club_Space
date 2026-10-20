@@ -1,11 +1,24 @@
 /**
- * 记账 store。
+ * 记账 store —— 记账模块**唯一**的写入口。
+ *
+ * 组件（LedgerApp.vue）只管表单状态和 UI，任何一次落库都必须走这里的 action。
+ * 从前组件里还有一份并行的 `api.ledger.* + notify + reload` 写法，两边一旦
+ * 只改一边，某个入口就会悄悄不一样（不报错、只表现为"这个按钮的提示怎么变了"）。
  *
  * 三条不能违背的规则，贯穿整个文件：
  *  1. 金额永远是字符串。求和一律走整数分，绝不用浮点，否则几十笔之后账就对不上。
- *  2. 状态机由服务端说了算。任何写操作成功后都重新拉列表和统计，不做本地乐观更新 ——
- *     统计只算「已通过 / 已支付」，本地改一改就会和真实账目漂移。
- *  3. 错误不抛给组件（需要返回值的创建/更新除外），统一落到 error 并弹通知。
+ *  2. 状态机由服务端说了算。任何写操作成功后都走 reload()（列表 + 统计 + 待结算 +
+ *     活动列表 + 活动汇总），不做本地乐观更新 —— 统计只算「已通过 / 已支付」，
+ *     本地改一改就会和真实账目漂移；活动卡片的笔数/合计也只认服务端。
+ *  3. 错误的呈现分三档，别混：
+ *     - 读操作失败 → 写 this.error（列表区的"加载失败/重试"就靠它）并弹通知；
+ *     - 行内操作（提交/撤回/审批/驳回/支付/删除/结清）失败 → 只弹通知，**不写
+ *       this.error**，否则整张列表会被错误态顶掉，用户连"再试一次"的按钮都没了；
+ *     - 表单提交（createEntry/updateEntry）失败 → 不弹通知，直接抛出，由弹窗
+ *       内联展示（关掉弹窗用户填的东西就没了）。
+ *
+ *     活动类写操作（createEvent/updateEvent/closeEvent）沿用旧写法：失败时写
+ *     this.error —— 它们只在活动视图里触发，而 error 只在流水视图渲染成错误态。
  */
 import { defineStore } from 'pinia'
 import { api, ApiError } from '@/api'
@@ -115,6 +128,10 @@ export const useLedger = defineStore('ledger', {
      */
     exportUrl: (state): string => api.ledger.exportUrl(entryQuery(state.filters)),
 
+    /** 当前打开的活动明细 CSV。活动汇总页的「导出明细」用它。 */
+    eventExportUrl: (state): string =>
+      state.eventSummary ? api.ledger.eventExportUrl(state.eventSummary.event.id) : '#',
+
     /** 未归档的收入分类 */
     incomeCategories: (state): LedgerCategory[] =>
       state.categories.filter((category) => category.kind === 'income' && !category.archived),
@@ -137,23 +154,6 @@ export const useLedger = defineStore('ledger', {
   },
 
   actions: {
-    /**
-     * 把一行金额字符串转成整数分（用于本地求和）。绝不用 parseFloat。
-     * "12" → 1200，"12.5" → 1250，"12.50" → 1250，"1,234.56" → 123456。非法输入返回 0。
-     */
-    amountToCents(amount: string): number {
-      if (typeof amount !== 'string') return 0
-      // 去掉千分位分隔符与首尾空白，负数在金额里视为非法
-      const cleaned = amount.trim().replace(/,/g, '')
-      if (!/^\d+(\.\d*)?$|^\.\d+$/.test(cleaned)) return 0
-      const [wholeRaw = '0', fractionRaw = ''] = cleaned.split('.')
-      const whole = wholeRaw === '' ? 0 : Number(wholeRaw)
-      if (!Number.isSafeInteger(whole)) return 0
-      // 小数部分补齐/截断到两位，得到整数分
-      const fraction = Number(`${fractionRaw}00`.slice(0, 2))
-      return whole * 100 + fraction
-    },
-
     async loadCategories(includeArchived = false): Promise<void> {
       this.loading = true
       this.error = null
@@ -317,59 +317,50 @@ export const useLedger = defineStore('ledger', {
       if (this.eventSummary) await this.loadEventSummary(this.eventSummary.event.id)
     },
 
+    /**
+     * 新建账目。
+     *
+     * 失败时**抛出**、且不弹通知：调用方是编辑弹窗，错误要内联显示在表单里
+     * （弹窗一关，用户刚填的一整页都没了 —— 拿弹窗去换一个 3 秒就消失的 toast 不值）。
+     */
     async createEntry(input: LedgerEntryInput): Promise<LedgerEntry> {
       this.saving = true
-      this.error = null
       try {
         const { entry } = await api.ledger.createEntry(input)
-        useUi().notify('success', '账目已创建', entry.title)
-        await this.loadEntries()
-        await this.loadSummary()
-        // 正在看某个活动的汇总时，顺手把它刷新，免得列表变了汇总还是旧的
-        if (this.eventSummary) await this.loadEventSummary(this.eventSummary.event.id)
+        useUi().notify('success', '已创建')
+        await this.reload()
         return entry
-      } catch (err) {
-        const message = describe(err)
-        this.error = message
-        useUi().notify('error', '创建账目失败', message)
-        throw err
       } finally {
         this.saving = false
       }
     },
 
+    /** 编辑账目。失败语义同 createEntry。 */
     async updateEntry(id: string, input: Partial<LedgerEntryInput>): Promise<LedgerEntry> {
       this.saving = true
-      this.error = null
       try {
         const { entry } = await api.ledger.updateEntry(id, input)
-        useUi().notify('success', '账目已更新', entry.title)
-        await this.loadEntries()
-        await this.loadSummary()
-        if (this.eventSummary) await this.loadEventSummary(this.eventSummary.event.id)
+        useUi().notify('success', '已保存')
+        await this.reload()
         return entry
-      } catch (err) {
-        const message = describe(err)
-        this.error = message
-        useUi().notify('error', '更新账目失败', message)
-        throw err
       } finally {
         this.saving = false
       }
     },
 
-    async deleteEntry(id: string): Promise<void> {
+    /**
+     * 删除账目。返回是否成功 —— 调用方要拿它决定"关掉详情面板"还是"留在原地再试"。
+     */
+    async deleteEntry(id: string): Promise<boolean> {
       this.saving = true
-      this.error = null
       try {
         await api.ledger.deleteEntry(id)
-        useUi().notify('success', '账目已删除')
-        await this.loadEntries()
-        await this.loadSummary()
+        useUi().notify('success', '已删除')
+        await this.reload()
+        return true
       } catch (err) {
-        const message = describe(err)
-        this.error = message
-        useUi().notify('error', '删除账目失败', message)
+        useUi().notify('error', '删除失败', describe(err))
+        return false
       } finally {
         this.saving = false
       }
@@ -377,16 +368,12 @@ export const useLedger = defineStore('ledger', {
 
     async submitEntry(id: string): Promise<void> {
       this.saving = true
-      this.error = null
       try {
         await api.ledger.submitEntry(id)
-        useUi().notify('success', '已提交审批')
-        await this.loadEntries()
-        await this.loadSummary()
+        useUi().notify('success', '操作已完成')
+        await this.reload()
       } catch (err) {
-        const message = describe(err)
-        this.error = message
-        useUi().notify('error', '提交失败', message)
+        useUi().notify('error', '操作失败', describe(err))
       } finally {
         this.saving = false
       }
@@ -394,33 +381,30 @@ export const useLedger = defineStore('ledger', {
 
     async withdrawEntry(id: string): Promise<void> {
       this.saving = true
-      this.error = null
       try {
         await api.ledger.withdrawEntry(id)
-        useUi().notify('success', '已撤回为草稿')
-        await this.loadEntries()
-        await this.loadSummary()
+        useUi().notify('success', '操作已完成')
+        await this.reload()
       } catch (err) {
-        const message = describe(err)
-        this.error = message
-        useUi().notify('error', '撤回失败', message)
+        useUi().notify('error', '操作失败', describe(err))
       } finally {
         this.saving = false
       }
     },
 
-    async decideEntry(id: string, decision: 'approve' | 'reject', note?: string): Promise<void> {
+    /**
+     * 审批（通过/驳回）。驳回的弹窗要靠返回值决定"留着让人改理由"还是"关掉"。
+     */
+    async decideEntry(id: string, decision: 'approve' | 'reject', note?: string): Promise<boolean> {
       this.saving = true
-      this.error = null
       try {
         await api.ledger.decideEntry(id, decision, note)
-        useUi().notify('success', decision === 'approve' ? '已通过' : '已驳回')
-        await this.loadEntries()
-        await this.loadSummary()
+        useUi().notify('success', decision === 'approve' ? '操作已完成' : '已驳回')
+        await this.reload()
+        return true
       } catch (err) {
-        const message = describe(err)
-        this.error = message
-        useUi().notify('error', decision === 'approve' ? '审批失败' : '驳回失败', message)
+        useUi().notify('error', decision === 'approve' ? '操作失败' : '驳回失败', describe(err))
+        return false
       } finally {
         this.saving = false
       }
@@ -428,33 +412,30 @@ export const useLedger = defineStore('ledger', {
 
     async payEntry(id: string): Promise<void> {
       this.saving = true
-      this.error = null
       try {
         await api.ledger.payEntry(id)
-        useUi().notify('success', '已标记支付')
-        await this.loadEntries()
-        await this.loadSummary()
+        useUi().notify('success', '操作已完成')
+        await this.reload()
       } catch (err) {
-        const message = describe(err)
-        this.error = message
-        useUi().notify('error', '标记支付失败', message)
+        useUi().notify('error', '操作失败', describe(err))
       } finally {
         this.saving = false
       }
     },
 
+    /**
+     * 标记/取消某人的分摊已结清。
+     *
+     * 成功时不弹通知：结清状态就在详情面板那一行上，点完立刻变成"已结清"，
+     * 再弹一个 toast 是噪声（这条在合并前就是这样，保持原样）。
+     */
     async settleSplit(entryId: string, userId: string, settled: boolean): Promise<void> {
       this.saving = true
-      this.error = null
       try {
         await api.ledger.settleSplit(entryId, userId, settled)
-        useUi().notify('success', settled ? '已标记结清' : '已取消结清')
-        await this.loadEntries()
-        await this.loadDebts()
+        await this.reload()
       } catch (err) {
-        const message = describe(err)
-        this.error = message
-        useUi().notify('error', '结算操作失败', message)
+        useUi().notify('error', '更新结清状态失败', describe(err))
       } finally {
         this.saving = false
       }

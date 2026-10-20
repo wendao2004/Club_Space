@@ -11,6 +11,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
+import ModalShell from '@/components/ModalShell.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { ApiError, api, formatBytes, formatTime } from '@/api'
 import type {
   FileEntry,
@@ -460,16 +462,14 @@ async function runAction(entry: LedgerEntry, key: string): Promise<void> {
     return
   }
 
+  // 提示文案与刷新都在 store 里（它会在成功后 reload 整份数据），这里只负责
+  // 这一行的 loading 状态 —— busy 比整表 loading 细，能让用户看出是哪一行动了。
   busy.value = entry.id
   try {
-    if (key === 'submit') await api.ledger.submitEntry(entry.id)
-    else if (key === 'withdraw') await api.ledger.withdrawEntry(entry.id)
-    else if (key === 'approve') await api.ledger.decideEntry(entry.id, 'approve')
-    else if (key === 'pay') await api.ledger.payEntry(entry.id)
-    ui.notify('success', '操作已完成')
-    await ledger.reload()
-  } catch (err) {
-    ui.notify('error', '操作失败', messageOf(err))
+    if (key === 'submit') await ledger.submitEntry(entry.id)
+    else if (key === 'withdraw') await ledger.withdrawEntry(entry.id)
+    else if (key === 'approve') await ledger.decideEntry(entry.id, 'approve')
+    else if (key === 'pay') await ledger.payEntry(entry.id)
   } finally {
     busy.value = null
   }
@@ -495,12 +495,10 @@ function askDelete(entry: LedgerEntry): void {
       confirmState.value = null
       busy.value = entry.id
       try {
-        await api.ledger.deleteEntry(entry.id)
-        if (selectedId.value === entry.id) selectedId.value = null
-        ui.notify('success', '已删除')
-        await ledger.reload()
-      } catch (err) {
-        ui.notify('error', '删除失败', messageOf(err))
+        // 只有真的删掉了才收掉详情面板；失败时留在原地，用户还能看着它再试
+        if (await ledger.deleteEntry(entry.id)) {
+          if (selectedId.value === entry.id) selectedId.value = null
+        }
       } finally {
         busy.value = null
       }
@@ -517,13 +515,11 @@ async function confirmReject(): Promise<void> {
   const note = rejectNote.value.trim()
   busy.value = entry.id
   try {
-    await api.ledger.decideEntry(entry.id, 'reject', note || undefined)
-    rejectTarget.value = null
-    rejectNote.value = ''
-    ui.notify('success', '已驳回')
-    await ledger.reload()
-  } catch (err) {
-    ui.notify('error', '驳回失败', messageOf(err))
+    // 驳回失败时保留弹窗和已填的理由，别让人重打一遍
+    if (await ledger.decideEntry(entry.id, 'reject', note || undefined)) {
+      rejectTarget.value = null
+      rejectNote.value = ''
+    }
   } finally {
     busy.value = null
   }
@@ -536,10 +532,7 @@ function canSettle(split: LedgerSplit): boolean {
 async function toggleSettle(entry: LedgerEntry, split: LedgerSplit): Promise<void> {
   busy.value = entry.id
   try {
-    await api.ledger.settleSplit(entry.id, split.userId, !split.settled)
-    await ledger.reload()
-  } catch (err) {
-    ui.notify('error', '更新结清状态失败', messageOf(err))
+    await ledger.settleSplit(entry.id, split.userId, !split.settled)
   } finally {
     busy.value = null
   }
@@ -627,9 +620,7 @@ const canManageEvent = computed(() => {
   return auth.isAdmin || ev.createdBy === auth.user?.id
 })
 
-const eventExportHref = computed(() =>
-  ledger.eventSummary ? api.ledger.eventExportUrl(ledger.eventSummary.event.id) : '#',
-)
+const eventExportHref = computed(() => ledger.eventExportUrl)
 
 function switchView(next: LedgerView): void {
   view.value = next
@@ -686,6 +677,19 @@ const eventForm = ref<{
   note: string
 }>({ id: null, name: '', kind: 'activity', startOn: '', endOn: '', note: '' })
 
+/**
+ * 「脏」判定必须跟**打开那一刻的快照**比。
+ *
+ * 不能写成"有任何字段非空就算改过"：blankForm 本来就带 today 的业务日期、
+ * 默认类型，活动表单也默认 startOn 是今天 —— 那样一打开就判定为脏，
+ * 用户什么都没填按 Esc 也会被问一句，确认框就变成了噪音。
+ */
+const eventEditorBaseline = ref('')
+const eventEditorDirty = computed(
+  () => JSON.stringify(eventForm.value) !== eventEditorBaseline.value,
+)
+const eventCloseConfirm = ref(false)
+
 function openEventEditor(ev?: LedgerEvent): void {
   eventFormError.value = ''
   eventForm.value = ev
@@ -698,6 +702,7 @@ function openEventEditor(ev?: LedgerEvent): void {
         note: ev.note ?? '',
       }
     : { id: null, name: '', kind: 'activity', startOn: todayISO(), endOn: '', note: '' }
+  eventEditorBaseline.value = JSON.stringify(eventForm.value)
   eventEditorOpen.value = true
 }
 
@@ -731,7 +736,11 @@ async function submitEventForm(): Promise<void> {
 const editorOpen = ref(false)
 const form = ref<FormState>(blankForm('expense'))
 const formError = ref('')
-const saving = ref(false)
+
+/** 打开那一刻的快照，用来判断有没有真的改过（见 openEventEditor 上的注释）。 */
+const editorBaseline = ref('')
+const editorDirty = computed(() => JSON.stringify(form.value) !== editorBaseline.value)
+const editorCloseConfirm = ref(false)
 
 const editorCategoryOptions = computed(() =>
   ledger.categories.filter((c) => c.kind === form.value.kind),
@@ -741,6 +750,7 @@ function openCreate(): void {
   const kind: LedgerKind = ledger.filters.kind === 'income' ? 'income' : 'expense'
   form.value = blankForm(kind)
   formError.value = ''
+  editorBaseline.value = JSON.stringify(form.value)
   editorOpen.value = true
 }
 
@@ -764,12 +774,49 @@ function openEdit(entry: LedgerEntry): void {
     })),
   }
   formError.value = ''
+  editorBaseline.value = JSON.stringify(form.value)
   editorOpen.value = true
 }
 
 function closeEditor(): void {
   editorOpen.value = false
   picker.value.open = false
+}
+
+/**
+ * 请求关闭编辑弹层 —— Esc / 点遮罩 / 点「取消」都走这里。
+ *
+ * 两道闸：
+ *   1. 正在提交时一律不关。否则用户以为取消了，请求其实已经发出去，
+ *      下一次刷新突然多出一条账，比丢草稿更难解释。
+ *   2. 有未保存修改时先问一句，别让一次误点吞掉半屏内容。
+ */
+function requestCloseEditor(): void {
+  if (!editorOpen.value || ledger.saving) return
+  if (editorDirty.value) {
+    editorCloseConfirm.value = true
+    return
+  }
+  closeEditor()
+}
+
+function discardEditor(): void {
+  editorCloseConfirm.value = false
+  closeEditor()
+}
+
+function requestCloseEventEditor(): void {
+  if (!eventEditorOpen.value || ledger.saving) return
+  if (eventEditorDirty.value) {
+    eventCloseConfirm.value = true
+    return
+  }
+  eventEditorOpen.value = false
+}
+
+function discardEventEditor(): void {
+  eventCloseConfirm.value = false
+  eventEditorOpen.value = false
 }
 
 function removeAttachment(nodeId: string): void {
@@ -922,23 +969,16 @@ async function saveForm(): Promise<void> {
     splits,
   }
 
-  saving.value = true
   formError.value = ''
   try {
-    if (f.id) {
-      await api.ledger.updateEntry(f.id, input)
-      ui.notify('success', '已保存')
-    } else {
-      await api.ledger.createEntry(input)
-      ui.notify('success', '已创建')
-    }
+    // 提示文案与整份数据的刷新都在 store 里；失败时它会抛回来，
+    // 由这里内联展示后端原文（弹窗关掉用户填的东西就没了）。
+    if (f.id) await ledger.updateEntry(f.id, input)
+    else await ledger.createEntry(input)
     editorOpen.value = false
-    await ledger.reload()
   } catch (err) {
     // 后端返回的真实 message 直接展示，别用兜底文案盖掉。
     formError.value = messageOf(err)
-  } finally {
-    saving.value = false
   }
 }
 
@@ -1025,11 +1065,10 @@ function openFilesApp(): void {
 // ---------------------------------------------------------------- 生命周期
 
 onMounted(() => {
-  // store 已经 watch filters 并触发刷新，这里只做首次加载，不重复触发。
+  // 首次加载。reload() 里已经包含 loadEvents()（记账表单的"归属活动"下拉要用它，
+  // 用户很可能一进来就直接点"记一笔"、根本没进过活动视图），别再单独调一次 ——
+  // 那是同一份数据在同一秒里请求两遍。
   void ledger.reload()
-  // 活动列表也要拉一次：记账表单里的"归属活动"下拉要用它，
-  // 而用户很可能一进来就直接点"记一笔"、根本没进过活动视图。
-  void ledger.loadEvents()
 
   const el = rootEl.value
   if (el) {
@@ -1665,11 +1704,18 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- ---------------------------------------------------------- 新建 / 编辑 -->
-    <div v-if="editorOpen" class="overlay" @click.self="closeEditor">
-      <div class="modal wl-card" role="dialog" aria-modal="true">
+    <ModalShell
+      v-if="editorOpen"
+      overlay-class="overlay"
+      panel-class="modal wl-card"
+      labelledby="ledger-entry-title"
+      initial-focus=".amount-input"
+      :closable="!ledger.saving"
+      @close="requestCloseEditor"
+    >
         <header class="modal__head">
-          <span class="modal__title">{{ form.id ? '编辑账目' : '记一笔' }}</span>
-          <button class="wl-icon-btn" title="关闭" @click="closeEditor">
+          <span id="ledger-entry-title" class="modal__title">{{ form.id ? '编辑账目' : '记一笔' }}</span>
+          <button class="wl-icon-btn" title="关闭" @click="requestCloseEditor">
             <Icon name="close" :size="16" />
           </button>
         </header>
@@ -1822,22 +1868,39 @@ onBeforeUnmount(() => {
 
         <footer class="modal__foot">
           <div class="modal__footbtns">
-            <button class="wl-btn" :disabled="saving" @click="closeEditor">取消</button>
-            <button class="wl-btn wl-btn--primary" :disabled="saving" @click="saveForm">
-              <span v-if="saving" class="wl-spinner" />
+            <button class="wl-btn" :disabled="ledger.saving" @click="requestCloseEditor">取消</button>
+            <button class="wl-btn wl-btn--primary" :disabled="ledger.saving" @click="saveForm">
+              <span v-if="ledger.saving" class="wl-spinner" />
               <span>{{ form.id ? '保存' : '创建' }}</span>
             </button>
           </div>
         </footer>
-      </div>
-    </div>
+    </ModalShell>
+
+    <ConfirmDialog
+      v-if="editorCloseConfirm"
+      title="放弃这笔未保存的账目？"
+      message="金额、事由等内容还没有保存，关闭后需要重新填写。"
+      confirm-text="放弃修改"
+      cancel-text="继续填写"
+      danger
+      @confirm="discardEditor"
+      @cancel="editorCloseConfirm = false"
+    />
 
     <!-- ---------------------------------------------------------- 活动编辑 -->
-    <div v-if="eventEditorOpen" class="overlay" @click.self="eventEditorOpen = false">
-      <div class="modal wl-card" role="dialog" aria-modal="true">
+    <ModalShell
+      v-if="eventEditorOpen"
+      overlay-class="overlay"
+      panel-class="modal wl-card"
+      labelledby="ledger-event-title"
+      initial-focus="input.wl-input"
+      :closable="!ledger.saving"
+      @close="requestCloseEventEditor"
+    >
         <header class="modal__head">
-          <span class="modal__title">{{ eventForm.id ? '编辑活动' : '新建活动' }}</span>
-          <button class="wl-icon-btn" title="关闭" @click="eventEditorOpen = false">
+          <span id="ledger-event-title" class="modal__title">{{ eventForm.id ? '编辑活动' : '新建活动' }}</span>
+          <button class="wl-icon-btn" title="关闭" @click="requestCloseEventEditor">
             <Icon name="close" :size="16" />
           </button>
         </header>
@@ -1893,20 +1956,40 @@ onBeforeUnmount(() => {
 
         <footer class="modal__foot">
           <div class="modal__footbtns">
-            <button class="wl-btn" @click="eventEditorOpen = false">取消</button>
-            <button class="wl-btn wl-btn--primary" @click="submitEventForm">
+            <button class="wl-btn" :disabled="ledger.saving" @click="requestCloseEventEditor">取消</button>
+            <button class="wl-btn wl-btn--primary" :disabled="ledger.saving" @click="submitEventForm">
               {{ eventForm.id ? '保存' : '创建' }}
             </button>
           </div>
         </footer>
-      </div>
-    </div>
+    </ModalShell>
+
+    <ConfirmDialog
+      v-if="eventCloseConfirm"
+      title="放弃未保存的活动信息？"
+      message="名称、日期等内容还没有保存，关闭后需要重新填写。"
+      confirm-text="放弃修改"
+      cancel-text="继续填写"
+      danger
+      @confirm="discardEventEditor"
+      @cancel="eventCloseConfirm = false"
+    />
 
     <!-- ---------------------------------------------------------- 凭证文件浏览 -->
-    <div v-if="picker.open" class="overlay" @click.self="closePicker">
-      <div class="modal wl-card modal--picker" role="dialog" aria-modal="true">
+    <!--
+      这个弹层会叠在编辑表单之上，所以也必须进 ModalShell 的栈：
+      否则编辑表单的焦点陷阱会把 Tab 从选择器里抢回到底下那层。
+    -->
+    <ModalShell
+      v-if="picker.open"
+      overlay-class="overlay"
+      panel-class="modal wl-card modal--picker"
+      labelledby="ledger-picker-title"
+      initial-focus=".picker__bar button"
+      @close="closePicker"
+    >
         <header class="modal__head">
-          <span class="modal__title">选择凭证文件</span>
+          <span id="ledger-picker-title" class="modal__title">选择凭证文件</span>
           <button class="wl-icon-btn" title="关闭" @click="closePicker">
             <Icon name="close" :size="16" />
           </button>
@@ -1973,8 +2056,7 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </footer>
-      </div>
-    </div>
+    </ModalShell>
 
     <!-- ---------------------------------------------------------- 驳回理由 -->
     <div v-if="rejectTarget" class="overlay" @click.self="rejectTarget = null">
@@ -2719,7 +2801,12 @@ onBeforeUnmount(() => {
 
 /* ---------------------------------------------------------------- 模态 */
 
-.modal {
+/*
+ * 面板节点由 ModalShell 渲染，不在本组件的模板作用域里，所以要用 :deep()
+ * 才套得到。.overlay 仍可直接命中 —— 它是子组件的根节点，会继承本组件的
+ * scope id。
+ */
+.overlay :deep(.modal) {
   display: flex;
   flex-direction: column;
   width: 460px;
@@ -2729,11 +2816,11 @@ onBeforeUnmount(() => {
   box-shadow: var(--shadow-popup);
 }
 
-.modal--sm {
+.overlay :deep(.modal--sm) {
   width: 380px;
 }
 
-.modal--picker {
+.overlay :deep(.modal--picker) {
   width: 560px;
   height: 520px;
   max-height: 100%;

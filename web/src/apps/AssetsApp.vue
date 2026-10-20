@@ -13,6 +13,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
+import ModalShell from '@/components/ModalShell.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { api, type AssetCondition, type AssetItem, type AssetItemInput, type AssetLoan } from '@/api'
 import { useAssets } from '@/stores/assets'
 import { useAuth } from '@/stores/auth'
@@ -280,6 +282,18 @@ const form = ref<AssetItemInput>({
   note: '',
 })
 
+/**
+ * 「脏」判定跟打开那一刻的快照比。
+ *
+ * 不能写成"有字段非空就算改过"：新建时数量默认 1、成色默认 good，
+ * 那样一打开就脏，Esc 也会弹确认，保护就变成了骚扰。
+ */
+const editBaseline = ref('')
+const editDirty = computed(() => JSON.stringify(form.value) !== editBaseline.value)
+const editCloseConfirm = ref(false)
+/** 提交中不允许关闭：请求已经发出，关掉只会让用户误以为取消了。 */
+const editSaving = ref(false)
+
 function openCreate(): void {
   editId.value = null
   editError.value = ''
@@ -294,6 +308,7 @@ function openCreate(): void {
     condition: 'good',
     note: '',
   }
+  editBaseline.value = JSON.stringify(form.value)
   editOpen.value = true
 }
 
@@ -311,7 +326,23 @@ function openEdit(item: AssetItem): void {
     condition: item.condition,
     note: item.note ?? '',
   }
+  editBaseline.value = JSON.stringify(form.value)
   editOpen.value = true
+}
+
+/** Esc / 点遮罩 / 点「取消」都走这里，见 ModalShell。 */
+function requestCloseEdit(): void {
+  if (!editOpen.value || editSaving.value) return
+  if (editDirty.value) {
+    editCloseConfirm.value = true
+    return
+  }
+  editOpen.value = false
+}
+
+function discardEdit(): void {
+  editCloseConfirm.value = false
+  editOpen.value = false
 }
 
 async function submitForm(): Promise<void> {
@@ -336,10 +367,15 @@ async function submitForm(): Promise<void> {
     condition: form.value.condition,
     note: form.value.note?.trim() || undefined,
   }
-  const ok = editId.value
-    ? await assets.updateItem(editId.value, payload)
-    : await assets.createItem(payload)
-  if (ok) editOpen.value = false
+  editSaving.value = true
+  try {
+    const ok = editId.value
+      ? await assets.updateItem(editId.value, payload)
+      : await assets.createItem(payload)
+    if (ok) editOpen.value = false
+  } finally {
+    editSaving.value = false
+  }
 }
 
 // ---------------------------------------------------------------- 退役
@@ -740,10 +776,18 @@ const editing = computed(() => editOpen.value)
     </div>
 
     <!-- ------------------------------------------------------------ 登记 / 编辑 -->
-    <div v-if="editing" class="dialog">
-      <div class="dialog__backdrop" @click="editOpen = false" />
-      <div class="dialog__panel wl-scroll">
-        <h2 class="dialog__title">{{ editId ? '编辑物品' : '登记物品' }}</h2>
+    <ModalShell
+      v-if="editing"
+      overlay-class="dialog"
+      backdrop
+      backdrop-class="dialog__backdrop"
+      panel-class="dialog__panel wl-scroll"
+      labelledby="asset-edit-title"
+      initial-focus="input.wl-input"
+      :closable="!editSaving"
+      @close="requestCloseEdit"
+    >
+        <h2 id="asset-edit-title" class="dialog__title">{{ editId ? '编辑物品' : '登记物品' }}</h2>
 
         <div class="grid2">
           <label class="wl-field grid2__wide">
@@ -796,7 +840,7 @@ const editing = computed(() => editOpen.value)
 
         <div class="dialog__actions">
           <button class="wl-btn wl-btn--primary" @click="submitForm">保存</button>
-          <button class="wl-btn wl-btn--ghost" @click="editOpen = false">取消</button>
+          <button class="wl-btn wl-btn--ghost" @click="requestCloseEdit">取消</button>
         </div>
 
         <details class="cats">
@@ -814,8 +858,18 @@ const editing = computed(() => editOpen.value)
             <button class="wl-btn wl-btn--ghost" @click="addCategory">添加</button>
           </div>
         </details>
-      </div>
-    </div>
+    </ModalShell>
+
+    <ConfirmDialog
+      v-if="editCloseConfirm"
+      title="放弃未保存的物品信息？"
+      message="名称、数量等内容还没有保存，关闭后需要重新填写。"
+      confirm-text="放弃修改"
+      cancel-text="继续填写"
+      danger
+      @confirm="discardEdit"
+      @cancel="editCloseConfirm = false"
+    />
 
     <!-- ------------------------------------------------------------ 借出 -->
     <div v-if="lendOpen" class="dialog">
@@ -1461,12 +1515,13 @@ const editing = computed(() => editOpen.value)
   justify-content: center;
   padding: 20px;
 }
-.dialog__backdrop {
+/* 面板/遮罩由 ModalShell 渲染，需要用 :deep() 才能套到子组件内部节点 */
+.dialog :deep(.dialog__backdrop) {
   position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.45);
 }
-.dialog__panel {
+.dialog :deep(.dialog__panel) {
   position: relative;
   width: min(520px, 100%);
   max-height: 100%;
