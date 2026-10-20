@@ -90,6 +90,10 @@ const ONLINE_TESTS = [
   // 表格预览的解析器。**不需要服务端**：它 import 的是 web/src/lib/csv.ts 本体
   // （Node 22.18+ 默认剥离类型），跑的就是界面用的那份代码。
   { name: 'csv-parser-test', label: 'CSV/TSV 解析（引号/换行/分隔符识别）' },
+  // 在线编辑的保存接口：权限、类型白名单、409 并发、引用计数、内容正确性。
+  // 它会**真的**用 ExcelJS 把产物解析回来比对，所以装配 exceljs / fflate 这两个
+  // 依赖是必要的 —— 这两个库在 web 侧也是同一份（编辑器用的就是它们）。
+  { name: 'office-edit-test', label: '在线编辑（保存/权限/并发/引用计数）' },
   { name: 'chat-test', label: '聊天（含 SSE 实时推送）' },
   {
     name: 'realtime-test',

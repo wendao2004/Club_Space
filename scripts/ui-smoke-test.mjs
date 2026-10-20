@@ -1980,6 +1980,37 @@ async function main() {
       return done.status === 200
     }
 
+    /** 在文件管理器里对某个文件弹出右键菜单。 */
+    async function openContextMenuOnFile(name) {
+      return await evaluate(`
+        (() => {
+          const el = [...document.querySelectorAll('.tile__name, .row__name')].find(
+            (x) => x.textContent.includes(${JSON.stringify(name)}),
+          )
+          if (!el) return 'no-file'
+          const target = el.closest('.tile, .row') ?? el
+          target.dispatchEvent(
+            new MouseEvent('contextmenu', { bubbles: true, clientX: 260, clientY: 260 }),
+          )
+          return 'ok'
+        })()
+      `)
+    }
+
+    /** 点右键菜单里 label 完全匹配的那一项。 */
+    async function clickMenuItem(label) {
+      return await evaluate(`
+        (() => {
+          const item = [...document.querySelectorAll('.ctx__item')].find(
+            (i) => i.querySelector('.ctx__label')?.textContent.trim() === ${JSON.stringify(label)},
+          )
+          if (!item) return 'no-item'
+          item.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+          return 'ok'
+        })()
+      `)
+    }
+
     /** 双击桌面图标打开应用。 */
     async function openApp(label) {
       await evaluate(`
@@ -2173,7 +2204,11 @@ async function main() {
 
     await openApp('文件')
     await sleep(2000)
-    assert((await openFileByName(docxName)) === 'ok', 'docx 文件出现在文件管理器里')
+
+    // ⚠️ 双击 .docx 现在的行为是「进编辑器」——双击一个文档的人想的是改它。
+    // 预览（"转成 PDF 看一眼"）改从右键菜单进，所以这里走右键。
+    assert((await openContextMenuOnFile(docxName)) === 'ok', 'docx 文件出现在文件管理器里')
+    assert((await clickMenuItem('预览')) === 'ok', '右键菜单里有「预览」')
     await sleep(1800)
 
     const office = JSON.parse(await evaluate(`JSON.stringify((() => {
@@ -2204,6 +2239,214 @@ async function main() {
       String(office.hasConvertBtn),
     )
     await closeWindowByTitle(docxName)
+    await sleep(400)
+
+    // ---- 在线编辑：新建一份表格，改一格，存回去 ----
+    //
+    // 这条链路比"能打开"重要得多：它跨了四个组件（文件管理器 → 动态加载的
+    // xlsx 库 → 编辑器 → PUT /api/files/:id/content → 服务端改写 blob）。
+    // 所以最后不只看界面上"保存成功"，而是**把文件下载回来用 ExcelJS 解析**，
+    // 确认那个格子真的变了、别的内容还在 —— 200 说明不了任何事。
+    console.log('\n【在线编辑：表格】')
+
+    const clickNewFileButton = async (titlePrefix) =>
+      await evaluate(`(() => {
+        const btn = [...document.querySelectorAll('button[title]')].find((b) =>
+          (b.getAttribute('title') ?? '').startsWith(${JSON.stringify(titlePrefix)}),
+        )
+        if (!btn) return 'no-btn'
+        btn.click()
+        return 'ok'
+      })()`)
+
+    assert((await clickNewFileButton('新建表格')) === 'ok', '文件管理器工具栏有「新建表格」入口')
+    // 动态 import XL（900KB chunk）+ 生成 + 上传 + 开窗，慢一点是正常的
+    await sleep(6000)
+
+    const sheetEditorWin = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.se'))
+      if (!win) return { found: false }
+      return {
+        found: true,
+        title: win.querySelector('.window__title')?.textContent.trim() ?? '',
+        cells: win.querySelectorAll('.se__cell').length,
+        hasSave: [...win.querySelectorAll('.wl-btn')].some((b) => b.textContent.includes('保存')),
+      }
+    })())`))
+    assert(sheetEditorWin.found === true, '新建表格后自动打开了表格编辑器')
+    assert(sheetEditorWin.title === '新建表格.xlsx', '窗口标题是新建的文件名', sheetEditorWin.title)
+    assert(sheetEditorWin.cells > 10, '渲染出了单元格网格', `${sheetEditorWin.cells} 个格子`)
+    assert(sheetEditorWin.hasSave === true, '编辑器工具条上有「保存」')
+
+    const editStarted = await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.se'))
+      const cell = win?.querySelector('.se__row .se__cell')
+      if (!cell) return 'no-cell'
+      cell.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+      return 'ok'
+    })()`)
+    assert(editStarted === 'ok', '双击单元格进入编辑')
+
+    const typedInto = await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.se'))
+      const input = win?.querySelector('.se__input')
+      if (!input) return 'no-input'
+      input.value = '九月值日表'
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      return 'ok'
+    })()`)
+    assert(typedInto === 'ok', '单元格进入输入态并接受了输入', String(typedInto))
+    // 输入框是"提交后消失、单元格重新渲染"，DOM 更新是下一个 tick，
+    // 所以这里必须等一拍再看 —— 否则读到的是还没刷新的空单元格
+    await sleep(300)
+    const cellTyped = await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.se'))
+      const cell = win?.querySelector('.se__row .se__cell')
+      return {
+        text: cell?.textContent.trim() ?? '',
+        stillEditing: !!win?.querySelector('.se__input'),
+      }
+    })()`)
+    assert(
+      cellTyped.text === '九月值日表',
+      '输入的内容进入了单元格（Enter 提交）',
+      JSON.stringify(cellTyped),
+    )
+    assert(cellTyped.stillEditing === false, '提交之后输入框关闭（回到格子浏览态）')
+
+    const unsavedBadge = await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.se'))
+      return win?.querySelector('.wl-badge--warning')?.textContent.trim() ?? ''
+    })()`)
+    assert(unsavedBadge === '未保存', '改动之后工具条标记「未保存」', unsavedBadge)
+
+    await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.se'))
+      const btn = [...win.querySelectorAll('.wl-btn')].find((b) => b.textContent.includes('保存'))
+      btn?.click()
+      return true
+    })()`)
+    await sleep(2500)
+
+    const postSaveState = await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.se'))
+      return win?.querySelector('.wl-badge--warning') ? 'dirty' : 'clean'
+    })()`)
+    assert(postSaveState === 'clean', '保存之后「未保存」标记消失')
+
+    // 用 API 把文件下载回来，用真的 XL 解析
+    const { default: XL } = await import('exceljs')
+    const sheetListing = await apiAs(sessionCookie, '/api/files?space=shared')
+    const createdSheetEntry = sheetListing.body.entries.find((e) => e.name === '新建表格.xlsx')
+    assert(!!createdSheetEntry, '新建的表格是一个真实文件（在共享空间的列表里）')
+    if (createdSheetEntry) {
+      const dlBytes = await fetch(`${BASE}/api/files/${createdSheetEntry.id}/download`, {
+        headers: { cookie: sessionCookie },
+      })
+      const parsedBook = new XL.Workbook()
+      await parsedBook.xlsx.load(Buffer.from(await dlBytes.arrayBuffer()))
+      const parsedSheet = parsedBook.getWorksheet(1)
+      assert(
+        parsedSheet?.getCell('A1').value === '九月值日表',
+        '保存后的 xlsx 里 A1 就是输入的内容（不是只改了界面）',
+        String(parsedSheet?.getCell('A1').value),
+      )
+      assert(
+        createdSheetEntry.mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        '保存后文件类型仍然是 xlsx',
+        createdSheetEntry.mime ?? '',
+      )
+    }
+    await closeWindowByTitle('新建表格.xlsx')
+    await sleep(500)
+
+    // ---- 在线编辑：文档 + 关闭守卫 ----
+    console.log('\n【在线编辑：文档与未保存守卫】')
+
+    assert((await clickNewFileButton('新建文档')) === 'ok', '文件管理器工具栏有「新建文档」入口')
+    await sleep(5000)
+
+    const docEditorWin = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.de'))
+      if (!win) return { found: false }
+      return {
+        found: true,
+        title: win.querySelector('.window__title')?.textContent.trim() ?? '',
+        blocks: win.querySelectorAll('.de__text').length,
+      }
+    })())`))
+    assert(docEditorWin.found === true, '新建文档后自动打开了文档编辑器')
+    assert(docEditorWin.title === '新建文档.docx', '文档窗口标题是新建的文件名', docEditorWin.title)
+    assert(docEditorWin.blocks >= 1, '文档里至少有一个可编辑段落', `${docEditorWin.blocks} 段`)
+
+    await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.de'))
+      const text = win?.querySelector('.de__text')
+      if (!text) return 'no-text'
+      text.focus()
+      text.innerText = '九月例会纪要'
+      text.dispatchEvent(new Event('input', { bubbles: true }))
+      return 'ok'
+    })()`)
+
+    // 改了没保存就点 × —— 必须问一句，而不是直接把内容丢掉（windows.setCloseGuard）
+    await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.de'))
+      win?.querySelector('.window__ctl--close')?.click()
+      return true
+    })()`)
+    await sleep(600)
+
+    const closeGuardState = JSON.parse(await evaluate(`JSON.stringify({
+      dialog: !!document.querySelector('.wl-confirm'),
+      text: (document.querySelector('.wl-confirm')?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 120),
+      stillOpen: [...document.querySelectorAll('.window')].some((w) => w.querySelector('.de')),
+    })`))
+    assert(closeGuardState.dialog === true, '有未保存修改时关窗会先问一句')
+    assert(closeGuardState.text.includes('未保存'), '确认框说清了"为什么问"', closeGuardState.text)
+    assert(closeGuardState.stillOpen === true, '确认框还没答完，窗口没有被关掉')
+
+    await evaluate(`(() => {
+      const btn = [...document.querySelectorAll('.wl-confirm button')].find((b) =>
+        b.textContent.includes('继续编辑'),
+      )
+      btn?.click()
+      return true
+    })()`)
+    await sleep(400)
+    const stillOpenAfterCancel = await evaluate(
+      `!![...document.querySelectorAll('.window')].find((w) => w.querySelector('.de'))`,
+    )
+    assert(stillOpenAfterCancel === true, '选「继续编辑」后窗口留着，内容还在')
+
+    await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.de'))
+      const btn = [...win.querySelectorAll('.wl-btn')].find((b) => b.textContent.includes('保存'))
+      btn?.click()
+      return true
+    })()`)
+    await sleep(2500)
+
+    const { unzipSync, strFromU8 } = await import('fflate')
+    const docListing = await apiAs(sessionCookie, '/api/files?space=shared')
+    const createdDocEntry = docListing.body.entries.find((e) => e.name === '新建文档.docx')
+    assert(!!createdDocEntry, '新建的文档是一个真实文件')
+    if (createdDocEntry) {
+      const dlBytes = await fetch(`${BASE}/api/files/${createdDocEntry.id}/download`, {
+        headers: { cookie: sessionCookie },
+      })
+      const docParts = unzipSync(new Uint8Array(await dlBytes.arrayBuffer()))
+      const docXml = strFromU8(docParts['word/document.xml'] ?? new Uint8Array())
+      assert(docXml.includes('九月例会纪要'), '保存后的 docx 里就是输入的文字')
+      assert(docXml.includes('<w:body>'), '产出的是一份结构完整的 docx（word/document.xml 有正文）')
+      assert(
+        createdDocEntry.mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        '保存后文件类型仍然是 docx',
+        createdDocEntry.mime ?? '',
+      )
+    }
+    await closeWindowByTitle('新建文档.docx')
     await sleep(400)
 
     // ---- 系统音效：界面动作真的在合成声音，静音真的静得掉 ----
