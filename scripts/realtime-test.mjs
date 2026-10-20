@@ -137,6 +137,29 @@ function agePresence(userId, ageMs) {
   }
 }
 
+/**
+ * 把库里这条在线记录彻底"抹掉"：时间戳很旧 + 连接计数 0。
+ *
+ * 用来证明一件事：**在线判定不再依赖心跳写库**。
+ * 连接计数被清零之后，库这边已经查不出任何"在线"迹象了，
+ * 而 socket 还好端端地开着 —— 这时候仍然必须显示在线。
+ *
+ * 这一条同时是"心跳可以不再写库"的前提：心跳原来每 25 秒刷一次 last_seen，
+ * 100 条连接就是 4 次/秒的写事务；如果在线状态其实由内存里的连接表决定，
+ * 那些写就一点信息量都没有。
+ */
+function blankPresence(userId) {
+  const db = new DatabaseSync(join(DATA_DIR, 'app.sqlite'))
+  try {
+    db.prepare('UPDATE presence SET last_seen = ?, connection_count = 0 WHERE user_id = ?').run(
+      Date.now() - 10 * 60_000,
+      userId,
+    )
+  } finally {
+    db.close()
+  }
+}
+
 async function main() {
   console.log(`\n\x1b[1m实时推送与在线状态\x1b[0m  目标 ${BASE}\n`)
 
@@ -270,6 +293,20 @@ async function main() {
     )
   } else {
     console.log('  \x1b[33m⚠ 未拿到 WL_TEST_DATA_DIR，跳过"心跳过期"用例\x1b[0m')
+  }
+
+  // ---- 把库里的在线痕迹全部抹掉：socket 还在，仍然必须是在线 ----
+  //
+  // 这条是"心跳不再写库"的守门断言。以前心跳每 25 秒刷一次 last_seen，
+  // 现在不写了 —— 如果哪天有人把在线判定改回"只看 last_seen 窗口"，
+  // 这里会立刻变红：库被抹干净之后，那个实现会把人判成离线。
+  if (DATA_DIR) {
+    blankPresence(idA)
+    assert(
+      await onlineNow(),
+      '库里的在线痕迹被清零，但 SSE 还连着 → 依然显示在线（在线状态由连接表决定）',
+      '（last_seen 老 10 分钟 + connection_count = 0）',
+    )
   }
 
   // ---- 干净断开应该**立刻**离线，而不是再亮 60 秒 ----

@@ -70,6 +70,66 @@ if [ ! -d "${HOME:-}" ] || [ ! -w "${HOME:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 前置检查：站点证书必须是**文件**
+#
+# compose 里 app 挂了一行 `./ca/served/server.crt:/certs/server.crt:ro`，
+# 只为了让 /api/health 能算出证书还剩几天（到期那天所有成员同时红屏，
+# 而那时候平台本身已经打不开了）。
+#
+# ⚠️ 危险之处：Docker 遇到"宿主机上不存在的文件路径"时**会建一个同名目录**。
+# 于是 `docker compose up` 在没有证书的机器上跑一次，`ca/served/server.crt`
+# 就变成了目录 —— 之后 gen-certs.sh 里 openssl 写这个路径必然失败
+# （Is a directory），而报错完全看不出根因是"某个 compose 挂载提前跑过"。
+# 所以在这里拦住，而不是等它发生。
+# ---------------------------------------------------------------------------
+CERT_FILE="ca/served/server.crt"
+if [ -d "$CERT_FILE" ]; then
+  die "$CERT_FILE 是个**目录**，不是证书文件。
+  成因：在没有证书的机器上先跑过 docker compose（Docker 会给缺失的挂载点建目录）。
+  处理：
+    rmdir '$CERT_FILE' 2>/dev/null || true
+    bash ca/gen-certs.sh          # 重新生成（已有根 CA 会复用，成员无需重装）
+    然后重跑本脚本。"
+fi
+if [ ! -f "$CERT_FILE" ]; then
+  die "找不到 $CERT_FILE。
+  先在有证书材料的机器上跑 bash ca/gen-certs.sh，
+  并把 ca/（含 served/）同步到 NAS 的 deploy 目录。"
+fi
+
+# ---------------------------------------------------------------------------
+# 前置检查：.env 权限
+#
+# WL_SESSION_SECRET 能伪造任意用户的会话，WL_ADMIN_RUNNER_TOKEN 能驱动持有
+# docker.sock 的执行器。这些值都躺在 .env 里，而同组/其他人可读（644 是
+# 很多人的默认 umask 结果）意味着**同一台 NAS 上的任何本地账号**都能读走它们。
+#
+# 文档里一直写着"要 chmod 600"，但那句话是给人看的。这里做成动作。
+# ---------------------------------------------------------------------------
+if [ -f "$ENV_FILE" ]; then
+  ENV_MODE="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo '')"
+  case "$ENV_MODE" in
+    '' | 400 | 600) : ;;
+    *)
+      if chmod 600 "$ENV_FILE" 2>/dev/null; then
+        echo "  .env 权限 $ENV_MODE → 600（改前同组/其他人可读，等于会话密钥对本地账号公开）"
+      else
+        echo "  ⚠️ .env 权限是 $ENV_MODE（应收紧到 600），但当前用户改不动：" >&2
+        echo "     sudo chmod 600 $PWD/$ENV_FILE" >&2
+      fi
+      ;;
+  esac
+
+  # 600 会挡住 ops-runner：它把 .env 挂进容器做 compose 变量插值（见 compose 注释），
+  # 而容器里的进程是非 root 用户。真开了运维管控的话，600 + 属主不匹配 =
+  # 运维页每个操作都失败，且看起来像平台 bug。所以这里必须提示，不能默默改完就走。
+  if grep -qE '^[[:space:]]*WL_ADMIN_DOCKER_ENABLED[[:space:]]*=[[:space:]]*1' "$ENV_FILE"; then
+    echo "  提示：WL_ADMIN_DOCKER_ENABLED=1，ops-runner 需要读 .env。"
+    echo "        若运维页报 permission denied，把 .env 的属主/权限对齐给执行器容器里的用户。"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 0) 读 .env 里的备份目标
 #
 # 只读这一个键，不用 `source .env`：.env 里可能有带空格/引号的值，

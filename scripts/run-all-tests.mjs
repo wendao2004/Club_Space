@@ -19,7 +19,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -42,6 +42,50 @@ const TEST_PORT = Number(process.env.WL_TEST_PORT ?? 3100)
  */
 const TEST_DATA_DIR = join(ROOT, `.test-data-${TEST_PORT}`)
 
+/**
+ * 给"证书到期提醒"用例现签两张证书。
+ *
+ * 为什么不往仓库里放一张固定的测试证书：证书有有效期，一张 2026 年签的
+ * 固定证书到了 2027 年会变成"已过期" —— 于是某一天这个测试会毫无征兆地变红，
+ * 而代码一行没动。现签就没有这个问题，代价是二百毫秒。
+ *
+ * 两张：
+ *   good.crt —— 397 天（与 gen-certs.sh 的默认一致），用来验"正常时 status=ok"
+ *   soon.crt —— 5 天，用来验"快到期时只是提醒、不是红"
+ *
+ * 没有 openssl 的机器（比如只装 git 的精简环境）返回 null，相关用例会打印跳过，
+ * 而不是报一个"环境问题"的失败。
+ */
+const TEST_CERTS_DIR = join(ROOT, '.test-certs')
+
+function ensureTestCerts() {
+  try {
+    rmSync(TEST_CERTS_DIR, { recursive: true, force: true })
+    mkdirSync(TEST_CERTS_DIR, { recursive: true })
+    const make = (name, days) => {
+      const out = join(TEST_CERTS_DIR, name)
+      const r = spawnSync(
+        'openssl',
+        [
+          'req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-nodes',
+          '-days', String(days),
+          '-keyout', join(TEST_CERTS_DIR, `${name}.key`),
+          '-out', out,
+          '-subj', '/O=WL Test/CN=wl.test',
+        ],
+        { encoding: 'utf8' },
+      )
+      if (r.status !== 0 || !existsSync(out)) throw new Error(r.stderr || 'openssl 失败')
+      return out
+    }
+    return { dir: TEST_CERTS_DIR, good: make('good.crt', 397), soon: make('soon.crt', 5) }
+  } catch {
+    return null
+  }
+}
+
+const TEST_CERTS = ensureTestCerts()
+
 /** 不需要服务端的测试：纯逻辑，秒级完成。 */
 const OFFLINE_TESTS = [
   { name: 'xiangqi-test', label: '象棋规则引擎（含 perft）' },
@@ -58,6 +102,8 @@ const OFFLINE_TESTS = [
   { name: 'totp-test', label: 'TOTP（RFC 6238 标准向量）' },
   { name: 'admin-test', label: '运维管控安全逻辑' },
   { name: 'ops-runner-test', label: '执行器白名单校验' },
+  // 起 4 个真子进程同时迁移一个空库 —— 复现"版本号在锁外读"的那个撞车
+  { name: 'db-migrate-test', label: '数据库迁移（并发启动只迁一次）' },
 ]
 
 /** 需要服务端 + 干净数据库的测试。 */
@@ -84,6 +130,15 @@ const ONLINE_TESTS = [
     // 把底线设成 1 PiB —— 大于任何真实磁盘，于是"磁盘不足"这条路必然触发。
     // 断言因此是确定性的，不依赖测试机还剩多少空间。
     serverEnv: { WL_HEALTH_MIN_FREE_BYTES: String(1024 ** 5) },
+  },
+  {
+    name: 'cert-health-test',
+    label: '证书到期（剩余天数进健康检查）',
+    // 用一张 5 天后到期的证书启动服务端：验证"快到期"只是提醒（degraded），
+    // 不是 503 —— 重启修不好一张过期的证书，把它变成 503 只会让 Docker
+    // 反复重启容器。然后把文件换成 397 天的，验证缓存按 mtime 失效。
+    serverEnv: TEST_CERTS ? { WL_TLS_CERT_PATH: TEST_CERTS.soon } : {},
+    passCertPath: true,
   },
   { name: 'image-tools-test', label: '图片工具（格式/缩放/压缩）' },
   { name: 'tools-extra-test', label: '工具集扩展（PDF/图片/文本/抽签）' },
@@ -283,6 +338,10 @@ function runTest(test, isRetry = false) {
       WL_TEST_BASE: `http://127.0.0.1:${TEST_PORT}`,
       // 少数测试需要直接检查服务端的数据（比如伪造一条过期的心跳记录）
       ...(test.passDataDir ? { WL_TEST_DATA_DIR: TEST_DATA_DIR } : {}),
+      // 证书用例要能改那份证书文件（验缓存按 mtime 失效）
+      ...(test.passCertPath && TEST_CERTS
+        ? { WL_TEST_CERT_PATH: TEST_CERTS.soon, WL_TEST_CERT_GOOD: TEST_CERTS.good }
+        : {}),
     },
   })
   const output = (result.stdout ?? '') + (result.stderr ?? '')

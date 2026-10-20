@@ -136,6 +136,72 @@ async function main() {
     `checked=${h3.body?.audit?.checked}`,
   )
 
+  // ---------------------------------------------------------------- 不可改删
+  console.log('\n【审计表是 append-only：改/删必须被数据库挡住】')
+  if (!DATA_DIR) {
+    bad('检查审计表的 write 保护', '没有拿到 WL_TEST_DATA_DIR，无法直接试')
+  } else {
+    const db = new DatabaseSync(join(DATA_DIR, 'app.sqlite'))
+    try {
+      const version = db.prepare('SELECT version FROM schema_version').get()?.version
+      assert(version >= 12, 'schema 已迁到 v12（触发器是在这条迁移里建的）', `version=${version}`)
+
+      const triggers = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'audit_log'")
+        .all()
+        .map((r) => r.name)
+      assert(
+        triggers.includes('audit_log_no_update') && triggers.includes('audit_log_no_delete'),
+        '两个触发器都在（UPDATE / DELETE）',
+        triggers.join(', '),
+      )
+
+      // audit.ts 的注释从第一版起就写着"数据库层有触发器禁止改删"，
+      // 而这句话一直到 v12 才成真。这条断言就是防止它再次变回口号。
+      let updateBlocked = false
+      try {
+        db.prepare("UPDATE audit_log SET action = 'tampered' WHERE seq = 1").run()
+      } catch (err) {
+        updateBlocked = String(err?.message ?? '').includes('append-only')
+      }
+      assert(updateBlocked, 'UPDATE 被拒绝，且报错说清了原因')
+
+      let deleteBlocked = false
+      try {
+        db.prepare('DELETE FROM audit_log WHERE seq = 1').run()
+      } catch (err) {
+        deleteBlocked = String(err?.message ?? '').includes('append-only')
+      }
+      assert(deleteBlocked, 'DELETE 一条被拒绝')
+
+      let truncateBlocked = false
+      try {
+        db.prepare('DELETE FROM audit_log').run()
+      } catch (err) {
+        truncateBlocked = String(err?.message ?? '').includes('append-only')
+      }
+      assert(truncateBlocked, 'DELETE 全表也被拒绝（没有 WHERE 的写法同样挡住）')
+
+      const stillThere = db.prepare('SELECT COUNT(*) AS n FROM audit_log WHERE seq = 1').get()
+      assert(stillThere.n === 1, '第 1 条记录还在（前两次尝试没有产生副作用）')
+
+      // INSERT 必须仍然放行 —— 挡住写入等于把审计功能本身关掉
+      let insertOk = true
+      try {
+        const head = db.prepare('SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1').get()
+        db.prepare(
+          `INSERT INTO audit_log (seq, ts, actor_id, actor_ip, category, action, target, payload, prev_hash, hash)
+           VALUES (?, ?, NULL, 'test', 'system', 'append-still-allowed', NULL, 'null', ?, ?)`,
+        ).run(head.seq + 1, Date.now(), head.hash, randomBytes(32).toString('hex'))
+      } catch {
+        insertOk = false
+      }
+      assert(insertOk, 'INSERT 仍然放行（挡住写入就等于把审计关掉）')
+    } finally {
+      db.close()
+    }
+  }
+
   // ---------------------------------------------------------------- 敢说"坏了"
   console.log('\n【链被篡改时它必须说 chainOk=false】')
   if (!DATA_DIR) {

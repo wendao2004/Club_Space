@@ -64,12 +64,11 @@ import {
   memberIds,
   readReceipts,
   recallMessage,
-  onlineUserIds,
-  resetPresenceCounts,
   searchMessages,
   sendMessage,
   totalUnread,
 } from './chat.ts'
+import { onlineUserIds, resetPresenceCounts } from './presence.ts'
 import {
   pushTo,
   broadcast,
@@ -205,6 +204,7 @@ import {
   SITE_NAME,
   WEB_DIST,
 } from './config.ts'
+import { probeCert } from './tls.ts'
 import {
   appendChunk,
   assertDiskSpace,
@@ -493,7 +493,11 @@ app.get('/api/health', async (_req, reply) => {
   // 一条断的）被重启日志淹没。链的状态照样在响应体里如实给出（chainOk），
   // 管理页和监控都能看见。
   const ok = dbProbe.ok && disk.ok
-  const degraded = !chain.ok || !isAuditHealthy()
+  const cert = probeCert()
+  // 证书过期是硬故障（所有人都打不开站点），未过期但快到期只是"该安排了"。
+  // 两者都**不**让它变 503：重启修不好一张过期的证书，而 Docker 会把 503
+  // 当成"容器坏了"反复重启 —— 和审计链异常是同一个道理。
+  const degraded = !chain.ok || !isAuditHealthy() || cert.expired || cert.warn
 
   if (!ok) reply.code(503)
 
@@ -513,6 +517,7 @@ app.get('/api/health', async (_req, reply) => {
     },
     db: dbProbe,
     disk,
+    cert,
     realtime: realtimeStats(),
     rateLimit: rateLimitStats(),
     time: Date.now(),

@@ -18,14 +18,102 @@ let db: DatabaseSync | null = null
 export function getDb(): DatabaseSync {
   if (db) return db
   ensureDirs()
-  db = new DatabaseSync(DB_PATH)
-  // WAL：读写不互相阻塞；NORMAL 同步在 WAL 下已能抵御应用崩溃。
-  db.exec('PRAGMA journal_mode = WAL')
-  db.exec('PRAGMA synchronous = NORMAL')
-  db.exec('PRAGMA foreign_keys = ON')
-  db.exec('PRAGMA busy_timeout = 5000')
-  migrate(db)
-  return db
+
+  // 整个"打开 + 设 PRAGMA + 迁移"要能整体重试。
+  //
+  // 为什么不是只重试迁移：并发启动时真正会炸的地方不止一处 —— 实测过
+  // `PRAGMA journal_mode = WAL` 之后紧接着的 `CREATE TABLE IF NOT EXISTS
+  // schema_version` 会返回 SQLITE_READONLY（errcode 8）。那条错误看起来
+  // 像"文件权限不对"，实际是"另一个进程正在切换日志模式 / 正在迁移"，
+  // 而 SQLite 在切换 WAL 的那一瞬间不会走 busy handler。
+  //
+  // 迁移整体在一个 BEGIN IMMEDIATE 事务里，中途失败会回滚，所以重试是安全的。
+  const deadline = Date.now() + 5_000
+  for (;;) {
+    let candidate: DatabaseSync | null = null
+    try {
+      candidate = openWithPragmas()
+      migrate(candidate)
+      db = candidate
+      return db
+    } catch (err) {
+      try {
+        candidate?.close()
+      } catch {
+        // 关不掉就算了，进程马上要重试同一条路径
+      }
+      // 只对"锁冲突"重试。磁盘只读、文件损坏这类要立刻抛出去 ——
+      // 用 5 秒的沉默把它们伪装成"再等等就好了"，是最难查的那种故障。
+      if (!/locked|busy|readonly/i.test(String((err as Error)?.message ?? ''))) throw err
+      if (Date.now() > deadline) throw err
+      sleepSync(100)
+    }
+  }
+}
+
+/**
+ * 打开连接并设好 PRAGMA。
+ *
+ * ⚠️ **顺序是有讲究的**，这不是风格问题：
+ *
+ * `busy_timeout` 必须第一个设。它之前，这条连接遇到被别的进程占着的锁会
+ * **立刻**失败，而不是等 —— 报错是一句 `database is locked`，或者更难认的
+ * `attempt to write a readonly database`（并发切 WAL 时的表现）。
+ * 两个进程同时启动就会撞上，而报错完全指向不了"多实例同时启动"这个原因。
+ *
+ * 这个坑是用 scripts/db-migrate-test.mjs 抓出来的：那个测试起 4 个真子进程
+ * 同时打开一个空库，早期版本大约每 5 次就有 1 次挂在切换 WAL 之后的
+ * `CREATE TABLE IF NOT EXISTS schema_version` 上（errcode 8 / SQLITE_READONLY）。
+ */
+function openWithPragmas(): DatabaseSync {
+  const database = new DatabaseSync(DB_PATH)
+  // 先于一切：后面每一个 PRAGMA 都要拿锁
+  database.exec('PRAGMA busy_timeout = 5000')
+  enableWal(database)
+  // WAL 下 NORMAL 已能抵御应用崩溃（掉电可能丢最后一个事务，可接受）
+  database.exec('PRAGMA synchronous = NORMAL')
+  database.exec('PRAGMA foreign_keys = ON')
+  return database
+}
+
+/** 同步睡一小会儿（启动路径，不在请求里，可以阻塞）。 */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * 把库切到 WAL，并发安全。
+ *
+ * `PRAGMA journal_mode = WAL` 需要一把排他锁，而**SQLite 在切换日志模式时
+ * 不会走 busy handler** —— 也就是说 busy_timeout 在这里帮不上忙，别人正在切
+ * （或正在迁移）的时候它会直接返回 SQLITE_BUSY。
+ *
+ * 所以这里先读当前模式：已经是 WAL 就什么都不做。没切过去就等 50ms 再看一次，
+ * 最多 20 次（约 1 秒）。并发场景下第一个进程切完提交，后面的重读就是 WAL，
+ * 全部安静退出。
+ */
+function enableWal(database: DatabaseSync): void {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const current = database.prepare('PRAGMA journal_mode').get() as
+      | { journal_mode?: string }
+      | undefined
+    if (String(current?.journal_mode ?? '').toLowerCase() === 'wal') return
+
+    try {
+      database.exec('PRAGMA journal_mode = WAL')
+      return
+    } catch (err) {
+      const message = String((err as Error)?.message ?? '')
+      // 只对"锁冲突"重试。真正的错误（磁盘只读、文件损坏）要立刻抛出去，
+      // 别用 1 秒的沉默把它们伪装成"再等等就好了"。
+      if (!/locked|busy|readonly database/i.test(message)) throw err
+      sleepSync(50)
+    }
+  }
+  throw new Error(
+    '切换 WAL 超时：database is locked（重试约 1 秒仍被占用）。' +
+      '通常是另一个进程正在迁移或持锁不放，请确认只有预期数量的服务端在跑。',
+  )
 }
 
 /** 关闭连接（测试与优雅退出用）。 */
@@ -43,10 +131,12 @@ export function closeDb(): void {
 function migrate(database: DatabaseSync): void {
   database.exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`)
 
-  const row = database.prepare('SELECT version FROM schema_version').get() as
-    | { version: number }
-    | undefined
-  let version = row?.version ?? 0
+  const readVersion = (): number => {
+    const row = database.prepare('SELECT version FROM schema_version').get() as
+      | { version: number }
+      | undefined
+    return row?.version ?? 0
+  }
 
   const migrations: Array<(d: DatabaseSync) => void> = [
     // ---- v1: 初始 schema ----
@@ -568,22 +658,71 @@ function migrate(database: DatabaseSync): void {
         ALTER TABLE game_rooms ADD COLUMN bot_level TEXT;
       `)
     },
+
+    // ---- v12: 审计表真的不可改删 ----
+    (d) => {
+      d.exec(`
+        -- audit.ts 的注释一直写着"在数据库层加触发器禁止 UPDATE/DELETE"，
+        -- 而实际上从来没有这两个触发器 —— 承诺只存在于注释里。
+        -- 补上之后，"不提供删除接口"才不只是"没写那个接口"：
+        -- 任何拿到连接池的代码路径（包括以后某个手滑的 DELETE）都会被数据库挡住。
+        --
+        -- 局限仍然要如实说：root 能 DROP TRIGGER 再改，所以这不是防 root，
+        -- 而是防"应用层出错"。真正的篡改检测靠 audit.ts 的哈希链。
+        CREATE TRIGGER audit_log_no_update
+        BEFORE UPDATE ON audit_log
+        BEGIN
+          SELECT RAISE(ABORT, 'audit_log is append-only: UPDATE is not allowed');
+        END;
+
+        CREATE TRIGGER audit_log_no_delete
+        BEFORE DELETE ON audit_log
+        BEGIN
+          SELECT RAISE(ABORT, 'audit_log is append-only: DELETE is not allowed');
+        END;
+      `)
+    },
   ]
 
-  if (version < migrations.length) {
-    database.exec('BEGIN IMMEDIATE')
-    try {
+  // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。
+  //
+  // 原先只在锁外读一次，然后 BEGIN IMMEDIATE 再迁移。单实例跑一万次都不会出问题，
+  // 但只要有人为了零停机起了第二个 app 容器（或者一次 `docker compose up --scale
+  // app=2`），两边会同时读到 10，先拿到锁的那位迁到 11 并提交，后到的那位拿着
+  // 已经过期的 10 再跑一遍 `ALTER TABLE ... ADD COLUMN`，直接撞
+  // `duplicate column name` 然后启动失败 —— 而报错信息看起来像是 schema 写错了。
+  //
+  // 双检（锁外快速判断 + 锁内重读）比"每次启动都上写锁"好：已经是最新版本的
+  // 正常启动完全不会碰写锁，不会和正在跑的业务抢锁。
+  const current = readVersion()
+  if (current >= migrations.length) {
+    if (current > migrations.length) {
+      // 库比代码新：说明用旧镜像回滚了（upgrade.sh 的 prev-<ts> 回滚路径就是这样）。
+      // 这里**不能抛**，否则回滚永远起不来；但要留一条日志 —— 旧代码在新 schema 上
+      // 跑可能读不到新列，那不是"没事"，只是"比起不来强"。
+      console.warn(
+        `[db] 数据库 schema 版本 ${current} 高于本程序支持的 ${migrations.length}，` +
+          '正在用旧版本代码运行（回滚态），未做任何迁移。',
+      )
+    }
+    return
+  }
+
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    // 锁内重读：另一个实例可能已经替我们迁完了
+    const version = readVersion()
+    if (version < migrations.length) {
       for (let i = version; i < migrations.length; i++) {
         migrations[i]!(database)
       }
-      version = migrations.length
       database.exec('DELETE FROM schema_version')
-      database.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version)
-      database.exec('COMMIT')
-    } catch (err) {
-      database.exec('ROLLBACK')
-      throw err
+      database.prepare('INSERT INTO schema_version (version) VALUES (?)').run(migrations.length)
     }
+    database.exec('COMMIT')
+  } catch (err) {
+    database.exec('ROLLBACK')
+    throw err
   }
 }
 

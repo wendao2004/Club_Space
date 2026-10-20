@@ -17,6 +17,8 @@ storage/
 .test-data/
 .test-data-*/
 .test-server.log
+# run-all-tests.mjs 现签的测试证书（每次跑测试都重新生成，不进库）
+.test-certs/
 
 # 内网 CA 与服务器证书。
 #

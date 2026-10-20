@@ -20,7 +20,7 @@
  * 而现象是"用着用着收不到消息了"，很难排查。
  */
 import type { FastifyReply } from 'fastify'
-import { touchPresence, markPresenceOffline } from './chat.ts'
+import { presenceConnected, presenceDisconnected } from './presence.ts'
 import { getDb } from './db.ts'
 
 export type RealtimeEvent =
@@ -134,9 +134,9 @@ function closeConnection(conn: Connection, endResponse = false): void {
     if (set.size === 0) {
       connections.delete(conn.userId)
       // 最后一个连接断开才算离线。
-      // 用 markPresenceOffline 而不是 touchPresence(-1)：后者会把 last_seen
-      // 一起刷新成 now，导致刚退出的人在 60 秒内仍被判成在线。
-      markPresenceOffline(conn.userId)
+      // 只减计数、不动 last_seen：用"刷新时间戳"来表达离线，会让刚关掉页面的人
+      // 在接下来 60 秒里仍然被判成在线（头像亮着，人已经走了）。
+      presenceDisconnected(conn.userId)
       broadcastPresence(conn.userId, false)
     }
   }
@@ -222,16 +222,20 @@ export function subscribe(
         closeConnection(conn, true)
         return
       }
-      // ⚠️ 心跳必须**同时续期在线状态**，不能只发 ping。
+      // 心跳**不再写库**。
       //
-      // 出过的故障：touchPresence 只在连接建立时调用一次，而在线判定窗口是
-      // 60 秒（见 chat.ts 的 ONLINE_WINDOW_MS）—— 于是每个人连上 1 分钟之后就
-      // 被判定成离线，哪怕连接好端端地开着、用户正在打字。
-      // 用户看到的就是"在线状态显示异常"：绿点闪一下然后永远变灰。
+      // 以前这里调 touchPresence(userId, 0) 续期 last_seen。那个调用存在的理由是
+      // 一段真实故障：在线判定曾经只看 last_seen 窗口（60 秒），而 touchPresence
+      // 只在连接建立时调一次 —— 于是每个人连上 1 分钟之后就被判成离线，
+      // 绿点闪一下然后永远变灰。
       //
-      // 心跳是这个进程里唯一一处"每 25 秒必定执行一次"的代码，续期放这里
-      // 最不容易漏。delta 传 0：只更新时间戳，不动连接计数。
-      touchPresence(conn.userId, 0)
+      // 但那个故障真正的修法是"把 connection_count > 0 当成主依据"，不是
+      // "让心跳多写几次库"。修完之后这段续期就成了纯粹的负担：
+      // 100 条连接 = 4 次/秒的写事务，换来的信息量为零 —— "这个人还连着"
+      // 是连接表自己就知道的事，比数据库更准。
+      //
+      // 现在心跳只做两件事：点查一次会话是否还有效（读），发一个 SSE 注释行。
+      // 见 presence.ts 里关于"活连接表 + 库记录"的分工说明。
       writeEvent(conn, { type: 'ping' })
     }, 25_000),
     closed: false,
@@ -246,7 +250,7 @@ export function subscribe(
   const wasOffline = set.size === 0
   set.add(conn)
 
-  touchPresence(userId, 1)
+  presenceConnected(userId)
   if (wasOffline) broadcastPresence(userId, true)
 
   writeEvent(conn, { type: 'hello', data: { connectionId: id, serverTime: Date.now() } })

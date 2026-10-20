@@ -137,6 +137,19 @@ services:
       # （转换服务是经典的 RCE 温床）。持有 socket 的是下面独立的 ops-runner 容器。
       - ./docker-compose.yml:/compose/docker-compose.yml:ro
       - ./templates:/compose/templates:ro
+      # 站点证书的**公钥部分**，只给健康检查算到期天数用（见 server/src/tls.ts）。
+      #
+      # 为什么必须做这件事：证书签 397 天，到期那天的表现是**所有成员的浏览器同时
+      # 红屏**，PWA 与 Service Worker 一起失效 —— 而"打开平台看看怎么回事"这个
+      # 动作本身就打不开了。提前一个月的提醒只能从这里出。
+      #
+      # ⚠️ 只挂 server.crt，**绝不挂 server.key**。这个容器每天在解析用户上传的
+      # 文件，没有理由让它拿到站点私钥；而证书本身是公开的（每个成员的设备里
+      # 都装了签发它的根证书）。
+      #
+      # ⚠️ 宿主机上这个文件必须**先由 ca/gen-certs.sh 生成**。缺文件时 Docker 会
+      # 自动建一个同名**目录**，之后 openssl 就再也写不进去了（upgrade.sh 有前置检查）。
+      - ./ca/served/server.crt:/certs/server.crt:ro
     environment:
       NODE_ENV: production
       WL_DATA_DIR: /data
@@ -156,6 +169,11 @@ services:
       # 重任务服务的地址。留空时相关工具在界面上显示为"未启用"而不是静默失败。
       WL_CONVERT_SERVICE_URL: ${WL_CONVERT_SERVICE_URL:-}
       WL_TOOLS_ENABLED: ${WL_TOOLS_ENABLED:-true}
+      # 证书到期提醒。默认值就是生产值，列在这里是为了"能在 .env 里改得到"。
+      # 证书签 397 天，到期那天所有成员的浏览器会同时红屏 —— 提前一个月提醒，
+      # 才来得及安排重签。
+      WL_TLS_CERT_PATH: ${WL_TLS_CERT_PATH:-/certs/server.crt}
+      WL_CERT_WARN_DAYS: ${WL_CERT_WARN_DAYS:-30}
 
       # 只信任真实反向代理的地址。
       # 不设的话 req.ip 会是 Caddy 容器的地址（所有人共用一个限流桶）；

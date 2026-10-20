@@ -99,6 +99,26 @@ export const MIN_FREE_BYTES = envInt('WL_MIN_FREE_BYTES', 2 * 1024 * 1024 * 1024
  */
 export const HEALTH_MIN_FREE_BYTES = envInt('WL_HEALTH_MIN_FREE_BYTES', 256 * 1024 * 1024)
 
+/**
+ * TLS 证书路径（用于健康检查算到期天数）。
+ *
+ * 只挂**对外证书**，不挂 server.key —— 应用容器每天在解析用户上传的文件，
+ * 没有理由让它拿到站点私钥。证书本身是公开的（每个成员的设备里都装了一份
+ * 签发它的根证书），读它是安全的。
+ *
+ * 开发机上没有这个文件是正常的：读不到就当"未知"，不判红。
+ */
+export const TLS_CERT_PATH = process.env.WL_TLS_CERT_PATH ?? '/certs/server.crt'
+
+/**
+ * 证书剩多少天开始"提醒"。
+ *
+ * 30 天不是随手取的：续证书要重跑 gen-certs.sh（根 CA 会复用，但服务器证书
+ * 会重签），然后重启 caddy，再让成员重新拉一次 —— 这是需要提前约时间的操作，
+ * 而不是"过期了再说"。默认值给了一个月，足够从容。
+ */
+export const CERT_WARN_DAYS = envInt('WL_CERT_WARN_DAYS', 30)
+
 /** 会话有效期（天）。 */
 export const SESSION_DAYS = envInt('WL_SESSION_DAYS', 30)
 

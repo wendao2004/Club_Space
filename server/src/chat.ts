@@ -16,6 +16,7 @@
  */
 import { getDb, newId, now, transaction } from './db.ts'
 import { HttpError } from './files.ts'
+import { onlineUserIds } from './presence.ts'
 
 export interface ConversationSummary {
   id: string
@@ -908,70 +909,8 @@ function searchByLike(userId: string, q: string, limit: number): SearchHit[] {
   return rows.map(toSearchHit)
 }
 
-// ---------------------------------------------------------------- 在线状态
-
-/** 记一次心跳。用时间戳而不是布尔值，进程崩溃后能自然过期。 */
-export function touchPresence(userId: string, delta = 0): void {
-  getDb()
-    .prepare(
-      `INSERT INTO presence (user_id, last_seen, connection_count)
-       VALUES (?, ?, MAX(0, ?))
-       ON CONFLICT(user_id) DO UPDATE SET
-         last_seen = excluded.last_seen,
-         connection_count = MAX(0, presence.connection_count + ?)`,
-    )
-    .run(userId, now(), Math.max(0, delta), delta)
-}
-
-/**
- * 连接全部断开时调用：只减计数，**不动 last_seen**。
- *
- * 早先这里走的是 touchPresence(userId, -1)，它会把 last_seen 一起刷成 now ——
- * 于是刚关掉页面的人在接下来整整 60 秒里仍被判成在线。用户看到的是
- * "明明退出了，头像还是亮的"，这是"在线状态显示异常"的一部分。
- */
-export function markPresenceOffline(userId: string): void {
-  getDb()
-    .prepare('UPDATE presence SET connection_count = MAX(0, connection_count - 1) WHERE user_id = ?')
-    .run(userId)
-}
-
-/**
- * 进程启动时把所有连接计数清零。
- *
- * connection_count 的语义是"此刻有几条 SSE 连接"，而进程刚重启时一条都没有。
- * 不清的话，上一次崩溃前留下的计数会让那些人**永远显示在线** ——
- * 因为下面的 onlineUserIds 把 connection_count > 0 当作在线依据。
- */
-export function resetPresenceCounts(): void {
-  getDb().prepare('UPDATE presence SET connection_count = 0').run()
-}
-
-/** 在线判定窗口。心跳间隔设计为 25 秒，60 秒没动静就认为这条连接已经不在了。 */
-const ONLINE_WINDOW_MS = 60_000
-
-/**
- * 当前在线的人。
- *
- * 判定条件是「有活连接」**或**「最近有心跳」，不是单独的某一个：
- *
- *   - `connection_count > 0` 是主依据。干净断开时会立刻减到 0，用户马上变灰 ——
- *     比"等 60 秒窗口过期"准得多。
- *   - `last_seen` 窗口是兜底。进程被 kill -9 时没有机会执行断开逻辑，
- *     连接计数会残留；时间窗保证这类幽灵连接最多活 60 秒。
- *     （启动时还会再清一次，见 resetPresenceCounts。）
- *
- * ⚠️ 这里曾经**只**看 last_seen 窗口，而 25 秒的心理心跳从不刷新 last_seen、
- * touchPresence 只在连接建立时调用一次 —— 于是每个人连上 1 分钟后就全体变灰，
- * 哪怕连接好端端开着、人正在打字。这就是用户报告的"在线状态显示异常"。
- */
-export function onlineUserIds(): Set<string> {
-  const rows = getDb()
-    .prepare('SELECT user_id FROM presence WHERE connection_count > 0 OR last_seen > ?')
-    .all(now() - ONLINE_WINDOW_MS) as unknown as Array<{ user_id: string }>
-  return new Set(rows.map((r) => r.user_id))
-}
-
+// 在线状态搬到 presence.ts 了：那里的连接表是主依据，心跳不再写库。
+// 这里保留 import 是因为本模块的会话摘要/联系人列表要显示绿点。
 /** 可发起会话的人（用于"新建聊天"的人员选择器）。 */
 export function listContacts(userId: string): Array<{
   id: string
