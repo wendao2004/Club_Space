@@ -2449,6 +2449,79 @@ async function main() {
     await closeWindowByTitle('新建文档.docx')
     await sleep(400)
 
+    // ---- 在线编辑：一篇"有结构"的文档能读出结构 ----
+    //
+    // 上面那一节验的是"新建 → 写 → 存"，走的是我们自己写出来的最简 docx。
+    // 这一节反过来：喂一份带标题、加粗、列表、表格的 docx，看**读**的那条路
+    // 能不能把结构还原出来。读错了不会报错，只会表现为"打开以后内容不对/少了"，
+    // 而那是最难被发现的失败方式，所以必须逐项断言。
+    console.log('\n【在线编辑：解析有结构的文档】')
+
+    const { zipSync, strToU8: toU8 } = await import('fflate')
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    const structuredDocx = Buffer.from(
+      zipSync({
+        '[Content_Types].xml': toU8('<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'),
+        'word/document.xml': toU8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document ${W}><w:body>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>会议纪要</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">参加人员：</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>张三</w:t></w:r></w:p>
+<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>第一条决议</w:t></w:r></w:p>
+<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2880"/><w:gridCol w:w="2880"/></w:tblGrid>
+<w:tr><w:tc><w:p><w:r><w:t>项目</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>预算</w:t></w:r></w:p></w:tc></w:tr>
+<w:tr><w:tc><w:p><w:r><w:t>场地</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>300</w:t></w:r></w:p></w:tc></w:tr>
+</w:tbl>
+</w:body></w:document>`),
+        'word/styles.xml': toU8(`<?xml version="1.0"?><w:styles ${W}>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style></w:styles>`),
+        'word/numbering.xml': toU8(`<?xml version="1.0"?><w:numbering ${W}>
+<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum>
+<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`),
+      }),
+    )
+
+    const structuredName = `结构文档-${SUFFIX}.docx`
+    assert(await uploadFile(structuredName, structuredDocx), '带结构的 docx 已上传')
+
+    await openApp('文件')
+    await sleep(1800)
+    assert((await openFileByName(structuredName)) === 'ok', '结构文档出现在文件管理器里')
+    await sleep(2500)
+
+    const parsedDoc = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const win = [...document.querySelectorAll('.window')].find(
+        (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(structuredName)},
+      )
+      if (!win) return { found: false }
+      const h1 = win.querySelector('.de__line--h1 .de__text')
+      return {
+        found: true,
+        isEditor: !!win.querySelector('.de'),
+        heading: h1?.textContent.trim() ?? '',
+        boldText: win.querySelector('.de__text b')?.textContent.trim() ?? '',
+        hasList: !!win.querySelector('.de__line--li'),
+        listText: win.querySelector('.de__line--li .de__text')?.textContent.trim() ?? '',
+        tableCells: [...win.querySelectorAll('.de__td')].map((td) => td.textContent.trim()),
+        readOnlyBlocks: win.querySelectorAll('.de__raw').length,
+      }
+    })())`))
+
+    assert(parsedDoc.found === true, '双击结构文档打开编辑器')
+    assert(parsedDoc.isEditor === true, '打开的是文档编辑器（不是预览窗口）')
+    assert(parsedDoc.heading === '会议纪要', '标题段落被认成标题（docx 的 Heading1 → 界面 h1）', parsedDoc.heading)
+    assert(parsedDoc.boldText === '张三', '行内加粗被解析出来（<b> 包住了那一段）', parsedDoc.boldText)
+    assert(parsedDoc.hasList === true, '列表项被认成列表（numPr）', parsedDoc.listText)
+    assert(parsedDoc.listText === '第一条决议', '列表项的文字没丢', parsedDoc.listText)
+    assert(
+      parsedDoc.tableCells.join('|') === '项目|预算|场地|300',
+      '表格的四个单元格都读出来了',
+      parsedDoc.tableCells.join('|'),
+    )
+    assert(parsedDoc.readOnlyBlocks === 0, '这份文档没有触发只读回退（全部是可编辑块）', String(parsedDoc.readOnlyBlocks))
+
+    await closeWindowByTitle(structuredName)
+    await sleep(400)
+
     // ---- 系统音效：界面动作真的在合成声音，静音真的静得掉 ----
     //
     // 声音没法在 CI 里用耳朵验，所以这里验的是**音频图真的被驱动了**：
