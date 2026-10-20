@@ -173,7 +173,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
 直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
 
-全量 **26 个套件 / 1801 条断言**：
+全量 **34 个套件 / 2149 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|
@@ -181,33 +181,41 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 | `xiangqi-ai-test` | 36 | 机器人：**903 个随机局面上与规则引擎逐条差分**、棋力、时间预算、自对弈 |
 | `xiangqi-mate-test` | 11 | 九种杀法：**先确认"这确实是将死"，再断言名字** |
 | `games-test` | 84 | 象棋房间：80 手逐步与引擎差分、人机对战、三次重复判和、按人推送 |
+| `xiangqi-bot-test` | 12 | 人机对战：搜索跑在 Worker 里，**搜索期间 `/api/health` 的 p99 不被拖红**；卡死自愈 |
 | `game-isolation-test` | 31 | 三种游戏共用 `game_rooms` 一张表时的隔离（`board` 列含义不同） |
+| `doudizhu-test` | 109 | 全部牌型的正例与反例、比较规则、400 手自动对局 |
+| `doudizhu-room-test` | 58 | **手牌隐藏**、叫地主、出牌校验、自动打完整局 |
+| `doudizhu-ux-test` | 26 | 驱动动画的"这一手"标识与结算文案映射 |
+| `werewolf-test` | 274 | 身份分配随机性、隐藏信息、超时兜底、房主退房解散房间 |
+| `werewolf-route-test` | 59 | 9 个真实账号走 HTTP 全流程，逐个比对 view 有没有泄露 |
 | `totp-test` | 36 | **RFC 6238 附录 B 的 6 条标准向量**全部匹配 |
-| `admin-test` | 71 | 运维管控的权限门禁与参数白名单 |
+| `totp-ratelimit-test` | 13 | 两步登录限流按 IP / 按账号分桶，两个桶不互相污染 |
+| `admin-test` | 88 | 运维管控的权限门禁与参数白名单 |
 | `ops-runner-test` | 43 | 执行器的独立白名单校验 |
+| `admin-e2e-test` | 71 | 两步验证绑定/确认/关闭、秘密不外泄 |
 | `e2e-test` | 58 | 文件分片续传、秒传、**任何格式上传（内容定类型）**、跨空间隔离、路径穿越 |
 | `upload-limit-test` | 11 | 磁盘余量守卫（余量不足时拒绝并告知差多少） |
 | `ratelimit-test` | 12 | 真打满阈值的限流 |
 | `image-tools-test` | 37 | 图片转换/缩放/压缩，含"透明转 JPEG 不能变黑" |
 | `tools-extra-test` | 67 | 工具集扩展：PDF、文本、抽签 |
-| `chat-test` | 68 | SSE 实时推送、中文全文检索、撤回不留正文 |
-| `realtime-test` | 27 | 在线状态与心跳过期 |
-| `ledger-test` | 176 | 金额精度、状态机不许跳步、分摊合计、CSV 注入防护、活动汇总与逐笔对账 |
-| `assets-test` | 71 | 可用量算而不存、事务内防超借、逾期派生、退役保留历史 |
+| `csv-parser-test` | 33 | CSV/TSV 解析：引号内换行、转义引号、分隔符自动识别 |
+| `office-edit-test` | 26 | Word/Excel 在线编辑：保存、权限、并发写、内容去重的引用计数 |
+| `convert-test` | 32 | 与 Gotenberg 的接口契约（用一个假服务验证，不需要真装） |
+| `chat-test` | 111 | SSE 实时推送、中文全文检索、撤回不留正文、加人/退群、引用快照、@ 未读 |
+| `realtime-test` | 34 | 在线状态：**连接表说了算**（库里痕迹全抹掉仍显示在线）、断线立刻变灰 |
+| `ledger-test` | 190 | 金额精度、状态机不许跳步、分摊合计、CSV 注入防护、活动汇总与逐笔对账 |
+| `assets-test` | 93 | 可用量算而不存、事务内防超借、逾期派生、退役保留历史 |
 | `user-admin-test` | 82 | 管理员改成员、安全红线拒绝路径、借还记录的作废与恢复 |
-| `werewolf-test` | 274 | 身份分配随机性、隐藏信息、超时兜底、房主退房解散房间 |
-| `werewolf-route-test` | 59 | 9 个真实账号走 HTTP 全流程，逐个比对 view 有没有泄露 |
-| `doudizhu-test` | 109 | 全部牌型的正例与反例、比较规则、400 手自动对局 |
-| `doudizhu-room-test` | 59 | **手牌隐藏**、叫地主、出牌校验、自动打完整局 |
-| `doudizhu-ux-test` | 26 | 驱动动画的"这一手"标识与结算文案映射 |
-| `admin-e2e-test` | 71 | 两步验证绑定/确认/关闭、秘密不外泄 |
-| `convert-test` | 27 | 与 Gotenberg 的接口契约（用一个假服务验证，不需要真装） |
-| `ui-smoke-test` | 196 | **在真实 Chrome 里开窗口、发消息、记一笔账、走一步棋、跟机器人下一盘、登记物品**；另数 `AudioContext` 的声源，确认开窗/试听真在发声、静音后一声不出 |
+| `health-test` | 25 | 健康检查：写探针、磁盘余量、**增量审计链**、审计表**真的**不可改删 |
+| `health-degraded-test` | 6 | 磁盘告急时必须 503（把底线设成 1 PiB，断言与机器实际余量无关） |
+| `cert-health-test` | 12 | 证书剩余天数进健康检查；快到期只 `degraded` 不 503；换证书后按 mtime 立刻生效 |
+| `db-migrate-test` | 12 | **4 个真子进程同时迁移一个空库**，只迁一次、没有 `duplicate column` |
+| `ui-smoke-test` | 288 | **在真实 Chrome 里开窗口、发消息、记一笔账、走一步棋、跟机器人下一盘、登记物品、引用与 @**；另数 `AudioContext` 的声源，确认开窗/试听真在发声、静音后一声不出 |
 
 `ui-smoke-test` 用 DevTools 协议驱动系统里的 Chrome/Edge，
 验证界面**确实渲染出来了**（不是构建成功就算），并且**真的能操作**；
 每个操作都会再用 API 查一遍后端，确认状态确实被持久化 —— 不是前端乐观更新。
-（它需要一个真实的 Chrome，所以 CI 里跳过，其余 25 个套件都在 CI 里跑。）
+（它需要一个真实的 Chrome，所以 CI 里跳过，其余 33 个套件都在 CI 里跑。）
 
 依赖 `data/` 的测试需要干净数据库（首次运行才能自举创建管理员），
 `run-all-tests.mjs` 会自动处理：每个端到端测试前重启服务并清空 `data/`。
@@ -328,7 +336,7 @@ Club_Space/
 │       ├── mobile/         # 移动端外壳（独立界面）
 │       ├── views/          # 登录页 / 安全上下文提示条
 │       └── styles/         # 设计令牌与基础样式
-├── scripts/                # 测试（26 个套件、1801 条断言，`pnpm test` 全跑）
+├── scripts/                # 测试（34 个套件、2149 条断言，`pnpm test` 全跑）
 ├── deploy/                 # 部署：compose / Caddyfile / 证书 / 引导页 / 备份 / 转换镜像
 └── docs/                   # 需求、部署、开发纪实、迭代记录（索引见 docs/README.md）
 ```
