@@ -7,12 +7,16 @@
      不可用。所以通知只在页面打开时通过这里给出，不做"关了标签页也能收到"的
      虚假承诺。
 
-  2. 页面在后台时，如果浏览器支持且已进入安全上下文，用 Notification API
-     补一条系统通知 —— 这条路在装好内网根证书之后是可用的（Service Worker
-     与 Notification 都要求安全上下文）。
+  2. **系统级通知不在这里发**。这里曾经有一个 watcher：只要有新 Toast 且页面
+     不可见，就 `new Notification(...)`。它有两个问题 ——
+        - 覆盖太宽：连"已出牌""文件已保存"这类几百毫秒就过期的回执也会推到
+          系统通知中心，一天下来能把通知栏刷满；
+        - 判据不全：只看 `document.visibilityState`，而切到别的应用（浏览器在
+          后台但标签页仍 visible）时 `hasFocus()` 才是 false，那时用户同样看不到。
+     现在统一由 `@/lib/notify` 提供能力、由**具体业务**决定要不要通知
+     （目前只有聊天新消息），见 stores/chat.ts 的 notifyIncoming。
 -->
 <script setup lang="ts">
-import { watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { useUi, type Toast } from '@/stores/ui'
 
@@ -35,25 +39,6 @@ function onToastClick(toast: Toast): void {
   ui.dismiss(toast.id)
   action()
 }
-
-// 有新通知且页面在后台时，尝试发一条系统级通知
-watch(
-  () => ui.toasts.length,
-  (length, previous) => {
-    if (length <= (previous ?? 0)) return
-    const latest = ui.toasts[ui.toasts.length - 1]
-    if (!latest) return
-    if (document.visibilityState === 'visible') return
-    if (!('Notification' in window)) return
-    if (window.isSecureContext === false) return
-    if (Notification.permission !== 'granted') return
-    try {
-      new Notification(latest.title, { body: latest.detail ?? '', tag: String(latest.id) })
-    } catch {
-      // 通知失败不该影响主流程
-    }
-  },
-)
 </script>
 
 <template>

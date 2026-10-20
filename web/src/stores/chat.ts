@@ -21,6 +21,7 @@ import { useAuth } from '@/stores/auth'
 import { useRealtime } from '@/stores/realtime'
 import { useUi } from '@/stores/ui'
 import { useWindows } from '@/stores/windows'
+import { isPageHidden, setTitleBadge, showDesktopNotification } from '@/lib/notify'
 
 /** 每次拉取消息的条数。 */
 const PAGE_SIZE = 50
@@ -52,6 +53,8 @@ function wrap(data: unknown): Event {
 }
 
 let typingTimer: number | null = null
+/** 未读角标的订阅句柄（标签页标题 + favicon）。 */
+let offBadge: (() => void) | null = null
 /** 当前登录用户 id，用于区分"自己发的"和"别人发的"。 */
 let selfUserId: string | null = null
 /** 每个会话上次发出 typing 的时间戳，用于节流。 */
@@ -164,6 +167,17 @@ export const useChat = defineStore('chat', {
       if (typingTimer === null) {
         typingTimer = window.setInterval(() => pruneTyping(store), 1000)
       }
+
+      // 未读数一有变化就把角标写到标签页与 favicon 上。
+      //
+      // 用 $subscribe 而不是在每个改动 totalUnread 的地方手动调一次：那个数在
+      // 七八处被改（推送、已读、退群、拉列表），漏一处就是"数字对但角标不动"，
+      // 而且这种不一致要等下一次刷新才会自己好，很难被发现。
+      if (offBadge) offBadge()
+      offBadge = this.$subscribe((_mutation, state) => {
+        setTitleBadge(state.totalUnread)
+      })
+      setTitleBadge(this.totalUnread)
     },
 
     /**
@@ -175,6 +189,10 @@ export const useChat = defineStore('chat', {
     disconnect(): void {
       for (const off of offRealtime) off()
       offRealtime = []
+      if (offBadge) {
+        offBadge()
+        offBadge = null
+      }
       if (typingTimer !== null) {
         window.clearInterval(typingTimer)
         typingTimer = null
@@ -583,20 +601,44 @@ function isActivelyViewing(conversationId: string): boolean {
  *  2. 正开着聊天窗口盯着这个会话时不提示 —— 那是打扰；
  *  3. 同一会话 6 秒内只提示一次 —— 一串消息不刷屏。
  *
+ * 页面在后台时会**额外**发一条浏览器通知：Toast 画在我们自己的页面里，
+ * 切了标签 / 最小化之后用户根本看不见，而那恰恰是他最需要被提醒的时候。
+ * 两件事一起做是刻意的 —— 通知负责"人在别处"，Toast 负责"人回来了能看见"。
+ *
  * 未读红点不在这里管：它由服务端的 totalUnread 驱动（任务栏角标、
  * 桌面图标、开始菜单共用同一份数），这里只负责"弹一下"。
  */
-function notifyIncoming(msg: ChatMessage): void {
+function notifyIncoming(store: ChatStore, msg: ChatMessage): void {
   if (msg.senderId === selfUserId) return
   if (isActivelyViewing(msg.conversationId)) return
   const now = Date.now()
   if (lastIncomingToastConv === msg.conversationId && now - lastIncomingToastAt < 6000) return
   lastIncomingToastConv = msg.conversationId
   lastIncomingToastAt = now
+
+  // 群聊里只写发送者名字是不够的：同一个群里三个人同时说话时，通知栏里
+  // 会出现三条"张三"，分不清这是哪个群。单聊则相反，会话本身就是对方，
+  // 多写一个"和某某的会话"只是噪音。
+  const conv = findConversation(store, msg.conversationId)
+  const sender = msg.senderName ?? '新消息'
+  const title = conv?.kind === 'group' ? `${conv.title} · ${sender}` : sender
+  const body = previewOf(msg)
+
+  if (isPageHidden()) {
+    showDesktopNotification({
+      title,
+      body: body || '（没有文字内容）',
+      // 用会话 id 当 tag：同一个人的连续消息替换前一条，而不是在通知中心堆十层
+      tag: msg.conversationId,
+      onClick: () => openChatConversation(msg.conversationId),
+    })
+  }
+
   const ui = useUi()
-  ui.notify('info', msg.senderName ?? '新消息', previewOf(msg), 6000, {
+  ui.notify('info', title, body, 6000, {
     onClick: () => openChatConversation(msg.conversationId),
-    // 聊天用比普通通知更轻的一声：一天可能来几十条，别搞得像报警
+    // 聊天用比普通通知更轻的一声：一天可能来几十条，别搞得像报警。
+    // 系统通知那条是 silent 的，所以这是后台时唯一的声音来源 —— 不能省。
     sound: 'message',
   })
 }
@@ -635,7 +677,7 @@ function handleIncoming(store: ChatStore, event: Event): void {
   // 随后服务端的 unread 推送（同一连接、保序）会用精确值覆盖它。
   // 这样即使推送偶发丢失，最坏只是数字短暂偏差，而不是"完全没有反馈"。
   if (isNew) {
-    notifyIncoming(msg)
+    notifyIncoming(store, msg)
     if (msg.senderId !== selfUserId) {
       store.totalUnread += 1
       // 有人@我：会话列表上那个红 @ 要立刻出现，不能等下一次全量刷新 ——

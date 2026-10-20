@@ -22,6 +22,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import Icon from '@/components/Icon.vue'
+import * as sfx from '@/lib/sfx'
 import { useDdz } from '@/stores/ddz'
 import { formatTime } from '@/api'
 import type { DdzCard, DdzPhase, DdzPlay, DdzRoom } from '@/api'
@@ -35,6 +36,22 @@ type View = 'lobby' | 'table'
 const view = ref<View>('lobby')
 /** 提交类操作（新建/加入）进行中，用于禁用按钮防止连点。 */
 const busy = ref(false)
+
+// ---------------------------------------------------------------- 声音
+
+/**
+ * 喇叭按钮：和设置页、象棋窗口共用同一个总开关（`soundState.muted`）。
+ *
+ * 这里**不做独立的"斗地主音效"开关** —— 总量只有三层（静音 / 系统音效 /
+ * 聊天音效），再加一层就没人记得住哪层管哪层了。要安静就整体静音。
+ */
+const soundOn = computed(() => !sfx.soundState.muted)
+
+function toggleSound(): void {
+  sfx.toggleMuted()
+  // 关掉的时候当然什么都不响（那正是意图）；打开时回一声，让用户确认成功
+  if (!sfx.soundState.muted) sfx.playSystem('notify', { force: true })
+}
 
 // ---------------------------------------------------------------- 数据
 
@@ -367,13 +384,19 @@ async function doRematch(): Promise<void> {
 
 let pollTimer: number | null = null
 
-/** 轮询兜底：SSE 万一断了，牌桌也不会卡住。只在牌桌且对局未结束时拉取。 */
+/**
+ * 轮询兜底：SSE 万一断了，牌桌也不会卡住。
+ *
+ * **只在断线时才真的发请求**。连接正常时服务端会推每一条变化，3 秒一次的
+ * 全量拉取纯属重复读库 —— 一局牌下来几十次请求，服务端和手机流量都白花。
+ * `ddz.connected` 由共享的实时层维护，正是"连接还活着吗"的准确答案。
+ */
 function tick(): void {
   const current = room.value
   if (view.value !== 'table' || !current) return
-  if (current.phase === 'bidding' || current.phase === 'playing') {
-    void ddz.reload()
-  }
+  if (current.phase !== 'bidding' && current.phase !== 'playing') return
+  if (ddz.connected) return
+  void ddz.reload()
 }
 
 onMounted(() => {
@@ -409,6 +432,13 @@ onBeforeUnmount(() => {
         </button>
         <button class="wl-icon-btn" :disabled="ddz.loading" title="刷新" @click="onRefresh">
           <Icon name="refresh" :size="16" :class="{ spin: ddz.loading }" />
+        </button>
+        <button
+          class="wl-icon-btn"
+          :title="soundOn ? '关闭音效' : '打开音效（轮到你时会提示）'"
+          @click="toggleSound"
+        >
+          <Icon :name="soundOn ? 'volume' : 'volume-off'" :size="16" />
         </button>
       </header>
 
@@ -483,6 +513,13 @@ onBeforeUnmount(() => {
         <span v-if="room" class="wl-badge" :class="phaseBadgeClass(room.phase)">{{ phaseLabel(room.phase) }}</span>
         <div class="spacer" />
         <span class="status-text">{{ ddz.statusText }}</span>
+        <button
+          class="wl-icon-btn"
+          :title="soundOn ? '关闭音效' : '打开音效（轮到你时会提示）'"
+          @click="toggleSound"
+        >
+          <Icon :name="soundOn ? 'volume' : 'volume-off'" :size="16" />
+        </button>
       </header>
 
       <div v-if="!ddz.connected" class="notice notice--warning">

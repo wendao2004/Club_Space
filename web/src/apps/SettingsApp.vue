@@ -21,6 +21,7 @@ import { useWindows, type WindowInstance } from '@/stores/windows'
 import {
   playSystem,
   previewSystem,
+  setChatSoundOn,
   setMuted,
   setSystemSoundOn,
   setVolume,
@@ -28,6 +29,11 @@ import {
   SYSTEM_SOUND_LABELS,
   type SystemSound,
 } from '@/lib/sfx'
+import {
+  notificationPermission,
+  requestNotificationPermission,
+  type NotifyPermission,
+} from '@/lib/notify'
 
 const props = defineProps<{ win: WindowInstance }>()
 
@@ -99,6 +105,73 @@ const soundList = Object.keys(SYSTEM_SOUND_LABELS) as SystemSound[]
 function toggleSystemSound(): void {
   setSystemSoundOn(!soundState.systemOn)
 }
+
+/** 聊天新消息提示音：与系统音效分开，一天几十条的和操作回执不是一个噪音预算 */
+function toggleChatSound(): void {
+  setChatSoundOn(!soundState.chatOn)
+}
+
+// ---------------------------------------------------------------- 桌面通知
+
+/**
+ * 通知权限。
+ *
+ * 用一个 ref 缓存当前值：Notification.permission 本身不是响应式的，用户在同一
+ * 页面上点了"开启"之后界面必须立刻变，否则按钮看起来没反应。
+ */
+const notifyPermission = ref<NotifyPermission>(notificationPermission())
+const notifyBusy = ref(false)
+
+const NOTIFY_TEXT: Record<NotifyPermission, { title: string; hint: string; action: string | null }> = {
+  granted: {
+    title: '已开启',
+    hint: '页面切到后台（切标签、最小化、被别的窗口盖住）时，新消息会弹到系统通知里。',
+    action: null,
+  },
+  default: {
+    title: '未开启',
+    hint: '开启后，切到别的窗口也能收到消息提醒。不开也能用 —— 未读数会显示在标签页标题上。',
+    action: '开启桌面通知',
+  },
+  denied: {
+    title: '已被浏览器拦下',
+    hint: '地址栏左侧的站点设置里可以手动改回"允许"。这里没法再帮你申请一次。',
+    action: null,
+  },
+  unsupported: {
+    title: '当前浏览器不支持',
+    hint: '需要 HTTPS 访问，且浏览器提供 Notification 接口。',
+    action: null,
+  },
+}
+
+async function askNotifyPermission(): Promise<void> {
+  if (notifyBusy.value) return
+  notifyBusy.value = true
+  try {
+    notifyPermission.value = await requestNotificationPermission()
+    if (notifyPermission.value === 'granted') {
+      ui.notify('success', '桌面通知已开启', '下次收到消息时会直接弹系统通知')
+    } else if (notifyPermission.value === 'denied') {
+      ui.notify('warning', '通知被浏览器拦下了', '可以在地址栏左侧的站点设置里手动允许')
+    }
+  } finally {
+    notifyBusy.value = false
+  }
+}
+
+const notifyBadge = computed<string>(() => {
+  switch (notifyPermission.value) {
+    case 'granted':
+      return 'wl-badge--success'
+    case 'denied':
+      return 'wl-badge--danger'
+    case 'unsupported':
+      return 'wl-badge--danger'
+    default:
+      return 'wl-badge--warning'
+  }
+})
 
 /** 总开关：静音时所有声音都不响（含棋牌），与任务栏喇叭是同一份状态 */
 function toggleMuteAll(): void {
@@ -417,9 +490,28 @@ watch(
 
             <div class="sfx-row">
               <div class="sfx-row__text">
+                <div class="sfx-row__title">聊天提示音</div>
+                <div class="wl-hint">
+                  收到新消息时的"叮"。它比系统音效轻，一天可能响几十次；关掉不影响未读与通知。
+                </div>
+              </div>
+              <button
+                class="sfx-switch"
+                :class="{ 'sfx-switch--on': soundState.chatOn }"
+                role="switch"
+                :aria-checked="soundState.chatOn"
+                :title="soundState.chatOn ? '关闭聊天提示音' : '打开聊天提示音'"
+                @click="toggleChatSound"
+              >
+                <span class="sfx-switch__knob" />
+              </button>
+            </div>
+
+            <div class="sfx-row">
+              <div class="sfx-row__text">
                 <div class="sfx-row__title">全部声音</div>
                 <div class="wl-hint">
-                  总开关：连象棋、斗地主的落子声一起静掉。任务栏右下角的喇叭是同一个开关。
+                  总开关：连象棋的落子、斗地主的发牌声一起静掉。任务栏右下角的喇叭是同一个开关。
                 </div>
               </div>
               <button
@@ -454,6 +546,35 @@ watch(
                 @input="onVolumeInput"
                 @change="preview('notify')"
               />
+            </div>
+          </div>
+
+          <div class="wl-card settings__card">
+            <div class="settings__card-head">
+              <div class="settings__card-title">后台提醒</div>
+              <div class="wl-hint">
+                页面切到后台（切标签、最小化、被别的窗口盖住）时，新消息会弹到系统通知区。
+                通知点击可直达那条会话；未读数同时会显示在标签页标题上。
+              </div>
+            </div>
+
+            <div class="sfx-row">
+              <div class="sfx-row__text">
+                <div class="sfx-row__title">
+                  桌面通知
+                  <span class="wl-badge" :class="notifyBadge">{{ NOTIFY_TEXT[notifyPermission].title }}</span>
+                </div>
+                <div class="wl-hint">{{ NOTIFY_TEXT[notifyPermission].hint }}</div>
+              </div>
+              <button
+                v-if="NOTIFY_TEXT[notifyPermission].action"
+                class="wl-btn wl-btn--primary"
+                :disabled="notifyBusy"
+                @click="askNotifyPermission"
+              >
+                <Icon name="bell" :size="15" />
+                {{ NOTIFY_TEXT[notifyPermission].action }}
+              </button>
             </div>
           </div>
 

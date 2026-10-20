@@ -29,7 +29,9 @@ import type {
 } from '@/api'
 import { useAuth } from '@/stores/auth'
 import { useChat } from '@/stores/chat'
+import { useUi } from '@/stores/ui'
 import type { WindowInstance } from '@/stores/windows'
+import { notificationPermission, requestNotificationPermission } from '@/lib/notify'
 
 const props = defineProps<{ win: WindowInstance }>()
 
@@ -678,12 +680,64 @@ async function boot(): Promise<void> {
   await chat.loadContacts()
 }
 
+// ---------------------------------------------------------------- 桌面通知
+
+const NOTIFY_PROMPT_KEY = 'wl.notify.offered'
+
+/**
+ * 第一次打开聊天时引导开启桌面通知。
+ *
+ * 为什么必须在这里问：`Notification.requestPermission()` 只在**用户手势的
+ * 调用栈里**有效 —— 在"收到消息那一刻"调用会被浏览器直接忽略（Chrome 还会
+ * 记下这次无手势申请）。用户在聊天窗口里点一下，是少数几个真正算手势的时机。
+ *
+ * 只问一次：同意、拒绝、或者没理它之后都不再提。同一句提示反复弹，用户只会
+ * 学会无视它 —— 那比不提示更糟。
+ */
+function maybeOfferDesktopNotice(): void {
+  if (notificationPermission() !== 'default') return
+  try {
+    if (localStorage.getItem(NOTIFY_PROMPT_KEY) === '1') return
+    localStorage.setItem(NOTIFY_PROMPT_KEY, '1')
+  } catch {
+    // 隐私模式下存不住标记。那就干脆不问 —— 否则每次开窗都弹一遍同一个提示
+    return
+  }
+
+  useUi().notify(
+    'info',
+    '切到别的窗口时也能收到提醒',
+    '点这里开启桌面通知；不想开也没关系，未读数会显示在标签页标题上。',
+    15000,
+    {
+      sound: 'notify',
+      onClick: () => {
+        void (async () => {
+          const ui = useUi()
+          const permission = await requestNotificationPermission()
+          if (permission === 'granted') {
+            ui.notify('success', '桌面通知已开启', '下次收到消息时会在系统通知里弹出来')
+          } else if (permission === 'denied') {
+            ui.notify(
+              'warning',
+              '通知被浏览器拦下了',
+              '地址栏左侧的站点设置里可以手动允许；平时靠标签页标题的数字也能看到未读。',
+            )
+          }
+        })()
+      },
+    },
+  )
+}
+
 onMounted(() => {
   chat.connect()
   void boot()
 
   const initialId = props.win.args.conversationId
   if (typeof initialId === 'string' && initialId) selectConversation(initialId)
+
+  maybeOfferDesktopNotice()
 
   if (typeof ResizeObserver !== 'undefined' && rootEl.value) {
     resizeObserver = new ResizeObserver((entries) => {

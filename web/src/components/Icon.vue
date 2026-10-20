@@ -96,6 +96,8 @@ const paths: Record<string, string> = {
   // 音效开关
   volume: 'M4 10v4h3l4 3.5v-11L7 10H4zM15 9.5a3.5 3.5 0 0 1 0 5M17.6 7a7.5 7.5 0 0 1 0 10',
   'volume-off': 'M4 10v4h3l4 3.5v-11L7 10H4zM15.5 10l4.5 4M20 10l-4.5 4',
+  // 桌面通知
+  bell: 'M18 16H6l1.5-2.5V9a4.5 4.5 0 0 1 9 0v4.5zM10.5 19a1.5 1.5 0 0 0 3 0',
 }
 </script>
 

@@ -17,6 +17,8 @@
  */
 import { defineStore } from 'pinia'
 import { api, ApiError, type DdzCard, type DdzPhase, type DdzRoom, type DdzSeat } from '@/api'
+import { isPageHidden, showDesktopNotification } from '@/lib/notify'
+import * as sfx from '@/lib/sfx'
 import { useUi } from '@/stores/ui'
 import { useRealtime, type RealtimeEventName } from '@/stores/realtime'
 
@@ -222,13 +224,19 @@ export const useDdz = defineStore('ddz', {
      *
      * 别人的出牌不会动我的牌，但我自己出牌后手里那几张就没了 —— 这时选中的 id
      * 已经不在手牌里，必须移除，否则会残留一个看不见的选中项。
+     *
+     * **所有覆盖房间的路径都必须走这里**（SSE、轮询、以及出牌/叫牌接口的返回值）：
+     * 音效就挂在这一次状态迁移上，绕过它的路径会静默无声 ——
+     * 表现出来就是"有时候轮到你不出声"，而且只在特定操作序列下复现。
      */
     applyRoom(room: DdzRoom): void {
+      const prev = this.room
       this.room = room
       const handIds = new Set((room.myHand ?? []).map((card) => card.id))
       if (this.selectedIds.some((id) => !handIds.has(id))) {
         this.selectedIds = this.selectedIds.filter((id) => handIds.has(id))
       }
+      announce(prev, room)
     },
 
     /** 把房间写回列表（有则替换、无则插入到最前）。 */
@@ -258,7 +266,7 @@ export const useDdz = defineStore('ddz', {
     async createRoom(title?: string): Promise<DdzRoom> {
       try {
         const result = await api.ddz.createRoom(title)
-        this.room = result.room
+        this.applyRoom(result.room)
         this.clearSelection()
         this.hintIndex = 0
         await this.loadRooms()
@@ -275,7 +283,7 @@ export const useDdz = defineStore('ddz', {
     async openRoom(id: string): Promise<void> {
       try {
         const result = await api.ddz.getRoom(id)
-        this.room = result.room
+        this.applyRoom(result.room)
         this.clearSelection()
         this.hintIndex = 0
         this.error = null
@@ -289,7 +297,7 @@ export const useDdz = defineStore('ddz', {
     async joinRoom(id: string): Promise<void> {
       try {
         const result = await api.ddz.join(id)
-        this.room = result.room
+        this.applyRoom(result.room)
         this.clearSelection()
         this.hintIndex = 0
         await this.loadRooms()
@@ -311,7 +319,7 @@ export const useDdz = defineStore('ddz', {
       const roomId = room.id
       try {
         const result = await api.ddz.bid(roomId, call)
-        if (this.room && this.room.id === roomId) this.room = result.room
+        if (this.room && this.room.id === roomId) this.applyRoom(result.room)
         this.hintIndex = 0
         this.error = null
         useUi().notify('info', call ? '已叫地主' : '不叫地主')
@@ -337,7 +345,7 @@ export const useDdz = defineStore('ddz', {
       const cardIds = [...this.selectedIds]
       try {
         const result = await api.ddz.play(roomId, cardIds)
-        if (this.room && this.room.id === roomId) this.room = result.room
+        if (this.room && this.room.id === roomId) this.applyRoom(result.room)
         this.clearSelection()
         this.hintIndex = 0
         this.upsertRoom(result.room)
@@ -362,7 +370,7 @@ export const useDdz = defineStore('ddz', {
       const roomId = room.id
       try {
         const result = await api.ddz.pass(roomId)
-        if (this.room && this.room.id === roomId) this.room = result.room
+        if (this.room && this.room.id === roomId) this.applyRoom(result.room)
         this.clearSelection()
         this.hintIndex = 0
         this.error = null
@@ -509,5 +517,77 @@ function notifyResult(room: DdzRoom): void {
   // 认不出的原因码就**原样透出**，不要吞掉 —— 将来服务端加了新原因，
   // 至少还能看见它是什么，而不是变成一句空话
   const detail = DDZ_REASON_LABELS[result.reason] ?? result.reason
-  useUi().notify('info', result.landlordWon ? '地主获胜' : '农民获胜', detail)
+  // 胜负音由 announce() 播（它知道我是地主还是农民）；这里的 toast 不再重复响，
+  // 否则"通知音 + 胜利音"叠在一起，听起来像两件事同时发生。
+  useUi().notify('info', result.landlordWon ? '地主获胜' : '农民获胜', detail, 5000, {
+    sound: 'none',
+  })
+}
+
+// ---------------------------------------------------------------- 声音
+
+/**
+ * 状态迁移 → 声音。
+ *
+ * 判据全部是**边沿**（上一状态没有、这一状态有），而不是"当前是不是我的回合"：
+ * 同一个房间会被 SSE、3 秒轮询、以及接口返回值重复覆盖好几次，用状态判断会
+ * 每次都响一遍，变成噪音源。
+ *
+ * `prev` 只在**同一个房间**时才算数 —— 从大厅切到另一个牌局，两张桌子之间
+ * 没有"回合转移"这回事，硬比会凭空响一声"轮到你"。
+ */
+function announce(prev: DdzRoom | null, next: DdzRoom): void {
+  const before = prev && prev.id === next.id ? prev : null
+
+  // 发牌：等待房间 → 叫地主阶段
+  if (before?.phase === 'waiting' && next.phase === 'bidding') sfx.playDeal()
+
+  // 轮到你叫地主
+  const bidBefore = before?.phase === 'bidding' && before.canBid
+  if (next.phase === 'bidding' && next.canBid && !bidBefore) {
+    sfx.playYourBid()
+    // 页面在后台（切了标签 / 被别的应用盖住）时，声音可能被系统静音或者用户
+    // 戴着耳机在别处 —— 那正是"轮到自己了都不知道"最常发生的场景，补一条系统通知。
+    if (isPageHidden()) {
+      showDesktopNotification({
+        title: '轮到你叫地主',
+        body: `${next.title || '斗地主'} · 进来看看这把要不要`,
+        tag: `ddz-${next.id}`,
+      })
+    }
+  }
+
+  // 轮到你出牌 —— 整个斗地主里唯一"错过就要干等 15 秒"的信号
+  const turnBefore = before?.phase === 'playing' && before.myTurn
+  if (next.phase === 'playing' && next.myTurn && !turnBefore) {
+    sfx.playYourTurn()
+    if (isPageHidden()) {
+      showDesktopNotification({
+        title: '轮到你出牌',
+        body: `${next.title || '斗地主'} · 还剩 ${next.handCounts[next.mySeat ?? 0] ?? 0} 张`,
+        tag: `ddz-${next.id}`,
+      })
+    }
+  }
+
+  // 有人出了一手牌 / 要不起。
+  //
+  // 用最后一手的 `at` 做指纹，**不能用 history.length**：服务端把它 slice(-40)
+  // 封了顶，长局里长度恒定不变，任何以长度为准的判断到第 40 手之后全部失效
+  // （斗地主界面里"这一手"的高亮已因为这个坑改过一次）。
+  const last = next.history[next.history.length - 1]
+  const prevLast = before?.history[before.history.length - 1]
+  if (last && last.at !== prevLast?.at) {
+    if (last.type === 'pass') sfx.playPass()
+    else if (last.type === 'bomb' || last.type === 'rocket') sfx.playBomb()
+    else sfx.playCards(last.cards.length)
+  }
+
+  // 结算：只在"刚结束"那一次响。观战者不响（没有胜负可言）。
+  const me = next.mySeat
+  if (next.result && !before?.result && me !== null) {
+    const iAmLandlord = next.landlord === me
+    if (next.result.landlordWon === iAmLandlord) sfx.playWin()
+    else sfx.playLose()
+  }
 }

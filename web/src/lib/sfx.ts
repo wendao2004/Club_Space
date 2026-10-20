@@ -21,6 +21,10 @@
  * | 删除文件 | `trash` | 回收站 |
  * | 退出登录 | `lock` | 注销 |
  *
+ * 上表是**外壳音**（`SystemSound`），受"系统音效"开关管。棋牌自己的声音
+ * （象棋的落子/吃子/将军、斗地主的发牌/出牌/炸弹/轮到你）不走这张表，
+ * 见文件末尾的「棋牌音效」与「斗地主音效」两节 —— 它们只受总静音控制。
+ *
  * 五条约束：
  *   1. **浏览器要求先有用户手势**才能出声。这里的做法是"第一次要出声时才建
  *      AudioContext"—— 那一刻几乎总是用户点出来的，所以不会被拦。
@@ -38,6 +42,7 @@ import { reactive } from 'vue'
 
 const MUTE_KEY = 'wl.sfx.muted'
 const SYSTEM_KEY = 'wl.sfx.system'
+const CHAT_KEY = 'wl.sfx.chat'
 const VOLUME_KEY = 'wl.sfx.volume'
 
 /** 系统音效（外壳层）。棋牌自己的声音在下面单独导出。 */
@@ -125,6 +130,14 @@ export const soundState = reactive({
   muted: readBool(MUTE_KEY, false),
   /** 系统音效（开窗 / 通知 / 出错这些外壳声音）单独开关 */
   systemOn: readBool(SYSTEM_KEY, true),
+  /**
+   * 聊天新消息提示音单独开关。
+   *
+   * 为什么再分一层：有人在安静环境里只想收系统提示（保存失败那类），
+   * 但一天几十条聊天消息的"叮"受不了；反过来也有人靠它才注意到有人找。
+   * 系统音效与聊天音效的噪音预算完全不同，绑在一个开关上一定会有一边不满意。
+   */
+  chatOn: readBool(CHAT_KEY, true),
   /** 0 - 1 */
   volume: readVolume(),
 })
@@ -152,6 +165,17 @@ export function setSystemSoundOn(next: boolean): void {
   write(SYSTEM_KEY, next ? '1' : '0')
   // 打开的时候顺手响一声，让用户立刻确认"确实有声音了"
   if (next) playSystem('notify', { force: true })
+}
+
+export function isChatSoundOn(): boolean {
+  return soundState.chatOn
+}
+
+export function setChatSoundOn(next: boolean): void {
+  soundState.chatOn = next
+  write(CHAT_KEY, next ? '1' : '0')
+  // 同上：打开时响一声，而且必须是聊天那一声 —— 用户要确认的是这一个
+  if (next) playSystem('message', { force: true })
 }
 
 export function setVolume(next: number): void {
@@ -463,6 +487,8 @@ const lastAt = new Map<SystemSound, number>()
 export function playSystem(name: SystemSound, options?: { force?: boolean }): void {
   const force = options?.force ?? false
   if (!force && !soundState.systemOn) return
+  // 新消息音单独受 chatOn 管，见 soundState.chatOn 的注释
+  if (!force && name === 'message' && !soundState.chatOn) return
 
   const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
   const prev = lastAt.get(name) ?? 0
@@ -572,6 +598,132 @@ export function playDraw(): void {
   try {
     tone(r.audio, r.out, { freq: 392, start: 0, duration: 0.18, gain: 0.16 })
     tone(r.audio, r.out, { freq: 392, start: 0.16, duration: 0.18, gain: 0.14 })
+  } catch {
+    /* 忽略 */
+  }
+}
+
+// ---------------------------------------------------------------- 斗地主音效
+//
+// 和象棋的"落子/吃子"是同一套思路：音色由动作本身决定，而不是回放同一段录音。
+// 斗地主的音景比象棋密（三个座位轮流、每手都可能出好几张），所以整体音量
+// 比棋子低一档 —— 一局下来要响几十次，照着"落子"那么重会很吵。
+//
+// **轮到自己必须听得见**，这是本组里唯一走系统总线（额外 3 倍增益）的音：
+// 它是这个游戏里唯一"必须立刻响应"的信号，错过一次就是 15 秒的空等。
+
+/** 统一的出声包装：拿不到 AudioContext 就什么都不做，绝不因为声音抛错卡住牌桌。 */
+function withCards(build: (audio: AudioContext, out: GainNode) => void): void {
+  const r = rig()
+  if (!r) return
+  try {
+    build(r.audio, r.out)
+  } catch {
+    /* 出声失败不影响出牌 */
+  }
+}
+
+/** 发牌：几记渐弱的"唰"，像把一副牌摊开。 */
+export function playDeal(): void {
+  withCards((audio, out) => {
+    for (let i = 0; i < 5; i++) {
+      noise(audio, out, {
+        start: i * 0.075,
+        duration: 0.05,
+        gain: 0.16 - i * 0.018,
+        freq: 3200,
+        sweepTo: 1500,
+      })
+    }
+  })
+}
+
+/**
+ * 出牌：一记短促的"啪"。
+ *
+ * 张数越多越沉、越长一点 —— 甩一把顺子和出一张单牌，听感上应该不一样。
+ * 但**不做成线性增长**：17 张一起出也只是一手牌，不该像爆炸。
+ */
+export function playCards(count: number): void {
+  const heavy = Math.min(Math.max(count, 1), 12)
+  withCards((audio, out) => {
+    noise(audio, out, {
+      start: 0,
+      duration: 0.045 + heavy * 0.004,
+      gain: 0.16 + heavy * 0.008,
+      freq: 1500 - heavy * 40,
+    })
+    tone(audio, out, {
+      freq: 240 - heavy * 6,
+      start: 0,
+      duration: 0.07,
+      gain: 0.1 + heavy * 0.004,
+      type: 'sine',
+    })
+    // 一次出四张以上，补一声轻微的"拖"，让"多张"这个信息更明确
+    if (count >= 4) {
+      noise(audio, out, { start: 0.03, duration: 0.07, gain: 0.07, freq: 900, sweepTo: 500 })
+    }
+  })
+}
+
+/** 炸弹 / 王炸：低频轰鸣，和普通出牌完全不是一个量级。 */
+export function playBomb(): void {
+  withCards((audio, out) => {
+    tone(audio, out, { freq: 72, start: 0, duration: 0.42, gain: 0.26, type: 'sine' })
+    tone(audio, out, { freq: 116, start: 0.02, duration: 0.3, gain: 0.18, type: 'triangle' })
+    noise(audio, out, { start: 0, duration: 0.32, gain: 0.26, freq: 520, sweepTo: 110 })
+  })
+}
+
+/** 要不起：两声下行，短而闷，表示"这一手我让了"。 */
+export function playPass(): void {
+  withCards((audio, out) => {
+    tone(audio, out, { freq: 440, start: 0, duration: 0.08, gain: 0.13, type: 'sine' })
+    tone(audio, out, { freq: 349.23, start: 0.08, duration: 0.13, gain: 0.11, type: 'sine' })
+  })
+}
+
+/**
+ * 轮到你出牌。
+ *
+ * 三个上行音 + 一层高八度泛音（听起来像"叮—叮—叮"而不是"嘟——"）。
+ * 走系统总线，比普通棋牌音响约 3 倍：它在嘈杂环境里也必须能被听见。
+ */
+let lastTurnAt = 0
+export function playYourTurn(): void {
+  const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  // 同一回合里 applyRoom 可能被 SSE 与轮询各调一次，别响两遍
+  if (now - lastTurnAt < 1200) return
+  lastTurnAt = now
+
+  const r = rig()
+  if (!r) return
+  try {
+    const notes = [783.99, 1046.5, 1318.51]
+    notes.forEach((freq, i) => {
+      // 起手留 0.16 秒：上一个动作（别人出牌 / 要不起）的声音还没落，
+      // 直接压上去就分不清"他出了什么"和"该我了"这两条信息
+      const start = 0.16 + i * 0.1
+      tone(r.audio, r.sys, { freq, start, duration: 0.2, gain: 0.09, type: 'triangle' })
+      tone(r.audio, r.sys, { freq: freq * 2, start, duration: 0.09, gain: 0.02, type: 'sine' })
+    })
+  } catch {
+    /* 忽略 */
+  }
+}
+
+/** 轮到你叫地主：比"出牌"柔一点，因为这时还没有人等你。 */
+export function playYourBid(): void {
+  const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  if (now - lastTurnAt < 1200) return
+  lastTurnAt = now
+
+  const r = rig()
+  if (!r) return
+  try {
+    tone(r.audio, r.sys, { freq: 523.25, start: 0, duration: 0.16, gain: 0.07, type: 'sine' })
+    tone(r.audio, r.sys, { freq: 783.99, start: 0.11, duration: 0.2, gain: 0.075, type: 'sine' })
   } catch {
     /* 忽略 */
   }
