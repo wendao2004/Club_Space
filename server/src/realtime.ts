@@ -70,6 +70,21 @@ export type RealtimeEvent =
    * 在线的客户端刷新一下列表即可。
    */
   | { type: 'game-werewolf-lobby'; data: unknown }
+  /**
+   * 你画我猜的房间状态（阶段推进、计分、提示揭示）。
+   *
+   * ⚠️ 与斗地主 / 狼人杀同理：payload 是按人裁剪过的 —— **词**就是这个游戏的
+   * 全部隐藏信息，未猜对者只能拿到掩码（见 draw.ts 的 viewFor）。
+   * 只能 pushTo 给房间成员，见 index.ts 的 pushDrawRoom()。
+   */
+  | { type: 'game-draw'; data: unknown }
+  /**
+   * 画笔数据。与上面所有事件都不同：**没有视角差异**（画家画什么大家看什么，
+   * 答案藏在 state 不在笔迹里），所以对所有成员发同一份 payload。
+   * 单独一个事件名而不是复用 game-draw：它每秒会有好几条，前端按事件名分流，
+   * 渲染路径和状态渲染路径完全分开。
+   */
+  | { type: 'draw-stroke'; data: unknown }
 
 interface Connection {
   id: string

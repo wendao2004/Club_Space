@@ -122,6 +122,22 @@ import {
   playCards,
 } from './games/doudizhu-rooms.ts'
 import {
+  chooseDrawWord,
+  createDrawRoom,
+  disposeDrawRoom,
+  drawMembers,
+  getDrawCanvas,
+  getDrawRoom,
+  guessDrawWord,
+  joinDrawRoom,
+  leaveDrawRoom,
+  listDrawRooms,
+  processDrawTimeouts,
+  startDrawRoom,
+  submitStroke,
+  type DrawStrokeOp,
+} from './games/draw-rooms.ts'
+import {
   cleanupStaleWerewolfRooms,
   createWerewolfRoom,
   getWerewolfView,
@@ -3828,6 +3844,141 @@ app.post(
   ),
 )
 
+// ---------------------------------------------------------------- 你画我猜
+
+/**
+ * 房间状态推送（按人裁剪）。
+ *
+ * 事件分两个：game-draw 是状态（词藏在这条里，必须逐人算视图）；
+ * draw-stroke 是画笔（无视角差异，所有成员同一份 payload）。
+ */
+function pushDrawRoom(roomId: string): void {
+  const memberIds = drawMembers(roomId)
+  if (memberIds.length === 0) return
+  const online = onlineUserIds()
+  for (const userId of memberIds) {
+    try {
+      pushTo([userId], { type: 'game-draw', data: { roomId, room: getDrawRoom(roomId, userId, online) } })
+    } catch {
+      // 房间可能刚好被删了（最后一人退房即解散），忽略
+    }
+  }
+}
+
+function pushDrawStroke(roomId: string, data: unknown): void {
+  const memberIds = drawMembers(roomId)
+  if (memberIds.length === 0) return
+  pushTo(memberIds, { type: 'draw-stroke', data })
+}
+
+app.get('/api/games/draw/rooms', async (req) => {
+  const user = requireUser(req)
+  return { rooms: listDrawRooms(user.id, onlineUserIds()) }
+})
+
+app.post('/api/games/draw/rooms', async (req) => {
+  const user = requireUser(req)
+  const body = (req.body ?? {}) as { title?: unknown; rounds?: unknown }
+  const room = createDrawRoom({
+    title: typeof body.title === 'string' ? body.title : '',
+    creatorId: user.id,
+    creatorName: user.display_name,
+    rounds: typeof body.rounds === 'number' ? body.rounds : undefined,
+  })
+  // 建房不广播大厅刷新（与斗地主一致）：大厅打开时拉一次，加入/开始时各自推送
+  return { room }
+})
+
+app.get('/api/games/draw/rooms/:id', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  return { room: getDrawRoom(id, user.id, onlineUserIds()) }
+})
+
+app.post('/api/games/draw/rooms/:id/join', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  const room = joinDrawRoom(id, user.id, user.display_name, onlineUserIds())
+  pushDrawRoom(id)
+  return { room }
+})
+
+app.post('/api/games/draw/rooms/:id/leave', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  try {
+    const room = leaveDrawRoom(id, user.id, onlineUserIds())
+    pushDrawRoom(id)
+    return { room }
+  } catch (err) {
+    // 最后一人退房 = 房间解散（leaveDrawRoom 删行后 404）。把这件事告诉
+    // 留下的人之外没有别人（都走了），但 room 404 本身就是有效信号，照抛。
+    disposeDrawRoom(id)
+    throw err
+  }
+})
+
+app.post('/api/games/draw/rooms/:id/start', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  const room = startDrawRoom(id, user.id, onlineUserIds())
+  pushDrawRoom(id)
+  return { room }
+})
+
+app.post('/api/games/draw/rooms/:id/word', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  const body = (req.body ?? {}) as { word?: unknown }
+  if (typeof body.word !== 'string') throw new HttpError(400, '缺少 word')
+  const room = chooseDrawWord(id, user.id, body.word, onlineUserIds())
+  pushDrawRoom(id)
+  return { room }
+})
+
+/**
+ * 画笔上报。
+ *
+ * 客户端攒批（约 80ms 一条）后 POST；服务端校验"是画家 + 字段合法"，
+ * 追加进内存缓冲，然后把**同一份 payload** 广播给房间全员 ——
+ * 画笔没有视角差异，答案藏在 state 里，不在笔迹里。
+ */
+app.post('/api/games/draw/rooms/:id/strokes', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  const body = (req.body ?? {}) as Record<string, unknown>
+  const op = submitStroke(id, user.id, {
+    op: (body.op as DrawStrokeOp['op']) ?? 'points',
+    strokeId: String(body.strokeId ?? ''),
+    points: Array.isArray(body.points) ? (body.points as DrawStrokeOp['points']) : [],
+    color: typeof body.color === 'string' ? body.color : '#000000',
+    width: typeof body.width === 'number' ? body.width : 4,
+    tool: body.tool === 'eraser' ? 'eraser' : 'pen',
+  })
+  // clear（缓冲超限）时笔迹被重置，接收端要连画布一起清 —— op 原样带过去
+  pushDrawStroke(id, op)
+  return { ok: true }
+})
+
+/** 中途进来 / 刷新：补发当前画布。缓冲可能为空（服务端重启过），如实返回。 */
+app.get('/api/games/draw/rooms/:id/canvas', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  getDrawRoom(id, user.id, onlineUserIds()) // 顺带做成员校验
+  return { strokes: getDrawCanvas(id) }
+})
+
+app.post('/api/games/draw/rooms/:id/guess', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  const body = (req.body ?? {}) as { text?: unknown }
+  if (typeof body.text !== 'string') throw new HttpError(400, '缺少 text')
+  const result = guessDrawWord(id, user.id, user.display_name, body.text, onlineUserIds())
+  // 猜对 / 阶段推进（全对进 reveal）都会改状态；纯闲聊只动内存，状态推送无害
+  pushDrawRoom(id)
+  return result
+})
+
 // ---------------------------------------------------------------- 待办
 
 /**
@@ -3946,6 +4097,27 @@ setInterval(() => {
     app.log.error({ err }, '狼人杀超时推进失败')
   }
 }, 5_000).unref?.()
+
+/**
+ * 你画我猜的阶段推进：选词超时随机选、提示揭示、绘画超时、展示倒计时轮转。
+ *
+ * 间隔 2 秒（狼人杀是 5 秒）：这个游戏的"到点"更密集 —— 提示揭示是按秒排的
+ * （均匀铺在绘画时长的前 3/4），5 秒粒度会让"第 20 秒该出的提示"拖到第 24 秒，
+ * 体验上就是提示慢半拍。2 秒的扫描对一个 WHERE + JSON.parse 的查询来说仍然
+ * 毫无压力（进行中的房间通常是个位数）。
+ *
+ * 每个房间一次 tick 只推进一步（见 processDrawTimeouts 的注释），所以这里
+ * 的推送不会在一次 tick 里连发多条。
+ */
+setInterval(() => {
+  try {
+    for (const event of processDrawTimeouts(now())) {
+      pushDrawRoom(event.roomId)
+    }
+  } catch (err) {
+    app.log.error({ err }, '你画我猜超时推进失败')
+  }
+}, 2_000).unref?.()
 
 // 长期没人进的房间定期清掉，别让游戏列表里堆着一堆空房
 setInterval(
