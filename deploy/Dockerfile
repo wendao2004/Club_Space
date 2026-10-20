@@ -7,7 +7,14 @@
 # 所以一个容器就够了。
 
 # ---------- 阶段 1：构建前端 ----------
-FROM node:24-alpine AS build
+#
+# 基础镜像走 ARG，方便在需要"完全可复现"时钉到 digest：
+#   docker build --build-arg NODE_IMAGE='node:24-alpine@sha256:...' ...
+# 默认用 tag 是因为本项目部署在离线/半离线内网，digest 需要联网查；
+# 而"版本漂移"的实际风险由 CI 的 container job 兜住 —— 它会断言镜像里的
+# node 是 v24.x，把 24 之外的变化挡在合并之前。
+ARG NODE_IMAGE=node:24-alpine
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 
 # 国内网络下 npm 官方源不可达，构建时必须走镜像源。
@@ -17,16 +24,23 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY server/package.json ./server/
 COPY web/package.json ./web/
 
-# ⚠️ 这一行不能省。
+# ⚠️ 这两行不能省。
 #
-# `.npmrc` 里的 registry 只影响 **pnpm/npm 装包**，管不到 corepack 自己 ——
-# corepack 去下载 pnpm 这个二进制时用的是它自己的默认源 registry.npmjs.org，
-# 而在国内网络（以及任何屏蔽了 npm 官源的局域网）那个地址是不可达的。
-# 结果就是构建在 `corepack prepare pnpm@9` 这一步卡住直到超时，
-# 报错信息看起来像是网络问题而不是配置问题。
-ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+# 1) `COREPACK_NPM_REGISTRY`：`.npmrc` 里的 registry 只影响 **pnpm/npm 装包**，
+#    管不到 corepack 自己 —— corepack 下载 pnpm 这个二进制时用的是它自己的
+#    默认源 registry.npmjs.org，在国内网络（以及任何屏蔽了 npm 官源的局域网）
+#    那个地址不可达，构建会卡在 corepack 这一步直到超时，报错看起来像网络问题。
+#
+# 2) `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`：构建过程没有 TTY，而 corepack 在
+#    首次下载某个版本时会问一句 Y/n。非交互环境下这一问会让构建**静默挂住**，
+#    同样表现为"卡住然后超时"。
+#
+# 注：Dockerfile 的换行续行里**不能**夹注释（会被当成值的一部分），所以
+# 说明只能写在这里，上面那段注释是给下面的 ENV 用的。
+ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
-RUN corepack enable && corepack prepare pnpm@9 --activate \
+RUN corepack enable && corepack install \
   && pnpm install --frozen-lockfile
 
 COPY tsconfig.base.json ./
@@ -36,7 +50,11 @@ COPY server ./server
 RUN pnpm -F @wl/web build
 
 # ---------- 阶段 2：运行时 ----------
-FROM node:24-alpine
+#
+# 同一个 ARG 再声明一次：ARG 的作用域是"声明它的那个构建阶段"，
+# 不重新声明的话第二阶段拿到的会是空值。
+ARG NODE_IMAGE=node:24-alpine
+FROM ${NODE_IMAGE}
 WORKDIR /app
 
 # 只装服务端运行时依赖，不带开发依赖
@@ -44,9 +62,12 @@ COPY .npmrc ./
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY server/package.json ./server/
 
-ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com \
+    # 构建过程没有 TTY。corepack 在新版本首次下载时会问一句 Y/n，
+    # 在非交互环境里这一问会让构建**静默挂住**直到超时，报错还像是网络问题。
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
-RUN corepack enable && corepack prepare pnpm@9 --activate \
+RUN corepack enable && corepack install \
   && pnpm install --frozen-lockfile --prod --filter @wl/server... \
   && pnpm store prune
 

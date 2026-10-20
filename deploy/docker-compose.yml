@@ -102,7 +102,19 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: wl-club/app:1
+    # ⚠️ **不要**改回固定的 `wl-club/app:1`。
+    #
+    # 固定 tag 会让每次 `up -d --build` 覆盖同一个名字，旧镜像从此没有任何
+    # 引用指向它 —— 新版本出问题时想退回上一版，只能 `git checkout <旧 commit>`
+    # 再重新 build，而那时你未必记得上一版是哪个 commit。
+    #
+    # 现在由 deploy/upgrade.sh 给每次构建打**时间戳 tag**（并把 WL_IMAGE_TAG
+    # 写回 .env，保证之后任何一次 `up -d` 都还指向同一个镜像）。
+    # 回滚 = 改这一个变量再 `up -d app`。
+    #
+    # 默认值用 latest 是为了让"不跑 upgrade.sh、直接 up -d --build"这种
+    # 临时操作仍然可用；生产升级请走 ./upgrade.sh。
+    image: wl-club/app:${WL_IMAGE_TAG:-latest}
     container_name: wl-app
     restart: unless-stopped
     # 不发布端口：只有 Caddy 能看到它
