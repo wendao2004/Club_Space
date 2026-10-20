@@ -68,6 +68,15 @@ function seatRecord(seat: number): DdzRoom['seats'][number] | null {
 function seatName(seat: number): string {
   return seatRecord(seat)?.name ?? '虚位以待'
 }
+/**
+ * 出牌记录里的称呼：有名字用名字，座位空着（人退房 / 还没坐）才回落"座位N"。
+ *
+ * 用户报过"出牌记录里是座位1、座位2，根本分不清谁是谁"。座位号只有在
+ * 那个位置真的没有人时才有意义 —— 有人的时候它就是个谜语。
+ */
+function seatLabel(seat: number): string {
+  return seatRecord(seat)?.name || `座位${seat + 1}`
+}
 function seatOnline(seat: number): boolean {
   return seatRecord(seat)?.online ?? false
 }
@@ -158,8 +167,8 @@ function phaseBadgeClass(phase: DdzPhase): string {
 }
 
 function playText(play: DdzPlay): string {
-  if (play.cards.length === 0) return `座位${play.seat + 1} 要不起`
-  return `座位${play.seat + 1} 出 ${play.cards.join(' ')}（${play.typeLabel}）`
+  if (play.cards.length === 0) return `${seatLabel(play.seat)} 要不起`
+  return `${seatLabel(play.seat)} 出 ${play.cards.join(' ')}（${play.typeLabel}）`
 }
 const recentHistory = computed<DdzPlay[]>(() => (room.value?.history ?? []).slice(-10))
 
@@ -172,7 +181,7 @@ const resultDetail = computed<string>(() => {
   const result = room.value?.result
   if (!result) return ''
   // 服务端发的是 'emptied' / 'abandon' 这类英文码，这里翻成中文再展示
-  return `座位${result.winnerSeat + 1} · ${reasonLabel(result.reason)}`
+  return `${seatLabel(result.winnerSeat)} · ${reasonLabel(result.reason)}`
 })
 
 /**
@@ -614,7 +623,7 @@ onBeforeUnmount(() => {
           <div class="mid-row mid-row--last">
             <span class="mid-label">上一手</span>
             <template v-if="room.lastPlay">
-              <span class="play-by">座位{{ room.lastPlay.seat + 1 }}</span>
+              <span class="play-by">{{ seatLabel(room.lastPlay.seat) }}</span>
               <!-- key 用 thisHandKey（服务端时间戳），new 一手才重放；不能挂在 history.length 上 -->
               <Transition name="ddz-play" mode="out-in" appear>
                 <div :key="playKey" class="card-row">

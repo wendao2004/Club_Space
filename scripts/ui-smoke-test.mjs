@@ -2140,6 +2140,21 @@ async function main() {
     const handAfterPlay = await evaluate(`document.querySelectorAll('.card--hand').length`)
     assert(handAfterPlay === 19, '界面上的手牌也少了 1 张', `${handAfterPlay} 张`)
 
+    // 出牌记录里的称呼：有名字用名字，别再是"座位1/2/3"这种谜语。
+    // 我（地主）刚出了一张，记录里应该写的是我的显示名。
+    const historyItems = JSON.parse(
+      await evaluate(
+        `JSON.stringify([...document.querySelectorAll('.history-item')].map((e) => e.textContent.trim()))`,
+      ),
+    )
+    assert(historyItems.length >= 1, '出牌记录出现在界面上', historyItems.join(' | '))
+    const myName = (await apiAs(sessionCookie, '/api/auth/me')).body?.user?.displayName ?? ''
+    assert(
+      myName !== '' && historyItems.some((t) => t.includes(myName)),
+      '出牌记录里用的是玩家名字而不是座位号',
+      myName ? `记录：${historyItems.join(' | ')}` : '没拿到自己的显示名',
+    )
+
     // ---- 更换壁纸（预设 + 文件空间图片）----
     console.log('\n【更换壁纸】')
 
