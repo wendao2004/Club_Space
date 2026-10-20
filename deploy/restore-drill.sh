@@ -97,7 +97,12 @@ if [ -d "$BACKUP_DIR/blobs" ]; then
       BADHASH=$((BADHASH + 1))
       [ "$BADHASH" -le 3 ] && echo "      内容损坏（哈希不符）: $sha"
     fi
-  done < <(sqlite3 "$DB" "SELECT b.sha256, b.size FROM blobs b
+  # ⚠️ 这里必须用 `|| ' '` 拼成一列，不能写成 `SELECT b.sha256, b.size`。
+  # sqlite3 命令行在默认 list 模式下用 `|` 分隔字段，而下面 `read -r sha size`
+  # 是按空白切分的 —— 两列输出会被整行塞进 $sha、$size 恒为空，于是每个对象
+  # 都拼出错误路径、都被判"缺失"，演练永远报"备份损坏"。
+  # 一个永远在报错的检查和一个永远不报错的检查一样无用。
+  done < <(sqlite3 "$DB" "SELECT b.sha256 || ' ' || b.size FROM blobs b
                           JOIN nodes n ON n.sha256 = b.sha256
                           WHERE n.kind='file' AND n.deleted_at IS NULL;")
 
