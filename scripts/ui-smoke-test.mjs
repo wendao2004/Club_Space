@@ -1956,6 +1956,256 @@ async function main() {
       `${closedPreview.windows} > ${windowsBefore}`,
     )
 
+    // ---- 预览测试用的小工具（只为下面两节服务）----
+
+    /** 走真实的上传接口往共享空间放一个文件。上传窗口里的手动上传走的就是这条链路。 */
+    async function uploadFile(name, bytes) {
+      const init = await apiAs(sessionCookie, '/api/uploads', {
+        method: 'POST',
+        json: { parentId: null, name, size: bytes.length, space: 'shared' },
+      })
+      if (init.status !== 200) return false
+      // 小文件会"秒传"（服务端直接入库），那就没有分片这一步
+      if (init.body.instant) return true
+      const put = await apiAs(sessionCookie, `/api/uploads/${init.body.uploadId}/chunk?offset=0`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: bytes,
+      })
+      if (put.status !== 200) return false
+      const done = await apiAs(sessionCookie, `/api/uploads/${init.body.uploadId}/complete`, {
+        method: 'POST',
+        json: {},
+      })
+      return done.status === 200
+    }
+
+    /** 双击桌面图标打开应用。 */
+    async function openApp(label) {
+      await evaluate(`
+        (() => {
+          const icon = [...document.querySelectorAll('.desktop-icons .icon')].find(
+            (i) => i.textContent.includes(${JSON.stringify(label)}),
+          )
+          icon?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+          return true
+        })()
+      `)
+    }
+
+    async function openFileByName(name) {
+      return await evaluate(`
+        (() => {
+          const el = [...document.querySelectorAll('.tile__name, .row__name')].find(
+            (x) => x.textContent.includes(${JSON.stringify(name)}),
+          )
+          if (!el) return 'no-file'
+          const target = el.closest('.tile, .row') ?? el
+          target.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+          return 'ok'
+        })()
+      `)
+    }
+
+    async function closeWindowByTitle(title) {
+      await evaluate(`
+        (() => {
+          const win = [...document.querySelectorAll('.window')].find(
+            (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(title)},
+          )
+          win?.querySelector('.window__ctl--close')?.click()
+          return true
+        })()
+      `)
+    }
+
+    /**
+     * 最小的"能被嗅探认出来"的 docx：ZIP 容器 + 一个 word/ 条目。
+     *
+     * 服务端的嗅探看的就是前 4096 字节里有没有 `word/`（见 server/src/mime.ts），
+     * 所以不需要真的构造一份 Word 文档。用 store 方式（不压缩）是因为
+     * 手写 deflate 不现实，而不压缩的 ZIP 结构最简单、也完全合法。
+     */
+    async function minimalDocx() {
+      const { crc32 } = await import('node:zlib')
+      const entries = [
+        { name: 'word/document.xml', data: Buffer.from('<?xml version="1.0"?><w:document/>', 'utf8') },
+      ]
+      const chunks = []
+      const central = []
+      let offset = 0
+      for (const e of entries) {
+        const nameBuf = Buffer.from(e.name, 'utf8')
+        const crc = crc32(e.data)
+        const local = Buffer.alloc(30)
+        local.writeUInt32LE(0x04034b50, 0) // 本地文件头签名
+        local.writeUInt16LE(20, 4) // 需要的版本
+        local.writeUInt16LE(0, 6) // flags
+        local.writeUInt16LE(0, 8) // 压缩方式：0 = store
+        local.writeUInt16LE(0, 10) // 修改时间
+        local.writeUInt16LE(0x21, 12) // 修改日期：1980-01-01
+        local.writeUInt32LE(crc, 14)
+        local.writeUInt32LE(e.data.length, 18)
+        local.writeUInt32LE(e.data.length, 22)
+        local.writeUInt16LE(nameBuf.length, 26)
+        local.writeUInt16LE(0, 28) // extra
+        chunks.push(local, nameBuf, e.data)
+
+        const cd = Buffer.alloc(46)
+        cd.writeUInt32LE(0x02014b50, 0) // 中央目录签名
+        cd.writeUInt16LE(20, 4)
+        cd.writeUInt16LE(20, 6)
+        cd.writeUInt16LE(0, 8)
+        cd.writeUInt16LE(0, 10)
+        cd.writeUInt16LE(0, 12)
+        cd.writeUInt16LE(0x21, 14)
+        cd.writeUInt32LE(crc, 16)
+        cd.writeUInt32LE(e.data.length, 20)
+        cd.writeUInt32LE(e.data.length, 24)
+        cd.writeUInt16LE(nameBuf.length, 28)
+        cd.writeUInt32LE(0, 38) // 外部属性
+        cd.writeUInt32LE(offset, 42) // 本地头偏移
+        central.push(cd, nameBuf)
+
+        offset += 30 + nameBuf.length + e.data.length
+      }
+      const cdBuf = Buffer.concat(central)
+      const end = Buffer.alloc(22)
+      end.writeUInt32LE(0x06054b50, 0) // 结束记录签名
+      end.writeUInt16LE(entries.length, 8)
+      end.writeUInt16LE(entries.length, 10)
+      end.writeUInt32LE(cdBuf.length, 12)
+      end.writeUInt32LE(offset, 16)
+      return Buffer.concat([...chunks, cdBuf, end])
+    }
+
+    // ---- 表格预览：CSV 不当纯文本糊过去 ----
+    //
+    // 这一路的重点不是"能打开"，而是**引号里的逗号不会被切错列**：
+    // `split(',')` 这种写法会把 "联想, 16G, 512G" 切成 3 列，行数看起来正常、
+    // 内容全错 —— 是最难被发现的那类 bug。所以断言盯的是单元格内容本身。
+    console.log('\n【CSV 表格预览】')
+
+    const csvName = `表格测试-${SUFFIX}.csv`
+    const csvText = '姓名,部门,备注\n张三,技术部,"联想, 16G, 512G"\n李四,财务部,显示器\n'
+    assert(await uploadFile(csvName, Buffer.from(csvText, 'utf8')), 'CSV 已上传到共享空间')
+
+    // 新开一个文件管理器：列表是开窗时拉的，这样一定能看到刚上传的文件
+    await openApp('文件')
+    await sleep(2000)
+    assert((await openFileByName(csvName)) === 'ok', 'CSV 文件出现在文件管理器里')
+    await sleep(1500)
+
+    const tbl = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const win = [...document.querySelectorAll('.window')].find(
+        (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(csvName)},
+      )
+      if (!win) return { found: false }
+      const table = win.querySelector('.pv__table')
+      if (!table) return { found: true, table: false }
+      return {
+        found: true,
+        table: true,
+        header: [...table.querySelectorAll('thead th')].map((th) => th.textContent.trim()),
+        // 第一个数据行的单元格（跳过行号列）
+        firstRow: [...table.querySelectorAll('tbody tr')[0].querySelectorAll('td')].map((td) => td.textContent.trim()),
+        dataRows: table.querySelectorAll('tbody tr').length,
+      }
+    })())`))
+    assert(tbl.found === true, 'CSV 打开的是预览窗口（不是静默下载）')
+    assert(tbl.table === true, '渲染成了表格，而不是一整块纯文本')
+    assert(
+      tbl.header?.join('|') === '#|姓名|部门|备注',
+      '表头解析正确（含行号列）',
+      JSON.stringify(tbl.header),
+    )
+    assert(tbl.dataRows === 2, '两行数据', String(tbl.dataRows))
+    // 关键断言：引号里的逗号没有被当成分隔符
+    assert(
+      tbl.firstRow?.length === 4,
+      '引号内的逗号没有把这一行切成 6 列',
+      `实际 ${tbl.firstRow?.length} 列：${JSON.stringify(tbl.firstRow)}`,
+    )
+    assert(
+      tbl.firstRow?.[3] === '联想, 16G, 512G',
+      '带逗号的备注完整落在一个单元格里',
+      JSON.stringify(tbl.firstRow?.[3]),
+    )
+
+    // 切到纯文本视图（解析不理想时的退路）
+    const toRaw = await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(csvName)},
+        )
+        const btn = [...(win?.querySelectorAll('.pv__bar .wl-btn') ?? [])].find((b) => b.textContent.includes('纯文本'))
+        if (!btn) return false
+        btn.click()
+        return true
+      })()
+    `)
+    assert(toRaw === true, '预览窗口有「纯文本」切换按钮')
+    await sleep(600)
+    const rawView = await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(csvName)},
+        )
+        return { table: !!win?.querySelector('.pv__table'), frame: !!win?.querySelector('.pv__frame') }
+      })()
+    `)
+    assert(rawView.frame && !rawView.table, '切换后退回纯文本渲染', JSON.stringify(rawView))
+    await closeWindowByTitle(csvName)
+    await sleep(400)
+
+    // ---- Office 预览：不再"双击就静默下载一个打不开的文件" ----
+    //
+    // 造一个真实的（但是最小的）docx：ZIP 容器 + 一个 word/ 条目，
+    // 服务端的嗅探就是靠这个认出它是 Word 的（见 server/src/mime.ts）。
+    // 没有依赖可用，所以手写一个 store 方式的 ZIP —— 不压缩，结构最简单。
+    console.log('\n【Office 预览（需要转 PDF）】')
+
+    const docxName = `文档测试-${SUFFIX}.docx`
+    assert(
+      await uploadFile(docxName, await minimalDocx()),
+      'docx 已上传到共享空间（手写的 ZIP，内容嗅探能认出它是 Word）',
+    )
+
+    await openApp('文件')
+    await sleep(2000)
+    assert((await openFileByName(docxName)) === 'ok', 'docx 文件出现在文件管理器里')
+    await sleep(1800)
+
+    const office = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const win = [...document.querySelectorAll('.window')].find(
+        (w) => w.querySelector('.window__title')?.textContent.trim() === ${JSON.stringify(docxName)},
+      )
+      if (!win) return { found: false }
+      const card = win.querySelector('.pv__office')
+      return {
+        found: true,
+        card: !!card,
+        text: (card?.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 400),
+        hasConvertBtn: [...(card?.querySelectorAll('.wl-btn') ?? [])].some((b) => b.textContent.includes('转为 PDF')),
+      }
+    })())`))
+    assert(office.found === true, '双击 docx 打开的是预览窗口（以前是直接下载）')
+    assert(office.card === true, '预览窗口给出 Office 专属的提示卡片')
+    // 测试环境没有配 WL_CONVERT_SERVICE_URL，所以工具必然是"不可用"：
+    // 这里要验证的是它会**说清楚为什么不能用**，而不是转一个等不到的圈。
+    assert(
+      office.text.includes('转换服务'),
+      '说明了需要转换服务（而不是假装能预览）',
+      office.text.slice(0, 120),
+    )
+    assert(
+      office.hasConvertBtn === false,
+      '转换服务不可用时**不**给出点不动的「转为 PDF」按钮',
+      String(office.hasConvertBtn),
+    )
+    await closeWindowByTitle(docxName)
+    await sleep(400)
+
     // ---- 系统音效：界面动作真的在合成声音，静音真的静得掉 ----
     //
     // 声音没法在 CI 里用耳朵验，所以这里验的是**音频图真的被驱动了**：

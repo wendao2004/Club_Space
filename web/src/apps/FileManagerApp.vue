@@ -29,6 +29,7 @@ import { useAuth } from '@/stores/auth'
 import { useUi, type ContextMenuItem } from '@/stores/ui'
 import { useWindows, type WindowInstance } from '@/stores/windows'
 import { playSystem } from '@/lib/sfx'
+import { isPreviewable } from '@/lib/file-kinds'
 
 const props = defineProps<{ win: WindowInstance }>()
 const auth = useAuth()
@@ -633,15 +634,15 @@ function downloadSelected(): void {
   }
 }
 
+/**
+ * 双击能不能开预览窗口。
+ *
+ * 判定集中在 lib/file-kinds.ts（与服务端预览路由、转换工具的名单对齐），
+ * Office 也算"可预览" —— 开出来的窗口会给出「转为 PDF 预览」，
+ * 这比双击之后**静默下载一个打不开的文件**要好得多。
+ */
 function canPreview(entry: FileEntry): boolean {
-  const mime = entry.mime ?? ''
-  return (
-    mime.startsWith('image/') ||
-    mime === 'application/pdf' ||
-    mime.startsWith('text/') ||
-    mime.startsWith('video/') ||
-    mime.startsWith('audio/')
-  )
+  return isPreviewable(entry.mime)
 }
 
 function openEntry(entry: FileEntry): void {

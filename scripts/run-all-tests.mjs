@@ -87,6 +87,9 @@ const ONLINE_TESTS = [
   },
   { name: 'image-tools-test', label: '图片工具（格式/缩放/压缩）' },
   { name: 'tools-extra-test', label: '工具集扩展（PDF/图片/文本/抽签）' },
+  // 表格预览的解析器。**不需要服务端**：它 import 的是 web/src/lib/csv.ts 本体
+  // （Node 22.18+ 默认剥离类型），跑的就是界面用的那份代码。
+  { name: 'csv-parser-test', label: 'CSV/TSV 解析（引号/换行/分隔符识别）' },
   { name: 'chat-test', label: '聊天（含 SSE 实时推送）' },
   {
     name: 'realtime-test',
