@@ -846,13 +846,39 @@ const utilityTools: ToolDef[] = [
  */
 type SharpFactory = (typeof import('sharp'))['default']
 
-async function loadSharp(): Promise<SharpFactory | null> {
-  try {
-    const mod = await import('sharp')
-    return (mod.default ?? mod) as unknown as SharpFactory
-  } catch {
-    return null
-  }
+/**
+ * 进程级只加载、只配置一次 sharp。
+ *
+ * 两件事必须在这里做，而不是在每个工具里做：
+ *   1. **缓存模块引用**：原来每次调用都 `await import('sharp')`，虽然 ESM
+ *      有模块缓存不至于重复执行，但这里还要配置全局参数，重复配置没有意义。
+ *   2. **全局内存/CPU 旋钮**：
+ *      - `cache(false)`：sharp 默认会缓存最近解码的图片（约 50MB 的
+ *        libvips 操作缓存），这部分是**堆外内存**，V8 的 --max-old-space-size
+ *        管不到它，却照样计入容器的 512MB 上限。
+ *      - `concurrency(1)`：默认按 CPU 核数开线程（compose 给了 1.5 核），
+ *        多线程同时解码会让峰值内存与 CPU 一起翻倍。内网小平台吞吐不需要，
+ *        而且转换本来就是串行队列。
+ *
+ * 放在模块加载时的第一个 `loadSharp()` 调用里，是因为 sharp 是**动态导入**
+ * 的（见上面的说明）：顶层无法配置一个可能不存在的原生模块。
+ * 失败时缓存 null，后续调用不再反复 try/catch 原生加载。
+ */
+let sharpInit: Promise<SharpFactory | null> | undefined
+
+function loadSharp(): Promise<SharpFactory | null> {
+  sharpInit ??= (async () => {
+    try {
+      const mod = await import('sharp')
+      const factory = (mod.default ?? mod) as unknown as SharpFactory
+      factory.cache(false)
+      factory.concurrency(1)
+      return factory
+    } catch {
+      return null
+    }
+  })()
+  return sharpInit
 }
 
 /** sharp 支持的输出格式。用字面量联合而不是 string —— 它的 toFormat 只接受这几个。 */
@@ -2121,20 +2147,41 @@ export function startJobRunner(): void {
 }
 
 /**
- * inline 工具能处理的单文件体积上限。
+ * inline 工具能处理的单文件体积上限：64MB。
  *
  * 为什么必须有：重工具（LibreOffice、ffmpeg）走的是独立容器的 external 道，
- * 而 inline 工具是**在业务进程里**跑的，进程的内存上限只有 512MB。
+ * 而 inline 工具是**在业务进程里**跑的，进程的内存上限只有 512MB
+ * （`deploy/docker-compose.yml` 的 `mem_limit: ${WL_APP_MEMORY:-512m}`）。
  * readNodeBuffer 用 readFile 一次性把整个文件读进内存 —— 成员上传一个
  * 1-2GB 的 PDF 再点一下"PDF 信息"，容器就被 OOM 杀掉了，全平台下线。
+ *
+ * 为什么是 64MB，而不是原来的 100MB：
+ *   - 闸门只能管住"文件本身多大"，管不住工具在内存里把它放大多少倍。
+ *     pdf-lib 解析时会把整份字节**读进来再复制一份**（`copyBytesInto` /
+ *     交叉引用表重建），一次合并的峰值约为输入体积的 **2 倍**，再加上
+ *     写出的新文档又是同阶的一份。
+ *   - 100MB 的单文件 × 2 ≈ 200MB，再加 256MB 的合计（合并时两份都要在内存里）
+ *     ≈ 500MB+ —— 这已经等于整个容器的上限，不含 Node 自身基线（约 60-100MB）、
+ *     SQLite 页缓存和 sharp 的解码缓冲，**一次正常操作就必然撞穿 512MB**，
+ *     被 cgroup 直接 SIGKILL（不是 V8 的 OOM，日志里连堆栈都没有）。
+ *   - 64MB × 2 ≈ 128MB，配合 128MB 的合计上限，最坏情况峰值约 256MB；
+ *     再加 `--max-old-space-size=384` 给 V8 留出的余量，仍能在 512MB 里
+ *     留出 ~100MB 给进程基线与非堆内存，GC 有机会先动手而不是被内核杀掉。
  *
  * 这不是"加固建议"，是一个不需要任何漏洞就能触发的宕机路径，
  * 所以把上限放在**工具入口**而不是指望每个工具自己检查。
  */
-const MAX_INLINE_INPUT_BYTES = 100 * 1024 * 1024
+const MAX_INLINE_INPUT_BYTES = 64 * 1024 * 1024
 
-/** inline 工具处理的输入总大小上限（合并类工具会同时持有多个文件）。 */
-const MAX_INLINE_TOTAL_BYTES = 256 * 1024 * 1024
+/**
+ * inline 工具处理的输入总大小上限：128MB。
+ *
+ * 合并/拼接类工具会同时持有多个文件（`concatPdfs` 把每一份都读成 buffer
+ * 再交给 pdf-lib），所以合计上限不能等于单文件上限；但也不能高到让
+ * "两个 64MB" 叠加后越过上面算出的内存预算 —— 128MB 恰好是单文件上限的
+ * 2 倍，即"最多两份满额文件"，峰值与上面的估算一致。
+ */
+const MAX_INLINE_TOTAL_BYTES = 128 * 1024 * 1024
 
 async function executeJob(job: Job): Promise<void> {
   const payload = JSON.parse(job.params) as {
@@ -2331,9 +2378,9 @@ async function runDocToPdf(
   const form = new FormData()
   for (const node of inputs) {
     // readNodeBuffer 是 async 的，且会把整份文件读进内存。
-    // 这里没有像 inline 道那样加体积闸门，是因为转换服务跑在**独立容器**里，
-    // 内存压力在那一侧（它有 2GB 上限和自己的超时）。业务进程这一侧
-    // 只做一次流式的转发，峰值与文件大小同阶 —— 这是下面 100MB 闸门的作用。
+    // 转换服务本身跑在**独立容器**里（2GB 上限、自己的超时），内存压力主要
+    // 在那一侧；但业务进程这一侧仍要把整份文件读出来塞进 multipart，峰值与
+    // 文件大小同阶 —— 所以这里沿用同一个单文件闸门（64MB），挡在读取之前。
     if (node.size > MAX_INLINE_INPUT_BYTES) {
       throw new HttpError(
         413,

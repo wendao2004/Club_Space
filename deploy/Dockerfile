@@ -82,4 +82,18 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "server/src/index.ts"]
+# ⚠️ `--max-old-space-size=384` 是**内存防线**，不是性能调优。
+#
+# 容器有 512MB 硬上限（compose 的 `mem_limit`），默认的 V8 堆上限跟着宿主机
+# 内存走（在这类 NAS 上远大于 512MB）。于是进程把堆涨到 400MB+ 时 GC 还觉得
+# "很宽裕"，继续分配 —— 直到 cgroup 直接 SIGKILL，日志里连 OOM 堆栈都没有，
+# 运维只会看到容器反复重启。把堆压到 384MB 之后，V8 会先在堆内 OOM 并打印
+# 真实的分配现场，而且给堆外内存（Buffer / libvips / SQLite）留下 ~128MB。
+#
+# 为什么写在这里（而不是 server/package.json 的 start，也不是 compose 的 command）：
+#   - 镜像里**唯一**的启动路径就是下面这行 CMD（compose 没有覆盖 command）；
+#   - `package.json` 的 `start` 只在本地 `pnpm start`/`pnpm dev` 时用得到，
+#     改了它对这个容器毫无作用，反而会让人以为生产已经生效；
+#   - 写进 compose 的 command 会把启动命令复制一份，以后改 CMD 时容易只改一处。
+# 所以只在这里加，保持"生产启动命令只有一处"。
+CMD ["node", "--max-old-space-size=384", "server/src/index.ts"]
