@@ -173,6 +173,55 @@ export function createGroup(creatorId: string, title: string, memberIdsInput: st
   })
 }
 
+/**
+ * 会话列表。
+ *
+ * **整个列表只发一条 SQL。** 早先这里是「主查询 + 每个会话再查 2 条」
+ * （最后一条消息、单聊对方的名字）：200 个会话就是 394 条语句，
+ * 而这是打开聊天窗口必走的接口。现在把两件事都并进主查询：
+ *
+ *   - 最后一条消息：**相关子查询** `ORDER BY seq DESC LIMIT 1`，
+ *     挂成 `LEFT JOIN messages lm ON lm.seq = (...)`。
+ *   - 对方/最后发言人的显示名：`LEFT JOIN users`。
+ *
+ * ── 为什么用相关子查询，而不是窗口函数 ──────────────────────────────
+ * `ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY seq DESC)` 要先
+ * 把**所有会话的所有消息**都读出来、分区、排序，最后才丢掉 rn > 1 的行；
+ * 消息表有几十万行时这是全表级的开销。相关子查询则是每个会话一次索引定位
+ * （见下），只读它真正需要的那一行。窗口函数只有在"一次要同一批会话的多条
+ * 最新消息"（比如每个会话取前 3 条）时才划算。
+ *
+ * ── LIMIT 1 靠哪个索引 ─────────────────────────────────────────────
+ * `ix_messages_conv(conversation_id, seq DESC)`（见 db.ts 的 v2 迁移）。
+ * 子查询等价于"在这个索引里定位到 conversation_id = c.id 的那一段，从后往前走
+ * 一步"。`deleted_at IS NULL` 意味着被撤回的消息要跳过 —— 跳的时候只多一次
+ * 主键回表，不改变"从后往前走"的方向，所以仍然不会扫全表；这也是**不**
+ * 加 `(conversation_id, seq) WHERE deleted_at IS NULL` 部分索引的原因：
+ * 现状已经是索引定位 + 常数次回表，再加一个索引只多一份写放大。
+ *
+ * ── 为什么不能简单 JOIN messages ───────────────────────────────────
+ * 一个会话有 N 条消息，`JOIN messages` 会把会话行复制成 N 行 —— 列表里
+ * 出现重复会话、memberCount/unread 也被乘大。要修就得 GROUP BY 或 DISTINCT，
+ * 那又会把"只取最新一条"变成"先聚合所有消息"。所以这里 JOIN 的条件必须
+ * 精确到唯一一行：`lm.seq = (标量子查询)`，seq 是主键，最多命中一条。
+ *
+ * ── 为什么 last sender / peer 用 LEFT JOIN ─────────────────────────
+ * 空会话（还没发过消息）的 `lm.*` 全是 NULL。若这里写成 `JOIN users`（内连接），
+ * 那条会话会被整行过滤掉 —— 用户会看到"刚建的会话在列表里消失了"。
+ * peer 同理：会话只剩我一个成员时（对方退出了）子查询返回 NULL，内连接一样会
+ * 把这行吃掉。所以两个都必须是 LEFT JOIN，标题自然退回 '会话'。
+ * （最后发言人一定存在于 users：messages.sender_id 有外键，删用户会被拦住。）
+ *
+ * 语义上与旧实现逐条对齐：
+ *   - 排序 `ORDER BY c.updated_at DESC LIMIT 200` 不变；空会话因为 LEFT JOIN
+ *     仍然出现，位置仍由 updated_at 决定；
+ *   - 未读仍用 `COUNT(*) ... deleted_at IS NULL AND seq > last_read_seq`，
+ *     算法一个字符都没动；
+ *   - "最后一条"仍**排除已撤回**（deleted_at IS NOT NULL）的消息；
+ *   - 单聊标题仍取对方当前 display_name（对方改名后立刻生效），查不到时退回
+ *     '会话'；群聊标题仍用 c.title；
+ *   - peerId 仍是"按主键顺序第一个非我成员"，群聊也照旧返回（前端只在单聊用）。
+ */
 export function listConversations(userId: string): ConversationSummary[] {
   const rows = getDb()
     .prepare(
@@ -188,11 +237,31 @@ export function listConversations(userId: string): ConversationSummary[] {
               (SELECT COUNT(*) FROM messages m
                 WHERE m.conversation_id = c.id AND m.deleted_at IS NULL
                   AND m.seq > cm.last_read_seq) AS unread_count,
-              (SELECT u.id FROM conversation_members m3
-                 JOIN users u ON u.id = m3.user_id
-                WHERE m3.conversation_id = c.id AND m3.user_id != ? LIMIT 1) AS peer_id
+              -- 对方（单聊）／首个非我成员（群聊，字段照旧返回，前端只在单聊用）。
+              -- 不写 ORDER BY 与旧实现一致：走 (conversation_id, user_id) 主键序，
+              -- 取到的就是 user_id 最小的那个非我成员。
+              peer.id AS peer_id,
+              peer.display_name AS peer_name,
+              -- 最后一条可见消息（排除撤回）。seq 是主键，这个 JOIN 最多命中一行。
+              lm.id AS last_id,
+              lm.seq AS last_seq,
+              lm.sender_id AS last_sender_id,
+              lm.kind AS last_kind,
+              lm.body AS last_body,
+              lm.created_at AS last_created_at,
+              lu.display_name AS last_sender_name
          FROM conversations c
          JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = ?
+         LEFT JOIN users peer ON peer.id = (
+                SELECT m3.user_id FROM conversation_members m3
+                 WHERE m3.conversation_id = c.id AND m3.user_id != ?
+                 LIMIT 1)
+         LEFT JOIN messages lm ON lm.seq = (
+                SELECT m4.seq FROM messages m4
+                 WHERE m4.conversation_id = c.id AND m4.deleted_at IS NULL
+                 ORDER BY m4.seq DESC
+                 LIMIT 1)
+         LEFT JOIN users lu ON lu.id = lm.sender_id
         ORDER BY c.updated_at DESC
         LIMIT 200`,
     )
@@ -207,37 +276,23 @@ export function listConversations(userId: string): ConversationSummary[] {
     member_count: number
     unread_count: number
     peer_id: string | null
+    peer_name: string | null
+    last_id: string | null
+    last_seq: number | null
+    last_sender_id: string | null
+    last_kind: string | null
+    last_body: string | null
+    last_created_at: number | null
+    last_sender_name: string | null
   }>
 
   const result: ConversationSummary[] = []
   for (const row of rows) {
-    const last = getDb()
-      .prepare(
-        `SELECT m.id, m.seq, m.sender_id, m.kind, m.body, m.created_at, u.display_name
-           FROM messages m JOIN users u ON u.id = m.sender_id
-          WHERE m.conversation_id = ? AND m.deleted_at IS NULL
-          ORDER BY m.seq DESC LIMIT 1`,
-      )
-      .get(row.id) as
-      | {
-          id: string
-          seq: number
-          sender_id: string
-          kind: string
-          body: string | null
-          created_at: number
-          display_name: string
-        }
-      | undefined
-
     // 单聊的标题用对方的名字实时算，而不是建会话时写死 ——
     // 否则对方改了显示名，你的会话列表里还是旧名字。
     let title = row.title ?? '会话'
     if (row.kind === 'direct' && row.peer_id) {
-      const peer = getDb().prepare('SELECT display_name FROM users WHERE id = ?').get(row.peer_id) as
-        | { display_name: string }
-        | undefined
-      title = peer?.display_name ?? '会话'
+      title = row.peer_name ?? '会话'
     }
 
     const unread = Math.max(0, row.unread_count)
@@ -248,17 +303,18 @@ export function listConversations(userId: string): ConversationSummary[] {
       title,
       peerId: row.peer_id,
       memberCount: row.member_count,
-      lastMessage: last
-        ? {
-            id: last.id,
-            seq: last.seq,
-            senderId: last.sender_id,
-            senderName: last.display_name,
-            kind: last.kind,
-            preview: previewOf(last.kind, last.body),
-            createdAt: last.created_at,
-          }
-        : null,
+      lastMessage:
+        row.last_id !== null
+          ? {
+              id: row.last_id,
+              seq: row.last_seq!,
+              senderId: row.last_sender_id!,
+              senderName: row.last_sender_name ?? '',
+              kind: row.last_kind!,
+              preview: previewOf(row.last_kind!, row.last_body),
+              createdAt: row.last_created_at!,
+            }
+          : null,
       unread,
       lastReadSeq: row.last_read_seq,
       updatedAt: row.updated_at,

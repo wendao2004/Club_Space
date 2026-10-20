@@ -520,6 +520,93 @@ async function main() {
     bad('上传文件', `开启上传失败 ${initUpload.status}`)
   }
 
+  // ---------------------------------------------------------------- 会话列表语义
+  //
+  // 列表接口被重写过（从"每个会话再查 2 条"改成一条 SQL：最后一条消息走
+  // 相关子查询 + 对方/发言人名字 JOIN 进来）。这组断言盯的正是那次重写最容易
+  // 弄坏的三件事：
+  //   1. 空会话（一条消息都没有）不能从列表里消失；
+  //   2. 最后一条消息必须真的是最新的那条可见消息；
+  //   3. 撤回的消息不能继续充当"最后一条"。
+  console.log('\n【会话列表：最后一条消息与空会话】')
+  const tailBody = '这条应该是列表里显示的最后一条'
+  const tail = await yi.api(`/api/chat/conversations/${convId}/messages`, {
+    method: 'POST',
+    json: { kind: 'text', body: tailBody },
+  })
+  assert(tail.status === 200, '乙发一条用于验证「最后一条消息」的消息')
+
+  const jiaListAfter = await jia.api('/api/chat/conversations')
+  const jiaConvAfter = jiaListAfter.body.conversations.find((c) => c.id === convId)
+  assert(
+    jiaConvAfter.lastMessage?.id === tail.body.message.id,
+    '列表里的最后一条就是刚发的那条（取的是最新，不是最早/任意一条）',
+    `lastMessage=${JSON.stringify(jiaConvAfter.lastMessage)}`,
+  )
+  assert(
+    jiaConvAfter.lastMessage?.senderName === '乙同学',
+    '最后一条带发言人名字（名字来自 JOIN，不是前端自己猜的）',
+    jiaConvAfter.lastMessage?.senderName,
+  )
+  assert(
+    jiaConvAfter.lastMessage?.preview === tailBody,
+    '最后一条的摘要与正文一致',
+    jiaConvAfter.lastMessage?.preview,
+  )
+
+  // 撤回最新那条之后，最后一条必须**回退**到上一条可见消息，而不是变成 null
+  const beforeRecall = await jia.api(`/api/chat/conversations/${convId}/messages?limit=200`)
+  // 取"除了刚发的那条以外，最后一条未撤回的消息"—— 会话里本来就有一条早期被撤回的，
+  // 直接取倒数第二条会撞上它
+  const visible = beforeRecall.body.messages.filter(
+    (m) => !m.recalled && m.id !== tail.body.message.id,
+  )
+  const expectedPrev = visible[visible.length - 1]
+  assert(expectedPrev !== undefined, '撤回前能取到上一条可见消息（作为对照）')
+
+  await yi.api(`/api/chat/messages/${tail.body.message.id}/recall`, { method: 'POST', json: {} })
+  const jiaListRecalled = await jia.api('/api/chat/conversations')
+  const jiaConvRecalled = jiaListRecalled.body.conversations.find((c) => c.id === convId)
+  assert(
+    jiaConvRecalled.lastMessage?.id === expectedPrev.id,
+    '已撤回的消息不再充当「最后一条」，回退到上一条可见消息',
+    `lastMessage=${jiaConvRecalled.lastMessage?.id}，应为 ${expectedPrev.id}`,
+  )
+
+  // 空会话：刚建好、一条消息都没有。它必须在列表里，且 lastMessage 为 null。
+  // 这里刻意等一小会儿再建，让 updated_at 严格大于上面那条消息的时间 ——
+  // 否则同一毫秒内建会话和发消息会撞在一起，排序断言就变成掷骰子。
+  await new Promise((r) => setTimeout(r, 30))
+  const emptyConv = await jia.api('/api/chat/conversations/direct', {
+    method: 'POST',
+    json: { peerId: bingId },
+  })
+  const emptyId = emptyConv.body.conversation.id
+  const listWithEmpty = await jia.api('/api/chat/conversations')
+  const emptyInList = listWithEmpty.body.conversations.find((c) => c.id === emptyId)
+  assert(emptyInList !== undefined, '没有任何消息的空会话仍然出现在列表里（没被 JOIN 过滤掉）')
+  assert(
+    emptyInList?.lastMessage === null,
+    '空会话的 lastMessage 是 null（不是丢字段，也不是空对象）',
+    JSON.stringify(emptyInList?.lastMessage),
+  )
+  assert(
+    emptyInList?.title === '丙同学',
+    '空会话的单聊标题仍然用对方名字（不因为没有消息就退化成「会话」）',
+    emptyInList?.title,
+  )
+  assert(
+    listWithEmpty.body.conversations[0].id === emptyId,
+    '空会话按最后活跃时间参与排序：刚建的排在最前',
+    `第一条是 ${listWithEmpty.body.conversations[0].id}`,
+  )
+  assert(
+    listWithEmpty.body.conversations.every(
+      (c, i) => i === 0 || listWithEmpty.body.conversations[i - 1].updatedAt >= c.updatedAt,
+    ),
+    '整个列表仍按最后活跃时间倒序',
+  )
+
   // ---------------------------------------------------------------- 结果
   console.log(
     `\n\x1b[1m结果\x1b[0m  通过 \x1b[32m${passed}\x1b[0m  失败 \x1b[31m${failed}\x1b[0m\n`,
