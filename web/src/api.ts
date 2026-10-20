@@ -17,6 +17,24 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 401 的统一出口。
+ *
+ * 原来每个页面自己判 401（全站只有 5 处），其余请求遇到会话过期就只是
+ * 弹一句"未登录"，界面还停在已登录状态 —— 用户以为是自己点错了，
+ * 反复点同一个按钮，每次都失败。会话过期（12 小时）在这台 NAS 上
+ * 是每天都会发生的事，不是边角场景。
+ *
+ * 用"注册回调"而不是在这里 import auth store：store 反过来 import api，
+ * 直接互引会在模块初始化时形成循环，把其中一边变成 undefined。
+ * 由 main.ts 在 pinia 装好之后注册。
+ */
+let unauthorizedHandler: (() => void) | null = null
+
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler
+}
+
 async function request<T>(
   path: string,
   options: { method?: string; json?: unknown; body?: BodyInit; headers?: Record<string, string> } = {},
@@ -53,6 +71,11 @@ async function request<T>(
 
   const payload = (await response.json()) as unknown
   if (!response.ok) {
+    // 会话过期：把界面切回登录页，而不是让用户对着一个"看起来还在登录"的界面反复点。
+    // 排除 /api/auth/* —— 登录页里密码输错也是 401，那不是"会话过期"，
+    // 触发全局登出只会把刚填的表单清空。
+    if (response.status === 401 && !path.startsWith('/api/auth/')) unauthorizedHandler?.()
+
     const message =
       typeof payload === 'object' && payload !== null && 'error' in payload
         ? String((payload as { error: unknown }).error)
@@ -349,6 +372,17 @@ export const api = {
         members: ChatContact[]
         receipts: ChatReceipt[]
       }>(`/api/chat/conversations/${id}`),
+
+    /** 把成员拉进群聊（服务端会同时写一条系统消息）。 */
+    addMembers: (id: string, userIds: string[]) =>
+      request<{ added: ChatContact[]; members: ChatContact[] }>(
+        `/api/chat/conversations/${id}/members`,
+        { json: { userIds } },
+      ),
+
+    /** 退出群聊。单聊不允许退（服务端会拒绝并说明原因）。 */
+    leaveConversation: (id: string) =>
+      request<{ ok: boolean }>(`/api/chat/conversations/${id}/leave`, { method: 'POST' }),
 
     /**
      * 拉消息。
@@ -895,6 +929,13 @@ export interface ChatConversation {
   } | null
   /** 未读数。由服务端的 max(seq) - 已读位置得出，不是本地估算。 */
   unread: number
+  /**
+   * 未读里"点名了我"的条数。
+   *
+   * 服务端算的，不是前端扫的 —— 没打开的那个会话前端只有 lastMessage 一条，
+   * 扫不出来，而"有人@你"恰恰是没打开时最需要看到的提示。
+   */
+  mentionUnread: number
   lastReadSeq: number
   updatedAt: number
 }
@@ -909,6 +950,14 @@ export interface ChatMessage {
   body: string | null
   fileNodeId: string | null
   replyTo: string | null
+  /** 被引用那条的快照（服务端带回来，撤回的只给占位文字）。 */
+  reply: {
+    id: string
+    senderId: string
+    senderName: string
+    preview: string
+    recalled: boolean
+  } | null
   editedAt: number | null
   deletedAt: number | null
   createdAt: number

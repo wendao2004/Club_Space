@@ -56,6 +56,8 @@ const paths: Record<string, string> = {
   download: 'M12 4v12M7 11l5 5 5-5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3',
   trash: 'M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M10 11v6M14 11v6',
   rename: 'M4 20h6M6 16l9.5-9.5a2.1 2.1 0 0 1 3 3L9 19l-4 1z',
+  // 回复：一个左拐的箭头，与"转发"的右拐箭头区分开
+  reply: 'M10 8L4 13l6 5v-3.5h4.5A5.5 5.5 0 0 0 20 9V8',
   copy: 'M9 9h10v10H9zM5 15V5h10',
   move: 'M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3',
   share: 'M12 3v12M8 7l4-4 4 4M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5',

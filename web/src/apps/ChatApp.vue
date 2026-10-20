@@ -192,6 +192,22 @@ watch([activeId, () => activeMessages.value.length], async () => {
   scrollToBottom()
 })
 
+/**
+ * 换会话时把"属于上一个会话"的临时状态全部清掉。
+ *
+ * 最容易忽略的是 members：@ 候选名单优先用它，不清就会把上个群的人
+ * 列在当前群的 @ 列表里 —— 看起来能点，点进去是一串和本群无关的名字。
+ */
+watch(activeId, () => {
+  replyTarget.value = null
+  mentionOpen.value = false
+  membersOpen.value = false
+  inviteOpen.value = false
+  inviteIds.value = []
+  members.value = []
+  receipts.value = []
+})
+
 // ---------------------------------------------------------------- 消息分组
 
 interface MessageRow {
@@ -267,17 +283,150 @@ async function askRecall(msg: ChatMessage): Promise<void> {
 // ---------------------------------------------------------------- 输入区
 
 const draft = ref('')
+const composerEl = ref<HTMLTextAreaElement | null>(null)
 
-function onDraftInput(): void {
+/**
+ * 正在回复哪条消息（不回复时为 null）。
+ *
+ * 只存 id 和一段展示用的名字，**不存正文副本**：正文以服务端返回的 `reply`
+ * 快照为准，本地拼一份会在撤回/编辑后和真实内容对不上。
+ */
+const replyTarget = ref<{ id: string; senderName: string; preview: string } | null>(null)
+
+function beginReply(msg: ChatMessage): void {
+  if (msg.recalled || msg.kind === 'system') return
+  replyTarget.value = {
+    id: msg.id,
+    senderName: msg.senderName,
+    preview: msg.kind === 'file' ? `[文件] ${msg.body ?? ''}` : (msg.body ?? ''),
+  }
+  composerEl.value?.focus()
+}
+
+function cancelReply(): void {
+  replyTarget.value = null
+}
+
+/** 点引用块跳到原消息：找不到就静默不动（它可能在还没加载的历史里）。 */
+function jumpToMessage(id: string): void {
+  const box = listEl.value
+  const el = box?.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(id)}"]`)
+  if (!el) return
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  el.classList.add('msg--flash')
+  window.setTimeout(() => el.classList.remove('msg--flash'), 1200)
+}
+
+// ---- @ 提醒
+
+const mentionOpen = ref(false)
+const mentionQuery = ref('')
+const mentionIndex = ref(0)
+
+/**
+ * @ 的候选名单。
+ *
+ * 优先用当前群的成员（成员面板打开过就有），没打开过就退化成全部联系人 ——
+ * 后者会混进非群成员，但"提错人"最多是条文本，而"打不出 @"是功能不可用，
+ * 两害相权取轻。真正的提醒判定在服务端按显示名做，不依赖这份名单。
+ */
+const mentionCandidates = computed<ChatContact[]>(() => {
+  const q = mentionQuery.value.trim().toLowerCase()
+  const pool = members.value.length > 0 ? members.value : chat.contacts
+  return pool
+    .filter((m) => m.id !== myId.value)
+    .filter(
+      (m) =>
+        q === '' ||
+        m.displayName.toLowerCase().includes(q) ||
+        m.username.toLowerCase().includes(q),
+    )
+    .slice(0, 8)
+})
+
+/**
+ * 光标前是否正在输入一个 @词。
+ *
+ * 只看"光标前最后一个字符起往前扫的一段"，而不是整段文本：
+ * 否则你打完一句话再回头补个字，两处 @ 会互相干扰。
+ */
+function mentionTokenBeforeCaret(el: HTMLTextAreaElement): string | null {
+  const caret = el.selectionStart ?? 0
+  const before = el.value.slice(0, caret)
+  const match = /(?:^|\s)@([^\s@]{0,20})$/.exec(before)
+  return match ? (match[1] ?? '') : null
+}
+
+function onDraftInput(event?: Event): void {
   const id = activeId.value
   if (id) chat.notifyTyping(id)
+
+  const el = (event?.target as HTMLTextAreaElement | undefined) ?? composerEl.value
+  if (!el || activeConversation.value?.kind !== 'group') {
+    mentionOpen.value = false
+    return
+  }
+  const token = mentionTokenBeforeCaret(el)
+  if (token === null) {
+    mentionOpen.value = false
+    return
+  }
+  mentionQuery.value = token
+  mentionIndex.value = 0
+  mentionOpen.value = true
+}
+
+/** 选中某个成员：把它替换进光标处，带上名字后的空格。 */
+function pickMention(contact: ChatContact): void {
+  const el = composerEl.value
+  mentionOpen.value = false
+  if (!el) return
+  const caret = el.selectionStart ?? draft.value.length
+  const before = draft.value.slice(0, caret)
+  const match = /(?:^|\s)@([^\s@]{0,20})$/.exec(before)
+  if (!match) return
+  // 保留 @ 前面那个分隔符（空格或行首）
+  const head = before.slice(0, match.index + (match[0].startsWith(' ') ? 1 : 0))
+  draft.value = `${head}@${contact.displayName} ${draft.value.slice(caret)}`
+  void nextTick(() => {
+    const pos = (head + `@${contact.displayName} `).length
+    el.focus()
+    el.setSelectionRange(pos, pos)
+  })
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  if (mentionOpen.value && mentionCandidates.value.length > 0) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const n = mentionCandidates.value.length
+      mentionIndex.value =
+        (mentionIndex.value + (event.key === 'ArrowDown' ? 1 : n - 1)) % n
+      return
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      const target = mentionCandidates.value[mentionIndex.value]
+      if (target) {
+        event.preventDefault()
+        pickMention(target)
+        return
+      }
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      mentionOpen.value = false
+      return
+    }
+  }
+
   // 中文输入法组词时的 Enter 是在选词，不能当作发送。
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault()
     void handleSend()
+  } else if (event.key === 'Escape' && replyTarget.value) {
+    // Esc 取消引用，但不要连带清掉已打的字
+    event.preventDefault()
+    cancelReply()
   }
 }
 
@@ -285,17 +434,42 @@ async function handleSend(): Promise<void> {
   const id = activeId.value
   const text = draft.value.trim()
   if (!id || !text) return
+  const replyTo = replyTarget.value?.id ?? null
   try {
-    await chat.sendText(id, text)
+    await chat.sendText(id, text, replyTo)
   } catch {
     // 发送失败：store 已写入 chat.error 并弹提示，草稿原样保留，不用重打。
     return
   }
-  // 成功后才清空。
+  // 成功后才清空（引用也一起清掉，否则下一条会莫名带着引用）。
   draft.value = ''
+  replyTarget.value = null
+  mentionOpen.value = false
   atBottom.value = true
   await nextTick()
   scrollToBottom()
+}
+
+/**
+ * 把消息正文拆成"普通文字 / @提及"两段。
+ *
+ * 不做 Markdown，也不解析链接 —— 这里只需要把 @某人 标出来。
+ * 判定"是不是 @我"用的是显示名精确相等，和服务端 unreadMentions 的口径一致，
+ * 否则会出现"列表说有人@我，点进去一片平静"。
+ */
+function textParts(msg: ChatMessage): Array<{ text: string; mention: boolean; mine: boolean }> {
+  const body = msg.body ?? ''
+  const myName = auth.user?.displayName ?? ''
+  const parts: Array<{ text: string; mention: boolean; mine: boolean }> = []
+  const re = /@[^\s@]{1,24}/g
+  let last = 0
+  for (let m = re.exec(body); m !== null; m = re.exec(body)) {
+    if (m.index > last) parts.push({ text: body.slice(last, m.index), mention: false, mine: false })
+    parts.push({ text: m[0], mention: true, mine: m[0] === `@${myName}` })
+    last = m.index + m[0].length
+  }
+  if (last < body.length) parts.push({ text: body.slice(last), mention: false, mine: false })
+  return parts
 }
 
 const typingUsers = computed(() => {
@@ -413,6 +587,72 @@ function memberRead(member: ChatContact): boolean {
   const receipt = memberReceipt(member.id)
   if (!last || !receipt) return false
   return receipt.lastReadSeq >= last.seq
+}
+
+// ---- 邀请成员（群聊）
+
+const inviteOpen = ref(false)
+const inviteIds = ref<string[]>([])
+const inviting = ref(false)
+
+/** 可邀请的人 = 联系人里还不是本群成员的（自己本来就排除在外）。 */
+const inviteCandidates = computed<ChatContact[]>(() => {
+  const inGroup = new Set(members.value.map((m) => m.id))
+  return chat.contacts.filter((c) => !inGroup.has(c.id))
+})
+
+function openInvite(): void {
+  inviteIds.value = []
+  inviteOpen.value = true
+  if (chat.contacts.length === 0) void chat.loadContacts()
+}
+
+function toggleInvite(id: string): void {
+  const at = inviteIds.value.indexOf(id)
+  if (at >= 0) inviteIds.value.splice(at, 1)
+  else inviteIds.value.push(id)
+}
+
+async function submitInvite(): Promise<void> {
+  const id = activeId.value
+  if (!id || inviteIds.value.length === 0 || inviting.value) return
+  inviting.value = true
+  try {
+    await chat.addMembers(id, inviteIds.value)
+    // 重新拉一次成员：服务端返回的 members 才是权威的（含 role、在线状态）
+    const data = await api.chat.getConversation(id)
+    members.value = data.members
+    receipts.value = data.receipts
+    inviteOpen.value = false
+    inviteIds.value = []
+  } catch {
+    // 失败提示由 store 统一弹，这里保持弹窗打开让用户重试
+  } finally {
+    inviting.value = false
+  }
+}
+
+// ---- 退出群聊
+
+const leaving = ref(false)
+
+async function askLeave(): Promise<void> {
+  const conv = activeConversation.value
+  if (!conv || conv.kind !== 'group') return
+  const ok = window.confirm(
+    `退出「${conv.title}」？\n\n退出后这条会话会从你的列表里消失，` +
+      `其他人会看到一条"你退出了群聊"的提示。想再回来只能让别人重新拉你。`,
+  )
+  if (!ok) return
+  leaving.value = true
+  try {
+    await chat.leave(conv.id)
+    membersOpen.value = false
+  } catch {
+    // 同上，store 已提示
+  } finally {
+    leaving.value = false
+  }
 }
 
 // ---------------------------------------------------------------- 窄窗口
@@ -570,6 +810,10 @@ onBeforeUnmount(() => {
                 <span class="conv__main">
                   <span class="conv__row">
                     <span class="conv__name">{{ conv.title }}</span>
+                    <!-- 未读里有人点名我：用 @ 而不是数字，一眼能和普通未读区分开 -->
+                    <span v-if="conv.mentionUnread > 0" class="conv__at" title="有人在群里@你">
+                      @
+                    </span>
                     <span v-if="conv.lastMessage" class="conv__time">
                       {{ formatTime(conv.lastMessage.createdAt) }}
                     </span>
@@ -636,6 +880,7 @@ onBeforeUnmount(() => {
             <div
               v-for="row in rows"
               :key="row.msg.id"
+              :data-msg-id="row.msg.id"
               class="msg"
               :class="{
                 'msg--own': row.own,
@@ -686,45 +931,77 @@ onBeforeUnmount(() => {
                       }"
                     >
                       <span v-if="row.msg.recalled" class="msg__recalled">消息已撤回</span>
-                      <a
-                        v-else-if="row.msg.kind === 'file'"
-                        class="msg__file"
-                        :href="api.downloadUrl(row.msg.fileNodeId ?? '')"
-                        download
-                      >
-                        <span class="msg__file-icon"><Icon name="file" :size="20" /></span>
-                        <span class="msg__file-main">
-                          <span class="msg__file-name">{{ row.msg.body || '文件' }}</span>
-                          <span class="msg__file-dl">下载</span>
+                      <template v-else>
+                        <!--
+                          引用块。被引用的那条如果已撤回，服务端只给"原消息已撤回"，
+                          这里也画成不可点的灰条 —— 否则点进去只会看到一条占位。
+                        -->
+                        <button
+                          v-if="row.msg.reply"
+                          class="msg__reply"
+                          :class="{ 'msg__reply--gone': row.msg.reply.recalled }"
+                          :disabled="row.msg.reply.recalled"
+                          :title="row.msg.reply.recalled ? '引用的消息已不可见' : '跳到这条消息'"
+                          @click="jumpToMessage(row.msg.reply.id)"
+                        >
+                          <span class="msg__reply-name">{{ row.msg.reply.senderName }}</span>
+                          <span class="msg__reply-text">{{ row.msg.reply.preview }}</span>
+                        </button>
+
+                        <a
+                          v-if="row.msg.kind === 'file'"
+                          class="msg__file"
+                          :href="api.downloadUrl(row.msg.fileNodeId ?? '')"
+                          download
+                        >
+                          <span class="msg__file-icon"><Icon name="file" :size="20" /></span>
+                          <span class="msg__file-main">
+                            <span class="msg__file-name">{{ row.msg.body || '文件' }}</span>
+                            <span class="msg__file-dl">下载</span>
+                          </span>
+                        </a>
+                        <span v-else class="msg__text selectable">
+                          <template v-for="(part, i) in textParts(row.msg)" :key="i">
+                            <span
+                              v-if="part.mention"
+                              class="msg__at"
+                              :class="{ 'msg__at--me': part.mine }"
+                              >{{ part.text }}</span
+                            >
+                            <template v-else>{{ part.text }}</template>
+                          </template>
                         </span>
-                      </a>
-                      <span v-else class="msg__text selectable">{{ row.msg.body }}</span>
+                      </template>
                     </div>
 
-                    <!-- 悬停时才出现，避免一直占用视觉噪音 -->
                     <!--
+                      悬停时才出现，避免一直占用视觉噪音。
+                      "回复"对所有人的消息都开放（包括管理员对别人的）；
+                      编辑/撤回仍然受权限约束：
                       管理员也能撤回别人的消息（服务端 recallMessage 已收 isAdmin），
                       但**编辑**仍只限本人 —— 改写别人的发言是不可接受的边界。
                     -->
-                    <div
-                      v-if="(row.own || auth.isAdmin) && !row.msg.recalled"
-                      class="msg__actions"
-                    >
-                      <button
-                        v-if="row.own && row.msg.kind === 'text'"
-                        class="wl-icon-btn"
-                        title="编辑"
-                        @click="beginEdit(row.msg)"
-                      >
-                        <Icon name="rename" :size="14" />
+                    <div v-if="!row.msg.recalled" class="msg__actions">
+                      <button class="wl-icon-btn" title="回复" @click="beginReply(row.msg)">
+                        <Icon name="reply" :size="14" />
                       </button>
-                      <button
-                        class="wl-icon-btn"
-                        :title="row.own ? '撤回' : '以管理员身份撤回'"
-                        @click="askRecall(row.msg)"
-                      >
-                        <Icon name="trash" :size="14" />
-                      </button>
+                      <template v-if="row.own || auth.isAdmin">
+                        <button
+                          v-if="row.own && row.msg.kind === 'text'"
+                          class="wl-icon-btn"
+                          title="编辑"
+                          @click="beginEdit(row.msg)"
+                        >
+                          <Icon name="rename" :size="14" />
+                        </button>
+                        <button
+                          class="wl-icon-btn"
+                          :title="row.own ? '撤回' : '以管理员身份撤回'"
+                          @click="askRecall(row.msg)"
+                        >
+                          <Icon name="trash" :size="14" />
+                        </button>
+                      </template>
                     </div>
                   </div>
 
@@ -751,22 +1028,56 @@ onBeforeUnmount(() => {
           </button>
 
           <footer class="chat__composer">
-            <textarea
-              v-model="draft"
-              class="wl-textarea chat__input selectable"
-              rows="1"
-              placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-              @input="onDraftInput"
-              @keydown="onKeydown"
-            />
-            <button
-              class="wl-btn wl-btn--primary chat__send"
-              :disabled="!draft.trim()"
-              title="发送"
-              @click="handleSend"
-            >
-              <Icon name="arrow-up" :size="16" />
-            </button>
+            <!-- 引用条：提示"这条发出去会带上引用"，并给一个明确的撤销口 -->
+            <div v-if="replyTarget" class="chat__reply">
+              <span class="chat__reply-main">
+                <span class="chat__reply-title">回复 {{ replyTarget.senderName }}</span>
+                <span class="chat__reply-text">{{ replyTarget.preview }}</span>
+              </span>
+              <button class="wl-icon-btn" title="取消引用（Esc）" @click="cancelReply">
+                <Icon name="close" :size="14" />
+              </button>
+            </div>
+
+            <div class="chat__composer-row">
+              <textarea
+                ref="composerEl"
+                v-model="draft"
+                class="wl-textarea chat__input selectable"
+                rows="1"
+                placeholder="输入消息，Enter 发送，Shift+Enter 换行；群聊里输入 @ 可以点名"
+                @input="onDraftInput"
+                @keydown="onKeydown"
+                @blur="mentionOpen = false"
+              />
+              <button
+                class="wl-btn wl-btn--primary chat__send"
+                :disabled="!draft.trim()"
+                title="发送"
+                @click="handleSend"
+              >
+                <Icon name="arrow-up" :size="16" />
+              </button>
+            </div>
+
+            <!--
+              @ 候选。用 mousedown.prevent 而不是 click：
+              click 之前 textarea 会先失焦，失焦时上面那个 @blur 已经把列表关了，
+              click 根本触发不到（这是最常见的一个"点了没反应"）。
+            -->
+            <div v-if="mentionOpen && mentionCandidates.length > 0" class="chat__mention">
+              <button
+                v-for="(candidate, i) in mentionCandidates"
+                :key="candidate.id"
+                class="mention"
+                :class="{ 'mention--active': i === mentionIndex }"
+                @mousedown.prevent="pickMention(candidate)"
+                @mouseenter="mentionIndex = i"
+              >
+                <span class="mention__name">{{ candidate.displayName }}</span>
+                <span class="mention__user">@{{ candidate.username }}</span>
+              </button>
+            </div>
           </footer>
         </template>
 
@@ -888,44 +1199,98 @@ onBeforeUnmount(() => {
     <div v-if="membersOpen" class="chat__modal" @click.self="membersOpen = false">
       <div class="chat__modal-card">
         <header class="chat__modal-head">
-          <span>成员{{ members.length ? `（${members.length}）` : '' }}</span>
+          <span v-if="!inviteOpen">成员{{ members.length ? `（${members.length}）` : '' }}</span>
+          <span v-else>邀请成员</span>
           <button class="wl-icon-btn" title="关闭" @click="membersOpen = false">
             <Icon name="close" :size="16" />
           </button>
         </header>
-        <div class="chat__modal-body wl-scroll">
-          <div v-if="membersLoading" class="chat__state">
-            <span class="wl-spinner" />
-            <span>正在加载成员…</span>
+
+        <!-- 邀请视图：联系人里还没有进群的那些 -->
+        <template v-if="inviteOpen">
+          <div class="chat__modal-body wl-scroll">
+            <div v-if="inviteCandidates.length === 0" class="wl-empty">
+              <Icon name="users" :size="28" />
+              <p>没有可邀请的联系人</p>
+              <p class="chat__empty-hint">所有人都已经在这个群里了</p>
+            </div>
+            <ul v-else class="member-list">
+              <li
+                v-for="candidate in inviteCandidates"
+                :key="candidate.id"
+                class="member member--pick"
+                @click="toggleInvite(candidate.id)"
+              >
+                <span class="member__check" :class="{ 'member__check--on': inviteIds.includes(candidate.id) }">
+                  <Icon v-if="inviteIds.includes(candidate.id)" name="check" :size="12" />
+                </span>
+                <span class="member__avatar">{{ avatarChar(candidate.displayName) }}</span>
+                <span class="member__name">{{ candidate.displayName }}</span>
+                <span class="member__role">{{ roleLabel(candidate.role) }}</span>
+              </li>
+            </ul>
           </div>
-          <div v-else-if="membersError" class="chat__modal-error">
-            <Icon name="alert" :size="15" />
-            <span class="selectable">{{ membersError }}</span>
+          <footer class="chat__modal-foot">
+            <button class="wl-btn" @click="inviteOpen = false">返回</button>
+            <button
+              class="wl-btn wl-btn--primary"
+              :disabled="inviteIds.length === 0 || inviting"
+              @click="submitInvite"
+            >
+              {{ inviting ? '正在添加…' : `添加${inviteIds.length ? `（${inviteIds.length}）` : ''}` }}
+            </button>
+          </footer>
+        </template>
+
+        <template v-else>
+          <div class="chat__modal-body wl-scroll">
+            <div v-if="membersLoading" class="chat__state">
+              <span class="wl-spinner" />
+              <span>正在加载成员…</span>
+            </div>
+            <div v-else-if="membersError" class="chat__modal-error">
+              <Icon name="alert" :size="15" />
+              <span class="selectable">{{ membersError }}</span>
+            </div>
+            <div v-else-if="members.length === 0" class="wl-empty">
+              <Icon name="users" :size="28" />
+              <p>没有成员信息</p>
+            </div>
+            <ul v-else class="member-list">
+              <li v-for="member in members" :key="member.id" class="member">
+                <span class="member__avatar">
+                  {{ avatarChar(member.displayName) }}
+                  <span
+                    class="avatar__dot"
+                    :class="{ 'avatar__dot--on': member.online }"
+                  />
+                </span>
+                <span class="member__name">
+                  {{ member.displayName }}
+                  <span v-if="member.id === myId" class="member__self">（我）</span>
+                </span>
+                <span class="member__role">{{ roleLabel(member.role) }}</span>
+                <span class="member__read" :class="{ 'member__read--done': memberRead(member) }">
+                  {{ memberRead(member) ? '已读' : '未读' }}
+                </span>
+              </li>
+            </ul>
           </div>
-          <div v-else-if="members.length === 0" class="wl-empty">
-            <Icon name="users" :size="28" />
-            <p>没有成员信息</p>
-          </div>
-          <ul v-else class="member-list">
-            <li v-for="member in members" :key="member.id" class="member">
-              <span class="member__avatar">
-                {{ avatarChar(member.displayName) }}
-                <span
-                  class="avatar__dot"
-                  :class="{ 'avatar__dot--on': member.online }"
-                />
-              </span>
-              <span class="member__name">
-                {{ member.displayName }}
-                <span v-if="member.id === myId" class="member__self">（我）</span>
-              </span>
-              <span class="member__role">{{ roleLabel(member.role) }}</span>
-              <span class="member__read" :class="{ 'member__read--done': memberRead(member) }">
-                {{ memberRead(member) ? '已读' : '未读' }}
-              </span>
-            </li>
-          </ul>
-        </div>
+
+          <!-- 群聊才有这两件事可做；单聊里它们没有语义（也退不掉） -->
+        <footer
+            v-if="activeConversation?.kind === 'group' && !membersLoading && !membersError"
+            class="chat__modal-foot chat__modal-foot--split"
+          >
+            <button class="wl-btn wl-btn--danger" :disabled="leaving" @click="askLeave">
+              {{ leaving ? '正在退出…' : '退出群聊' }}
+            </button>
+            <button class="wl-btn wl-btn--primary" @click="openInvite">
+              <Icon name="plus" :size="14" />
+              <span>邀请成员</span>
+            </button>
+          </footer>
+        </template>
       </div>
     </div>
   </div>
@@ -1583,12 +1948,20 @@ onBeforeUnmount(() => {
 
 .chat__composer {
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
   gap: var(--space-2);
   flex: none;
   padding: var(--space-3);
   background: var(--surface-2);
   border-top: 1px solid var(--border-subtle);
+}
+
+/* 输入行本身仍是"输入框 + 发送键"的横排，外面那层只是给它加引用条和 @ 候选 */
+.chat__composer-row {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
 }
 
 .chat__input {
@@ -1830,5 +2203,216 @@ onBeforeUnmount(() => {
 
 .member__read--done {
   color: var(--success);
+}
+
+/* ------------------------------------------------ 引用回复 / @ 提醒 / 成员管理 */
+
+/* 会话列表里的"有人@你"标记 */
+.conv__at {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* 气泡里的引用块 */
+.msg__reply {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  margin-bottom: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: none;
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--hover);
+  color: var(--text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.msg__bubble--own .msg__reply {
+  /* 自己的气泡是实心强调色，浅底引用块会糊在一起，换成半透明白 */
+  border-left-color: var(--accent-text);
+  background: rgb(255 255 255 / 22%);
+  color: var(--accent-text);
+}
+
+.msg__reply:hover:not(:disabled) {
+  background: var(--pressed);
+}
+
+.msg__reply--gone {
+  border-left-color: var(--border-strong);
+  color: var(--text-tertiary);
+  cursor: default;
+}
+
+.msg__reply-name {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.msg__reply-text {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 正文里的 @提及 */
+.msg__at {
+  padding: 0 2px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.msg__bubble--own .msg__at {
+  background: rgb(255 255 255 / 26%);
+  color: var(--accent-text);
+}
+
+.msg__at--me {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+/* 从引用块跳过来时闪一下，告诉用户"就是这条" */
+.msg--flash .msg__bubble {
+  animation: msg-flash 1.2s var(--ease-out);
+}
+
+@keyframes msg-flash {
+  0%,
+  40% {
+    box-shadow: 0 0 0 2px var(--accent-line);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+/* 输入区上方的引用条 */
+.chat__reply {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+}
+
+.chat__reply-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.chat__reply-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.chat__reply-text {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* @ 候选浮层：贴着输入行上沿，不遮挡正在打的字 */
+.chat__mention {
+  position: absolute;
+  bottom: calc(100% + var(--space-1));
+  left: var(--space-3);
+  z-index: 5;
+  display: flex;
+  width: min(260px, 70%);
+  max-height: 220px;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popup);
+}
+
+.chat__composer {
+  position: relative;
+}
+
+.mention {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 5px var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mention--active,
+.mention:hover {
+  background: var(--hover);
+}
+
+.mention__user {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+/* 成员面板：邀请与退出 */
+.chat__modal-foot--split {
+  justify-content: space-between;
+}
+
+.member--pick {
+  cursor: pointer;
+}
+
+.member--pick:hover {
+  background: var(--hover);
+}
+
+.member__check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--accent-text);
+}
+
+.member__check--on {
+  border-color: var(--accent);
+  background: var(--accent);
 }
 </style>

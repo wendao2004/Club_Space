@@ -49,12 +49,14 @@ import {
   warmAuditChain,
 } from './audit.ts'
 import {
+  addMembers,
   conversationMembers,
   createGroup,
   editMessage,
   fetchMessage,
   getConversation,
   getOrCreateDirect,
+  leaveConversation,
   listContacts,
   listConversations,
   listMessages,
@@ -1795,6 +1797,61 @@ app.get('/api/chat/conversations/:id', async (req) => {
     members: conversationMembers(id, user.id),
     receipts: readReceipts(id, user.id),
   }
+})
+
+// 一次最多拉 50 人：再多就该走"建个新群"而不是往老群里塞，
+// 也避免一次请求触发几百条 INSERT + 几百次 SSE 推送。
+const addMembersSchema = z.object({ userIds: z.array(z.string().min(1)).min(1).max(50) })
+
+app.post('/api/chat/conversations/:id/members', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  const body = addMembersSchema.parse(req.body)
+
+  const result = addMembers(id, user.id, body.userIds)
+
+  // 两条推送缺一不可：
+  //   conversation —— 让**被拉进来的人**的会话列表里出现这个群（他现在才有这个会话）；
+  //   message      —— 那条"某某邀请某某加入群聊"的系统消息。
+  // 只推 conversation 的话，群里其他人看不到有人加进来，得等下次发消息才刷新。
+  const ids = memberIdsOf(id)
+  pushTo(ids, { type: 'conversation', data: { conversationId: id } })
+  if (result.message) pushTo(ids, { type: 'message', data: result.message })
+  for (const uid of ids) pushTo([uid], { type: 'unread', data: { total: totalUnread(uid) } })
+
+  audit({
+    actorId: user.id,
+    actorIp: actorIp(req),
+    category: 'chat',
+    action: 'members-added',
+    target: id,
+    payload: { added: result.added.map((a) => a.id) },
+  })
+
+  return { added: result.added, members: conversationMembers(id, user.id) }
+})
+
+app.post('/api/chat/conversations/:id/leave', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+
+  const message = leaveConversation(id, user.id)
+
+  // 这里 memberIdsOf 已经不含我了（退群动作先删的成员），推给留下的人即可。
+  // 房间空掉时会话被删、message 为 null，此时没有收件人，什么都不用推。
+  const ids = memberIdsOf(id)
+  if (message) pushTo(ids, { type: 'message', data: message })
+  if (ids.length > 0) pushTo(ids, { type: 'conversation', data: { conversationId: id } })
+
+  audit({
+    actorId: user.id,
+    actorIp: actorIp(req),
+    category: 'chat',
+    action: 'conversation-left',
+    target: id,
+  })
+
+  return { ok: true }
 })
 
 app.get('/api/chat/conversations/:id/messages', async (req) => {

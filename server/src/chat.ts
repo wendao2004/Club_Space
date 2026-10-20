@@ -34,6 +34,16 @@ export interface ConversationSummary {
     createdAt: number
   } | null
   unread: number
+  /**
+   * 未读里有多少条**点名了我**（正文含 `@我的显示名`）。
+   *
+   * 为什么放在服务端算而不是前端扫一遍未读消息：
+   * 前端只有当前打开的那个会话有消息实体，其它会话只拿到了 lastMessage 一条，
+   * 根本扫不到。而"有人@你"恰恰是**没打开的那个会话**最需要的提示。
+   *
+   * 代价是每次拉列表多一条聚合查询（下面那个 GROUP BY），比按会话逐个查（N+1）便宜得多。
+   */
+  mentionUnread: number
   lastReadSeq: number
   updatedAt: number
 }
@@ -48,10 +58,28 @@ export interface MessageView {
   body: string | null
   fileNodeId: string | null
   replyTo: string | null
+  /**
+   * 被引用消息的快照（服务端顺手带回来）。
+   *
+   * 为什么不交给前端拿 id 自己去查：
+   *   - 前端翻历史是分页的，引用的原消息可能根本不在当前窗口里；
+   *   - 一条消息要发 N 个成员，各自查一次 = N 次请求；
+   *   - 撤回的原文**不能**再给（那是撤回的意义），这个判断只有服务端做得了。
+   */
+  reply: ReplyPreview | null
   editedAt: number | null
   deletedAt: number | null
   createdAt: number
   /** 已撤回的消息不返回原文，避免"撤回"变成摆设。 */
+  recalled: boolean
+}
+
+export interface ReplyPreview {
+  id: string
+  senderId: string
+  senderName: string
+  preview: string
+  /** 引用的那条已经撤回了 —— 前端画成灰条，不给点击跳转。 */
   recalled: boolean
 }
 
@@ -287,6 +315,7 @@ export function listConversations(userId: string): ConversationSummary[] {
   }>
 
   const result: ConversationSummary[] = []
+  const mentions = unreadMentions(userId)
   for (const row of rows) {
     // 单聊的标题用对方的名字实时算，而不是建会话时写死 ——
     // 否则对方改了显示名，你的会话列表里还是旧名字。
@@ -316,11 +345,42 @@ export function listConversations(userId: string): ConversationSummary[] {
             }
           : null,
       unread,
+      mentionUnread: mentions.get(row.id) ?? 0,
       lastReadSeq: row.last_read_seq,
       updatedAt: row.updated_at,
     })
   }
   return result
+}
+
+/**
+ * 每个会话里"未读且 @我"的条数。
+ *
+ * `instr` 而不是 `LIKE '%...%'`：显示名里出现 `%` 或 `_` 时 LIKE 会把它当通配符，
+ * 结果变成"任何人发什么都算 @我"或者"永远匹配不到"。instr 是字面包含，没有这个问题
+ * （代价是走不了索引 —— 但这条查询本来就按 conversation_id + seq 过滤过了）。
+ */
+function unreadMentions(userId: string): Map<string, number> {
+  const me = getDb().prepare('SELECT display_name FROM users WHERE id = ?').get(userId) as
+    | { display_name: string }
+    | undefined
+  if (!me) return new Map()
+
+  const rows = getDb()
+    .prepare(
+      `SELECT m.conversation_id AS cid, COUNT(*) AS n
+         FROM messages m
+         JOIN conversation_members cm
+           ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
+        WHERE m.deleted_at IS NULL
+          AND m.seq > cm.last_read_seq
+          AND m.sender_id != ?
+          AND instr(COALESCE(m.body, ''), ?) > 0
+        GROUP BY m.conversation_id`,
+    )
+    .all(userId, userId, `@${me.display_name}`) as unknown as Array<{ cid: string; n: number }>
+
+  return new Map(rows.map((r) => [r.cid, r.n]))
 }
 
 function previewOf(kind: string, body: string | null): string {
@@ -339,7 +399,25 @@ export function getConversation(conversationId: string, userId: string): Convers
 
 // ---------------------------------------------------------------- 消息
 
-function toMessageView(row: {
+/**
+ * 消息查询的公共 SELECT。
+ *
+ * 原来"发送成功返回一条""拉一页历史""取单条""撤回后回读"四处各抄了一份列清单，
+ * 加字段时就要改四遍 —— 漏一处表现为"发出去时正常、刷新一下引用块就没了"，
+ * 而这条路径平时根本不会走到。统一到这里。
+ */
+const MESSAGE_SELECT = `
+  SELECT m.id, m.seq, m.conversation_id, m.sender_id, u.display_name AS sender_name,
+         m.kind, m.body, m.file_node_id, m.reply_to, m.edited_at, m.deleted_at, m.created_at,
+         r.sender_id AS reply_sender_id, ru.display_name AS reply_sender_name,
+         r.kind AS reply_kind, r.body AS reply_body, r.deleted_at AS reply_deleted_at
+    FROM messages m
+    JOIN users u ON u.id = m.sender_id
+    -- 自连接取被引用的那条：reply_to 是单值外键，最多命中一行
+    LEFT JOIN messages r ON r.id = m.reply_to
+    LEFT JOIN users ru ON ru.id = r.sender_id`
+
+interface MessageRow {
   id: string
   seq: number
   conversation_id: string
@@ -352,8 +430,35 @@ function toMessageView(row: {
   edited_at: number | null
   deleted_at: number | null
   created_at: number
-}): MessageView {
+  reply_sender_id: string | null
+  reply_sender_name: string | null
+  reply_kind: string | null
+  reply_body: string | null
+  reply_deleted_at: number | null
+}
+
+function toMessageView(row: MessageRow): MessageView {
   const recalled = row.deleted_at !== null
+
+  // 引用的那条消息可能已经被物理删除（会话清理）、也可能被撤回。
+  // 两种情况都只给占位文字，**绝不**因为"引用了它"就把撤回的原文再吐一次。
+  let reply: ReplyPreview | null = null
+  if (row.reply_to) {
+    const gone = row.reply_sender_id === null
+    const replyRecalled = row.reply_deleted_at !== null
+    reply = {
+      id: row.reply_to,
+      senderId: row.reply_sender_id ?? '',
+      senderName: row.reply_sender_name ?? '已离开的成员',
+      preview: gone
+        ? '原消息已被删除'
+        : replyRecalled
+          ? '原消息已撤回'
+          : previewOf(row.reply_kind ?? 'text', row.reply_body),
+      recalled: gone || replyRecalled,
+    }
+  }
+
   return {
     id: row.id,
     seq: row.seq,
@@ -365,6 +470,7 @@ function toMessageView(row: {
     body: recalled ? null : row.body,
     fileNodeId: recalled ? null : row.file_node_id,
     replyTo: row.reply_to,
+    reply: recalled ? null : reply,
     editedAt: row.edited_at,
     deletedAt: row.deleted_at,
     createdAt: row.created_at,
@@ -416,12 +522,9 @@ function appendMessage(input: SendInput): MessageView {
 
   const row = getDb()
     .prepare(
-      `SELECT m.id, m.seq, m.conversation_id, m.sender_id, u.display_name AS sender_name,
-              m.kind, m.body, m.file_node_id, m.reply_to, m.edited_at, m.deleted_at, m.created_at
-         FROM messages m JOIN users u ON u.id = m.sender_id
-        WHERE m.id = ?`,
+      `${MESSAGE_SELECT} WHERE m.id = ?`,
     )
-    .get(id) as Parameters<typeof toMessageView>[0]
+    .get(id) as unknown as MessageRow
 
   // 自己发的消息按定义就是"已读"。
   // 不更新这一步的话，未读数 = max(seq) - last_read_seq 会把自己刚发的消息也算进去，
@@ -439,6 +542,24 @@ function appendMessage(input: SendInput): MessageView {
 
 export function sendMessage(input: SendInput): MessageView {
   requireMember(input.conversationId, input.senderId)
+
+  // 引用目标必须是**本会话**里真实存在的消息。
+  //
+  // 不校验会有两个后果，第二个是安全问题：
+  //   1. 传一个不存在的 id：`reply_to` 有外键，INSERT 直接撞约束 → 500；
+  //   2. 传**别的会话**里的 id：引用快照会把那边的正文带回给本会话的人看 ——
+  //      只要知道 id（比如以前是成员、后来被移出群），就能把内容"引"出来。
+  //      这是用引用功能开的一道越权读取，必须在这里堵住。
+  if (input.replyTo) {
+    const target = getDb()
+      .prepare('SELECT conversation_id FROM messages WHERE id = ?')
+      .get(input.replyTo) as { conversation_id: string } | undefined
+    if (!target) throw new HttpError(400, '引用的消息不存在')
+    if (target.conversation_id !== input.conversationId) {
+      throw new HttpError(400, '只能引用本会话里的消息')
+    }
+  }
+
   return transaction(() => appendMessage(input))
 }
 
@@ -457,10 +578,7 @@ export function listMessages(
   requireMember(conversationId, userId)
   const limit = Math.min(200, Math.max(1, options.limit ?? 50))
 
-  const base = `SELECT m.id, m.seq, m.conversation_id, m.sender_id, u.display_name AS sender_name,
-                       m.kind, m.body, m.file_node_id, m.reply_to, m.edited_at, m.deleted_at, m.created_at
-                  FROM messages m JOIN users u ON u.id = m.sender_id
-                 WHERE m.conversation_id = ?`
+  const base = `${MESSAGE_SELECT} WHERE m.conversation_id = ?`
 
   if (options.since !== undefined) {
     const rows = getDb()
@@ -522,10 +640,7 @@ export function recallMessage(messageId: string, userId: string, isAdmin: boolea
 export function fetchMessage(messageId: string): MessageView {
   const row = getDb()
     .prepare(
-      `SELECT m.id, m.seq, m.conversation_id, m.sender_id, u.display_name AS sender_name,
-              m.kind, m.body, m.file_node_id, m.reply_to, m.edited_at, m.deleted_at, m.created_at
-         FROM messages m JOIN users u ON u.id = m.sender_id
-        WHERE m.id = ?`,
+      `${MESSAGE_SELECT} WHERE m.id = ?`,
     )
     .get(messageId) as Parameters<typeof toMessageView>[0] | undefined
   if (!row) throw new HttpError(404, '消息不存在')
@@ -571,15 +686,35 @@ export function readReceipts(
 
 // ---------------------------------------------------------------- 成员管理
 
-export function addMembers(conversationId: string, actorId: string, userIds: string[]): void {
+/**
+ * 把成员拉进群聊。
+ *
+ * 权限刻意放宽到"群内任何成员都能加人"，而不是只有群主：
+ * 这是内网社团，注册本身就要邀请码，拉人的风险面很小；而"只有群主能加人"
+ * 会让群主一离线群就扩不了，实际用起来的抱怨远大于收益。
+ * 群主身份仍然有用（成员列表里标出来、将来要踢人时用它兜底）。
+ *
+ * 返回真正新增的人 + 那条系统消息 —— 调用方要拿它去推送，
+ * 否则被拉进来的人要等到下次刷新才看得见这个群。
+ */
+export interface AddMembersResult {
+  added: Array<{ id: string; displayName: string }>
+  message: MessageView | null
+}
+
+export function addMembers(
+  conversationId: string,
+  actorId: string,
+  userIds: string[],
+): AddMembersResult {
   requireMember(conversationId, actorId)
-  const conv = getDb().prepare('SELECT kind FROM conversations WHERE id = ?').get(conversationId) as
-    | { kind: string }
-    | undefined
+  const conv = getDb()
+    .prepare('SELECT kind, title FROM conversations WHERE id = ?')
+    .get(conversationId) as { kind: string; title: string | null } | undefined
   if (!conv) throw new HttpError(404, '会话不存在')
   if (conv.kind === 'direct') throw new HttpError(400, '单聊不能添加成员')
 
-  transaction(() => {
+  return transaction(() => {
     const ts = now()
     // 新成员的水位线设成"会话当前最新"，否则他一进来就会看到整段历史都是未读 ——
     // 那些消息是在他加入之前发的，不该算成他的未读。
@@ -589,27 +724,91 @@ export function addMembers(conversationId: string, actorId: string, userIds: str
         .get(conversationId) as { m: number }
     ).m
 
-    const add = getDb().prepare(
+    const existing = new Set(
+      (
+        getDb()
+          .prepare('SELECT user_id FROM conversation_members WHERE conversation_id = ?')
+          .all(conversationId) as unknown as Array<{ user_id: string }>
+      ).map((r) => r.user_id),
+    )
+
+    const added: Array<{ id: string; displayName: string }> = []
+    const insert = getDb().prepare(
       `INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, joined_at, last_read_seq)
        VALUES (?, ?, 'member', ?, ?)`,
     )
-    for (const uid of userIds) add.run(conversationId, uid, ts, maxSeq)
+    for (const uid of [...new Set(userIds)].filter(Boolean)) {
+      if (existing.has(uid)) continue // 已经在群里：不重复加，也不在系统消息里点他的名
+      const user = getDb()
+        .prepare("SELECT display_name FROM users WHERE id = ? AND status = 'active'")
+        .get(uid) as { display_name: string } | undefined
+      if (!user) throw new HttpError(400, '成员不存在或已停用')
+      insert.run(conversationId, uid, ts, maxSeq)
+      added.push({ id: uid, displayName: user.display_name })
+    }
+
+    if (added.length === 0) return { added, message: null }
+
+    const actor = getDb().prepare('SELECT display_name FROM users WHERE id = ?').get(actorId) as
+      | { display_name: string }
+      | undefined
+    const names = added.map((a) => a.displayName).join('、')
+    const message = appendMessage({
+      conversationId,
+      senderId: actorId,
+      kind: 'system',
+      body: `${actor?.display_name ?? '成员'} 邀请 ${names} 加入群聊`,
+    })
+
+    return { added, message }
   })
 }
 
-export function leaveConversation(conversationId: string, userId: string): void {
+/**
+ * 退出群聊。
+ *
+ * **单聊刻意不支持**：退掉单聊在语义上说不通 —— 对方那边的会话还在，
+ * 你再给他发消息就会凭空多出第二个单聊（pair_key 唯一约束也挡不住，
+ * 因为你是"删成员"不是"删会话"）。要让单聊消失只有"聊天记录清空"这类功能，
+ * 而那是另一件事，不该借退群的手做。
+ */
+export function leaveConversation(conversationId: string, userId: string): MessageView | null {
   requireMember(conversationId, userId)
-  getDb()
-    .prepare('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?')
-    .run(conversationId, userId)
+  const conv = getDb().prepare('SELECT kind FROM conversations WHERE id = ?').get(conversationId) as
+    | { kind: string }
+    | undefined
+  if (!conv) throw new HttpError(404, '会话不存在')
+  if (conv.kind === 'direct') throw new HttpError(400, '单聊不能退出，只能不再发送消息')
 
-  // 没人了就把会话删掉（关联的消息靠外键级联清理）
-  const remaining = getDb()
-    .prepare('SELECT COUNT(*) AS n FROM conversation_members WHERE conversation_id = ?')
-    .get(conversationId) as { n: number }
-  if (remaining.n === 0) {
-    getDb().prepare('DELETE FROM conversations WHERE id = ?').run(conversationId)
-  }
+  return transaction(() => {
+    const me = getDb().prepare('SELECT display_name FROM users WHERE id = ?').get(userId) as
+      | { display_name: string }
+      | undefined
+
+    // 系统消息要在**删成员之前**写：appendMessage 会顺手把我自己的已读水位推上去，
+    // 顺序反了的话这条消息对我就成了未读（而我都不在群里了）。
+    const message = appendMessage({
+      conversationId,
+      senderId: userId,
+      kind: 'system',
+      body: `${me?.display_name ?? '成员'} 退出了群聊`,
+    })
+
+    getDb()
+      .prepare('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?')
+      .run(conversationId, userId)
+
+    // 没人了就把会话删掉（关联的消息靠外键级联清理）。
+    // 注意：这会把系统消息一起删掉 —— 没人看了，留着只是垃圾。
+    const remaining = getDb()
+      .prepare('SELECT COUNT(*) AS n FROM conversation_members WHERE conversation_id = ?')
+      .get(conversationId) as { n: number }
+    if (remaining.n === 0) {
+      getDb().prepare('DELETE FROM conversations WHERE id = ?').run(conversationId)
+      return null
+    }
+    return message
+  })
 }
 
 // ---------------------------------------------------------------- 搜索

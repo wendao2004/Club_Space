@@ -272,11 +272,60 @@ export const useChat = defineStore('chat', {
       }
     },
 
-    async sendText(conversationId: string, body: string): Promise<void> {
+    /**
+     * 发文字消息。
+     *
+     * `replyTo` 传的是被引用消息的 id —— 引用块的内容**不由前端提供**：
+     * 服务端会把它从库里查出来一起返回（见 chat.ts 的 MESSAGE_SELECT），
+     * 这样别人看到的是原文，而不是"发送者转述的原文"。
+     */
+    /**
+     * 把成员拉进群聊。
+     *
+     * 服务端会顺手写一条"某某邀请某某加入"的系统消息并推给全群，
+     * 这里只要把本地列表对齐即可（那条消息会通过 SSE 到达）。
+     */
+    async addMembers(conversationId: string, userIds: string[]): Promise<ChatContact[]> {
+      try {
+        const { added } = await api.chat.addMembers(conversationId, userIds)
+        await this.loadConversations()
+        return added
+      } catch (err) {
+        reportError(this, err, '添加成员失败')
+        throw err
+      }
+    },
+
+    /**
+     * 退出群聊。
+     *
+     * 不等 SSE 回来再摘：退群这个动作是我自己发起的，界面必须立刻反映，
+     * 否则会出现"点了退出，列表里还挂着、点进去还报 403"的窗口期。
+     */
+    async leave(conversationId: string): Promise<void> {
+      try {
+        await api.chat.leaveConversation(conversationId)
+        this.conversations = this.conversations.filter((c) => c.id !== conversationId)
+        delete this.messages[conversationId]
+        delete this.hasMore[conversationId]
+        if (this.activeId === conversationId) this.activeId = null
+        this.totalUnread = this.conversations.reduce((sum, c) => sum + c.unread, 0)
+        this.error = null
+      } catch (err) {
+        reportError(this, err, '退出群聊失败')
+        throw err
+      }
+    },
+
+    async sendText(conversationId: string, body: string, replyTo?: string | null): Promise<void> {
       const text = body.trim()
       if (!text) return
       try {
-        const { message } = await api.chat.send(conversationId, { kind: 'text', body: text })
+        const { message } = await api.chat.send(conversationId, {
+          kind: 'text',
+          body: text,
+          ...(replyTo ? { replyTo } : {}),
+        })
         insertMessage(this, message)
         bumpConversation(this, message)
         this.error = null
@@ -287,12 +336,18 @@ export const useChat = defineStore('chat', {
       }
     },
 
-    async sendFile(conversationId: string, fileNodeId: string, name: string): Promise<void> {
+    async sendFile(
+      conversationId: string,
+      fileNodeId: string,
+      name: string,
+      replyTo?: string | null,
+    ): Promise<void> {
       try {
         const { message } = await api.chat.send(conversationId, {
           kind: 'file',
           fileNodeId,
           body: name,
+          ...(replyTo ? { replyTo } : {}),
         })
         insertMessage(this, message)
         bumpConversation(this, message)
@@ -336,12 +391,16 @@ export const useChat = defineStore('chat', {
       const cleared = conv.unread
       conv.lastReadSeq = seq
       conv.unread = 0
+      // @我的提醒随已读一起消失：打开会话就等于看见了。
+      // 不在这里清的话，服务端已经算 0 了，本地还挂着那个红 @，得等下次全量刷新才消。
+      conv.mentionUnread = 0
       this.totalUnread = Math.max(0, this.totalUnread - cleared)
 
       try {
         const { lastReadSeq } = await api.chat.markRead(conversationId, seq)
         conv.lastReadSeq = Math.max(conv.lastReadSeq, lastReadSeq)
         conv.unread = 0
+        conv.mentionUnread = 0
       } catch (err) {
         // 回滚乐观值；服务端的已读位置只增不减，下次打开会重新对齐。
         conv.unread = cleared
@@ -577,7 +636,16 @@ function handleIncoming(store: ChatStore, event: Event): void {
   // 这样即使推送偶发丢失，最坏只是数字短暂偏差，而不是"完全没有反馈"。
   if (isNew) {
     notifyIncoming(msg)
-    if (msg.senderId !== selfUserId) store.totalUnread += 1
+    if (msg.senderId !== selfUserId) {
+      store.totalUnread += 1
+      // 有人@我：会话列表上那个红 @ 要立刻出现，不能等下一次全量刷新 ——
+      // 而服务端那条 unread 推送只带总数，不带"有没有点名"。
+      const myName = useAuth().user?.displayName ?? ''
+      const conv = findConversation(store, msg.conversationId)
+      if (conv && myName && (msg.body ?? '').includes(`@${myName}`)) {
+        conv.mentionUnread += 1
+      }
+    }
   }
 }
 
