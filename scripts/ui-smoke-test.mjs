@@ -825,6 +825,263 @@ async function main() {
     await evaluate(`document.querySelector('.chat__modal-head .wl-icon-btn')?.click()`)
     await sleep(300)
 
+    // ---- 后台提醒：系统通知 + 标题角标 ----
+    //
+    // 原始诉求是"社团空间在后台时也要能感知到有人找我"。页面内的 Toast 在切了
+    // 标签之后根本看不见，所以这条必须是浏览器的通知。
+    //
+    // 无头浏览器没有通知中心、权限也不可控，所以这里把 Notification 换成一个
+    // 探针，断言"该发的时候真的发了、内容对不对"——比只验证接口字段有意义得多。
+    console.log('\n【后台提醒（页面不可见时的系统通知）】')
+
+    const noticeGroup = await apiAs(sessionCookie, '/api/chat/conversations/group', {
+      method: 'POST',
+      json: { title: '后台通知测试群', memberIds: [peerId2] },
+    })
+    const noticeConvId = noticeGroup.body?.conversation?.id
+    assert(!!noticeConvId, '建了一个专门用来测后台通知的群')
+    await sleep(600)
+
+    if (noticeConvId) {
+      await evaluate(`
+        (() => {
+          window.__realNotification = window.Notification
+          window.__notices = []
+          class ProbeNotification {
+            static permission = 'granted'
+            static requestPermission = async () => 'granted'
+            constructor(title, opts) {
+              window.__notices.push({
+                title,
+                body: opts?.body ?? '',
+                tag: opts?.tag ?? '',
+                silent: opts?.silent ?? false,
+              })
+              this.close = () => {}
+            }
+          }
+          window.Notification = ProbeNotification
+          // "页面不在眼前"有两种：切了标签（hidden）和切到别的应用（没有焦点）。
+          // 后者 document.hidden 仍是 false，所以两条都要盖住 —— 只盖一条的话，
+          // 这个测试会放过"切到别的应用时收不到提醒"的真实缺陷。
+          Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+          document.hasFocus = () => false
+          return true
+        })()
+      `)
+
+      await apiAs(peerCookie, `/api/chat/conversations/${noticeConvId}/messages`, {
+        method: 'POST',
+        json: { kind: 'text', body: '后台通知测试：看到这句话就该有系统通知' },
+      })
+      await sleep(2500)
+
+      const notices = JSON.parse(await evaluate(`JSON.stringify(window.__notices)`))
+      const hit = notices.find((n) => (n.body ?? '').includes('后台通知测试'))
+      assert(!!hit, '页面在后台时收到了系统通知', notices.length ? `共 ${notices.length} 条` : '一条都没发')
+      assert((hit?.body ?? '').includes('后台通知测试'), '通知正文就是消息内容')
+      assert(hit?.silent === true, '系统通知设了 silent（声音由页面统一放，不响两声）')
+      assert(hit?.tag === noticeConvId, '通知 tag 是会话 id（同一会话替换而不是堆叠）')
+
+      const badge = JSON.parse(
+        await evaluate(`JSON.stringify({
+          title: document.title,
+          icon: document.querySelector('link[rel="icon"]')?.href?.slice(0, 24) ?? '',
+        })`),
+      )
+      assert(/^\(\d+\)/.test(badge.title), '标签页标题带上了未读数', badge.title)
+      assert(
+        badge.icon.startsWith('data:image/svg+xml'),
+        'favicon 换成了带角标的图标',
+        badge.icon || '没有 link[rel=icon]',
+      )
+
+      // 恢复：别把 mock 留给后面的用例
+      await evaluate(`
+        (() => {
+          window.Notification = window.__realNotification
+          delete document.hidden
+          delete document.hasFocus
+          return true
+        })()
+      `)
+
+      // 收尾：这一节制造了一条未读。后面「读过之后红点消失」的断言是全量
+      // 未读数驱动的，留着它会一直失败 —— 而且失败信息只会说"红点还在"，
+      // 完全指不到这里。点开这个群，让已读位置往前走一格。
+      await sleep(800)
+      const noticeCleared = await evaluate(`
+        (() => {
+          const row = [...document.querySelectorAll('.conv')].find(
+            (c) => c.textContent.includes('后台通知测试群'),
+          )
+          if (!row) return false
+          row.click()
+          return true
+        })()
+      `)
+      assert(noticeCleared === true, '点开测试群，把这一节造成的未读清掉')
+      await sleep(1600)
+    }
+
+    // ---- 斗地主：轮到自己时的提示音 ----
+    //
+    // 用户报的是"斗地主没有提示声，轮到自己了都不知道"。这件事只能靠浏览器验：
+    // 接口层 `myTurn === true` 一直是成立的，问题在于前端有没有把状态变化变成
+    // 一个听得见的信号。
+    //
+    // 验法：在 AudioParam 上记录每一次 setValueAtTime 的频率，就能分辨"响的是
+    // 哪个音"。只数声源数量是不够的 —— 开窗、通知、出错都会产生声源，但那不能
+    // 证明"轮到你"响了。
+    console.log('\n【斗地主：轮到你时的提示音】')
+
+    await evaluate(`
+      (() => {
+        if (window.__freqs) return true
+        window.__freqs = []
+        const proto = window.AudioParam.prototype
+        const orig = proto.setValueAtTime
+        proto.setValueAtTime = function (v, t) {
+          if (window.__freqs.length < 6000) window.__freqs.push(Number(v))
+          return orig.call(this, v, t)
+        }
+        return true
+      })()
+    `)
+
+    const freqMark = async () => Number(await evaluate('window.__freqs.length'))
+    const freqsSince = async (from) =>
+      JSON.parse(await evaluate(`JSON.stringify(window.__freqs.slice(${from}))`))
+
+    await evaluate(`document.querySelector('.taskbar__start').click()`)
+    await sleep(400)
+    const openedDdz = await evaluate(`
+      (() => {
+        const t = [...document.querySelectorAll('.start__tile')].find((x) => x.textContent.includes('斗地主'))
+        if (!t) return false
+        t.click()
+        return true
+      })()
+    `)
+    assert(openedDdz === true, '从开始菜单打开了斗地主')
+    await sleep(1600)
+
+    const makeSeat = async (displayName, tag) => {
+      const inv = await apiAs(sessionCookie, '/api/admin/invites', {
+        method: 'POST',
+        json: { role: 'member', maxUses: 1, expiresInDays: 1, note: '斗地主音效测试' },
+      })
+      if (inv.status !== 200) return null
+      const res = await fetch(`${BASE}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          username: `ddz${tag}${SUFFIX}`,
+          displayName,
+          password: 'peer-pass-2026',
+          inviteCode: inv.body.code,
+        }),
+      })
+      if (!res.ok) return null
+      return (res.headers.get('set-cookie') ?? '').split(';')[0]
+    }
+
+    const seatA = await makeSeat('牌友甲', 'a')
+    const seatB = await makeSeat('牌友乙', 'b')
+    assert(!!seatA && !!seatB, '准备了两个牌友账号')
+
+    if (seatA && seatB) {
+      const created = await apiAs(sessionCookie, '/api/games/doudizhu/rooms', {
+        method: 'POST',
+        json: { title: '音效测试牌局' },
+      })
+      const ddzRoomId = created.body?.room?.id ?? null
+      assert(!!ddzRoomId, '创建了斗地主牌局')
+
+      if (ddzRoomId) {
+        await apiAs(seatA, `/api/games/doudizhu/rooms/${ddzRoomId}/join`, { method: 'POST', json: {} })
+        await apiAs(seatB, `/api/games/doudizhu/rooms/${ddzRoomId}/join`, { method: 'POST', json: {} })
+        await sleep(1400)
+
+        const beforeEnter = await freqMark()
+        const entered = await evaluate(`
+          (() => {
+            const card = [...document.querySelectorAll('.room-card')].find(
+              (c) => c.textContent.includes('音效测试牌局'),
+            )
+            if (!card) return false
+            const btn = [...card.querySelectorAll('.wl-btn')].find((b) => /加入|观战/.test(b.textContent))
+            if (!btn) return false
+            btn.click()
+            return true
+          })()
+        `)
+        assert(entered === true, '在大厅里点进了这局牌')
+        await sleep(2200)
+
+        const enterFreqs = await freqsSince(beforeEnter)
+        assert(
+          enterFreqs.includes(523.25),
+          '轮到你叫地主时响了提示音',
+          `本段共 ${enterFreqs.length} 个频率`,
+        )
+
+        // 叫地主：第一个叫的人拿地主，于是立刻轮到自己出牌
+        const beforeBid = await freqMark()
+        await apiAs(sessionCookie, `/api/games/doudizhu/rooms/${ddzRoomId}/bid`, {
+          method: 'POST',
+          json: { call: true },
+        })
+        await sleep(2600)
+
+        const bidFreqs = await freqsSince(beforeBid)
+        assert(
+          bidFreqs.includes(2637.02),
+          '轮到你出牌时响了提示音（2637Hz 的高八度泛音只有这个音效有）',
+          bidFreqs.length ? `含 ${bidFreqs.slice(0, 8).join(', ')}…` : '一个频率都没有',
+        )
+
+        const turnText = await evaluate(
+          `document.querySelector('.status-text')?.textContent?.trim() ?? ''`,
+        )
+        assert(turnText.includes('轮到你出牌'), '界面状态也切到「轮到你出牌」', turnText)
+
+        // 收尾：关窗 + 退房。
+        //
+        // 后面的「斗地主界面与交互」会另开一局并用全局选择器数手牌
+        // （`.card--hand`），这一局留着就会多出一个窗口，数到的是它的牌 ——
+        // 表现为"叫地主前手上不是 17 张"，跟真正的原因隔了三层。
+        await evaluate(`
+          (() => {
+            const win = [...document.querySelectorAll('.window')].find(
+              (w) => w.querySelector('.window__title')?.textContent.includes('斗地主'),
+            )
+            win?.querySelector('.window__ctl--close')?.click()
+            return !!win
+          })()
+        `)
+        await sleep(600)
+        await apiAs(sessionCookie, `/api/games/doudizhu/rooms/${ddzRoomId}/leave`, {
+          method: 'POST',
+          json: {},
+        })
+        await sleep(600)
+      }
+    }
+
+    // 兜底：无论上面走到哪一步（比如牌友账号没建成），都别把斗地主窗口留在
+    // 这里 —— 后面的用例是靠双击桌面图标开窗的，留一个旧窗口会让它变成两个。
+    await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__title')?.textContent.includes('斗地主'),
+        )
+        win?.querySelector('.window__ctl--close')?.click()
+        return true
+      })()
+    `)
+    await sleep(400)
+
 
     // ---- 回归：全局键盘不该抢输入框 ----
     //
@@ -2768,10 +3025,60 @@ async function main() {
     )
     const muteRow = soundPanel.rows.find((r) => r.title.startsWith('全部声音'))
     const systemRow = soundPanel.rows.find((r) => r.title.startsWith('系统音效'))
+    const chatRow = soundPanel.rows.find((r) => r.title.startsWith('聊天提示音'))
     assert(!!muteRow, '有「全部声音」总开关（含棋牌）')
     assert(!!systemRow, '有「系统音效」开关')
+    assert(!!chatRow, '有「聊天提示音」开关（与系统音效分开）')
     assert(systemRow.checked === 'true', '系统音效默认是开着的', String(systemRow.checked))
+    assert(chatRow?.checked === 'true', '聊天提示音默认是开着的', String(chatRow?.checked))
     assert(muteRow.checked === 'true', '「全部声音」默认没有静音', String(muteRow.checked))
+
+    // 真的能关：点一下要落到本地偏好里，否则"下次开窗又自己响"
+    const chatToggle = JSON.parse(
+      await evaluate(`
+        (() => {
+          const row = [...document.querySelectorAll('.sfx-row')].find(
+            (r) => r.querySelector('.sfx-row__title')?.textContent.startsWith('聊天提示音'),
+          )
+          const btn = row?.querySelector('.sfx-switch')
+          if (!btn) return 'null'
+          btn.click()
+          return JSON.stringify({
+            stored: localStorage.getItem('wl.sfx.chat'),
+            checked: btn.getAttribute('aria-checked'),
+          })
+        })()
+      `) ?? 'null',
+    )
+    assert(chatToggle?.stored === '0', '关掉聊天提示音后写进了本地偏好', String(chatToggle?.stored))
+    // 恢复默认，别影响后面的试听与关窗音
+    await evaluate(`
+      (() => {
+        const row = [...document.querySelectorAll('.sfx-row')].find(
+          (r) => r.querySelector('.sfx-row__title')?.textContent.startsWith('聊天提示音'),
+        )
+        row?.querySelector('.sfx-switch')?.click()
+        return true
+      })()
+    `)
+    await sleep(300)
+
+    // 桌面通知：权限状态与入口都要在声音页里，用户不用去翻浏览器的站点设置
+    const notifyRow = JSON.parse(
+      await evaluate(`JSON.stringify({
+        title: [...document.querySelectorAll('.sfx-row__title')]
+          .map((e) => e.textContent.trim())
+          .find((t) => t.includes('桌面通知')) ?? '',
+        badge: [...document.querySelectorAll('.sfx-row')]
+          .find((r) => r.textContent.includes('桌面通知'))?.querySelector('.wl-badge')?.textContent.trim() ?? '',
+      })`),
+    )
+    assert(notifyRow.title.includes('桌面通知'), '声音页有「桌面通知」一项', notifyRow.title)
+    assert(
+      ['已开启', '未开启', '已被浏览器拦下', '当前浏览器不支持'].includes(notifyRow.badge),
+      '桌面通知给出了明确的权限状态',
+      notifyRow.badge,
+    )
     assert(soundPanel.hasRange, '有音量滑块')
     assert(
       soundPanel.chips.length >= 12,

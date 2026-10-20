@@ -15,6 +15,7 @@ storage/
 # 测试专用的数据目录（与开发用的 data/ 隔离，见 scripts/run-all-tests.mjs）
 # 目录名带测试端口后缀，所以并行跑几套测试时互不干扰
 .test-data/
+.perf-data/
 .test-data-*/
 .test-server.log
 # run-all-tests.mjs 现签的测试证书（每次跑测试都重新生成，不进库）
