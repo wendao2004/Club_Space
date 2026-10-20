@@ -2155,6 +2155,158 @@ async function main() {
       myName ? `记录：${historyItems.join(' | ')}` : '没拿到自己的显示名',
     )
 
+    // ---- 你画我猜：画一笔、另一人猜对 ----
+    //
+    // 这条链路跨了三个之前没一起验过的东西：画笔的写入口（只有画家能发）、
+    // SSE 的 draw-stroke 广播（另一端画布要真收到）、以及猜对的计分。
+    // 纯接口测试验不了"画布上真的画出来了"，所以必须在真浏览器里画。
+    console.log('\n【你画我猜】')
+
+    // 造一局：浏览器用户是画家（房主），peer 是猜者。
+    // ⚠️ 不要在浏览器进入之前 start：选词窗口只有 10 秒，等浏览器把应用
+    // chunk 拉下来、点进房间，窗口早就被扫描器随机选掉了。让浏览器自己点开始。
+    const drawRoomRes = await apiAs(sessionCookie, '/api/games/draw/rooms', {
+      method: 'POST',
+      json: { title: '界面测试画室', rounds: 1 },
+    })
+    const drawRoomId = drawRoomRes.body?.room?.id ?? null
+    assert(!!drawRoomId, '创建了你画我猜房间')
+
+    if (drawRoomId) {
+      await apiAs(peerCookie, `/api/games/draw/rooms/${drawRoomId}/join`, { method: 'POST', json: {} })
+
+      // 打开应用并进入房间
+      await evaluate(`document.querySelector('.taskbar__start').click()`)
+      await sleep(400)
+      const openedDraw = await evaluate(`
+        (() => {
+          const t = [...document.querySelectorAll('.start__tile')].find((x) => x.textContent.includes('你画我猜'))
+          if (!t) return false
+          t.click()
+          return true
+        })()
+      `)
+      assert(openedDraw === true, '从开始菜单打开了你画我猜')
+      await sleep(2500)
+
+      // 大厅列表是异步拉的（懒加载 chunk + fetch），抓不到卡片时把界面内容
+      // 带出来，一眼看出是"列表没加载"还是"按钮文案不匹配"
+      const lobbyText =
+        (await evaluate(`document.querySelector('.draw')?.textContent?.slice(0, 260) ?? 'NO .draw'`)) ?? ''
+      const enteredDraw = await evaluate(`
+        (() => {
+          const card = [...document.querySelectorAll('.room-card')].find(
+            (c) => c.textContent.includes('界面测试画室'),
+          )
+          if (!card) return false
+          const btn = [...card.querySelectorAll('.wl-btn')].find(
+            (b) => b.textContent.includes('进入') || b.textContent.includes('观看'),
+          )
+          if (!btn) return false
+          btn.click()
+          return true
+        })()
+      `)
+      assert(enteredDraw === true, '在大厅里点进了画室', enteredDraw ? '' : lobbyText.replace(/\s+/g, ' '))
+      await sleep(1200)
+
+      // 房主（浏览器用户）在界面上点开始 → choosing
+      const startedInUi = await evaluate(`
+        (() => {
+          const btn = [...document.querySelectorAll('.phase-panel .wl-btn')].find((b) =>
+            b.textContent.includes('开始游戏'),
+          )
+          if (!btn) return false
+          btn.click()
+          return true
+        })()
+      `)
+      assert(startedInUi === true, '房主在界面上点了开始')
+      await sleep(1000)
+
+      // 画家在浏览器里选词（3 个候选按钮）
+      const picked = await evaluate(`
+        (() => {
+          const btn = document.querySelector('.word-choice')
+          if (!btn) return null
+          const word = btn.textContent.trim()
+          btn.click()
+          return word
+        })()
+      `)
+      assert(typeof picked === 'string' && picked.length > 0, '画家在界面上选了词', String(picked))
+      await sleep(1500)
+
+      // 画一笔：按住鼠标在画布上拖一段（走真实的 pointer 事件链）
+      const canvasBox = await evaluate(`
+        (() => {
+          const c = document.querySelector('.board-canvas')
+          if (!c) return null
+          const r = c.getBoundingClientRect()
+          return JSON.stringify({ x: r.x + r.width * 0.3, y: r.y + r.height * 0.4, w: r.width * 0.4 })
+        })()
+      `)
+      assert(!!canvasBox, '找到了画布')
+      if (canvasBox) {
+        const { x, y, w } = JSON.parse(canvasBox)
+        const mouse = (type, px, py, buttons = 1) =>
+          cdp.send(
+            'Input.dispatchMouseEvent',
+            { type, x: px, y: py, button: 'left', buttons, clickCount: 1 },
+            sessionId,
+          )
+        await mouse('mousePressed', x, y)
+        for (let i = 1; i <= 8; i++) {
+          void mouse('mouseMoved', x + i * (w / 8), y + i * 6)
+          await sleep(20)
+        }
+        await mouse('mouseReleased', x + w, y + 48, 0)
+        await sleep(400)
+
+        // 服务端画布缓冲里应该有这一笔（画家是浏览器用户）
+        const strokes = await apiAs(sessionCookie, `/api/games/draw/rooms/${drawRoomId}/canvas`)
+        assert(
+          (strokes.body?.strokes?.length ?? 0) >= 1,
+          '画的一笔到达了服务端画布缓冲',
+          `${strokes.body?.strokes?.length ?? 0} 笔`,
+        )
+      }
+
+      // 猜者（在浏览器外）拿到词并猜对 —— 画家视角的 view.word 只有画家可见，
+      // 这同时验证了"词对画家可见"这条 HTTP 契约
+      const drawerView = await apiAs(sessionCookie, `/api/games/draw/rooms/${drawRoomId}`)
+      const drawAnswer = drawerView.body?.room?.view?.word ?? null
+      assert(!!drawAnswer, '画家视角能从 HTTP 拿到答案词', String(drawAnswer))
+
+      const guessByPeer = await apiAs(peerCookie, `/api/games/draw/rooms/${drawRoomId}/guess`, {
+        method: 'POST',
+        json: { text: drawAnswer },
+      })
+      assert(guessByPeer.status === 200 && guessByPeer.body?.correct === true, '猜者在浏览器外猜对')
+
+      await sleep(1200)
+      // 全对 → reveal；界面应显示答案
+      const revealShown = await evaluate(`document.body.innerText.includes('答案：')`)
+      assert(revealShown === true, '界面上公布了答案（全对进 reveal）')
+
+      // 猜对的聊天条目在界面上
+      const correctShown = await evaluate(`document.body.innerText.includes('猜对了')`)
+      assert(correctShown === true, '界面上出现了「猜对了」')
+
+      // 收尾：关窗退房，别把画室留给后面的用例
+      await evaluate(`
+        (() => {
+          const win = [...document.querySelectorAll('.window')].find(
+            (w) => w.querySelector('.window__title')?.textContent.includes('你画我猜'),
+          )
+          win?.querySelector('.window__ctl--close')?.click()
+          return true
+        })()
+      `)
+      await sleep(500)
+      await apiAs(sessionCookie, `/api/games/draw/rooms/${drawRoomId}/leave`, { method: 'POST', json: {} })
+    }
+
     // ---- 更换壁纸（预设 + 文件空间图片）----
     console.log('\n【更换壁纸】')
 

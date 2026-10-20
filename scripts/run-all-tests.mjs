@@ -99,6 +99,8 @@ const OFFLINE_TESTS = [
   // 与结算原因的中文映射。真跑动画需要浏览器，那部分只能靠 ui-smoke-test / 肉眼。
   { name: 'doudizhu-ux-test', label: '斗地主反馈效果（动画触发源与文案）' },
   { name: 'werewolf-test', label: '狼人杀（身份/阶段/隐藏信息）' },
+  // 你画我猜的规则引擎：计分/提示公式、阶段机，以及**视角裁剪**（词漏了游戏就死了）
+  { name: 'draw-test', label: '你画我猜（计分提示公式/阶段机/视角裁剪）' },
   { name: 'totp-test', label: 'TOTP（RFC 6238 标准向量）' },
   { name: 'admin-test', label: '运维管控安全逻辑' },
   { name: 'ops-runner-test', label: '执行器白名单校验' },
@@ -168,6 +170,12 @@ const ONLINE_TESTS = [
   // 三种游戏共用 game_rooms 一张表，单独测谁都测不出隔离问题 —— 见这个文件头的说明
   { name: 'game-isolation-test', label: '三种游戏共存时的隔离' },
   { name: 'doudizhu-room-test', label: '斗地主房间（手牌隐藏）' },
+  {
+    name: 'draw-room-test',
+    label: '你画我猜房间（画笔校验/猜词计分/超时推进）',
+    // 超时加速用例直接改测试库里的 phaseEndsAt
+    passDataDir: true,
+  },
   {
     name: 'werewolf-route-test',
     label: '狼人杀路由（视角裁剪与接口契约）',
