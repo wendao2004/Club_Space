@@ -2270,6 +2270,43 @@ async function main() {
           '画的一笔到达了服务端画布缓冲',
           `${strokes.body?.strokes?.length ?? 0} 笔`,
         )
+
+        // 画布渲染断言：读取 canvas 像素，笔迹应横向铺开。
+        // 之前的 bug 是画布像素尺寸被钉在窗口打开动画的小值上（CSS 再拉伸回去），
+        // 笔迹全部挤在左上角 —— 用户看到"只有左上角能画"。这一条就是它的回归测试。
+        const pixelCheck = JSON.parse(
+          await evaluate(`
+            (() => {
+              const c = document.querySelector('.board-canvas')
+              if (!c) return 'null'
+              const g = c.getContext('2d')
+              const data = g.getImageData(0, 0, c.width, c.height).data
+              let minX = c.width, maxX = 0, nonWhite = 0
+              for (let y = 0; y < c.height; y += 2) {
+                for (let x = 0; x < c.width; x += 2) {
+                  const i = (y * c.width + x) * 4
+                  if (data[i + 3] > 0 && !(data[i] > 245 && data[i + 1] > 245 && data[i + 2] > 245)) {
+                    nonWhite++
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                  }
+                }
+              }
+              return JSON.stringify({ nonWhite, minX, maxX, width: c.width, height: c.height })
+            })()
+          `),
+        )
+        const pcOk =
+          pixelCheck && typeof pixelCheck === 'object' && (pixelCheck.nonWhite ?? 0) > 20
+        assert(pcOk, '画布上有笔迹像素', JSON.stringify(pixelCheck))
+        if (pcOk) {
+          const span = pixelCheck.maxX - pixelCheck.minX
+          assert(
+            span > pixelCheck.width * 0.3,
+            '笔迹横向铺开（画布尺寸没有挤在左上角）',
+            `横向跨度 ${span.toFixed(0)} / 画布宽 ${pixelCheck.width}`,
+          )
+        }
       }
 
       // 猜者（在浏览器外）拿到词并猜对 —— 画家视角的 view.word 只有画家可见，

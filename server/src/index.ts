@@ -3865,10 +3865,13 @@ function pushDrawRoom(roomId: string): void {
   }
 }
 
-function pushDrawStroke(roomId: string, data: unknown): void {
+function pushDrawStroke(roomId: string, from: string, op: unknown): void {
   const memberIds = drawMembers(roomId)
   if (memberIds.length === 0) return
-  pushTo(memberIds, { type: 'draw-stroke', data })
+  // 广播带 from（发起人）：画家的浏览器会收到自己的笔迹回声 —— 他本地已经
+  // 画过了，再重放一遍是重复绘制；前端按 from 过滤。房间广播不带身份的话
+  // 这个过滤做不了（客户端无法区分"我的回声"和"别人的新笔迹"）。
+  pushTo(memberIds, { type: 'draw-stroke', data: { from, op } })
 }
 
 app.get('/api/games/draw/rooms', async (req) => {
@@ -3956,7 +3959,7 @@ app.post('/api/games/draw/rooms/:id/strokes', async (req) => {
     tool: body.tool === 'eraser' ? 'eraser' : 'pen',
   })
   // clear（缓冲超限）时笔迹被重置，接收端要连画布一起清 —— op 原样带过去
-  pushDrawStroke(id, op)
+  pushDrawStroke(id, user.id, op)
   return { ok: true }
 })
 

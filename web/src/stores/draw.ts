@@ -13,7 +13,7 @@
  *    整体覆盖即可。一局几十条、每条都很小，没有优化价值。
  */
 import { defineStore } from 'pinia'
-import { api, ApiError, type DrawRoom, type DrawStrokeInput } from '@/api'
+import { api, ApiError, type DrawRoom, type DrawStrokeBroadcast, type DrawStrokeInput } from '@/api'
 import { useRealtime, type RealtimeEventName } from '@/stores/realtime'
 
 const GAME_DRAW = 'game-draw' satisfies RealtimeEventName
@@ -21,7 +21,7 @@ const DRAW_STROKE = 'draw-stroke' satisfies RealtimeEventName
 
 let offRealtime: Array<() => void> = []
 /** 画布组件注册的笔迹回调（挂载时注册、卸载时取消）。 */
-const strokeListeners = new Set<(op: DrawStrokeInput) => void>()
+const strokeListeners = new Set<(op: DrawStrokeBroadcast) => void>()
 
 interface State {
   rooms: DrawRoom[]
@@ -82,7 +82,7 @@ export const useDraw = defineStore('draw', {
           this.upsertRoom(room)
         }),
         rt.on(DRAW_STROKE, (data) => {
-          const op = data as DrawStrokeInput | null
+          const op = data as DrawStrokeBroadcast | null
           if (!op) return
           for (const listener of strokeListeners) listener(op)
         }),
@@ -90,7 +90,7 @@ export const useDraw = defineStore('draw', {
     },
 
     /** 画布组件用：注册笔迹回调，返回取消函数。 */
-    onStroke(listener: (op: DrawStrokeInput) => void): () => void {
+    onStroke(listener: (op: DrawStrokeBroadcast) => void): () => void {
       strokeListeners.add(listener)
       return () => strokeListeners.delete(listener)
     },
@@ -213,7 +213,10 @@ export const useDraw = defineStore('draw', {
       }
     },
 
-    /** 画笔上报由画布组件的攒批定时器调用；失败静默（下一段笔画会继续）。 */
+    /**
+     * 画笔上报由画布组件的攒批定时器调用；失败静默（下一段笔画会继续）。
+     * 参数是**纯 op**（不带 from）：发起人由服务端按登录态识别，不由客户端自报。
+     */
     sendStroke(op: DrawStrokeInput): void {
       const room = this.room
       if (!room) return

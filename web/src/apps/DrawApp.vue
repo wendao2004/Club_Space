@@ -14,7 +14,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
-import { api, ApiError, type DrawChatMsg, type DrawStrokeInput } from '@/api'
+import { api, ApiError, type DrawChatMsg, type DrawStrokeBroadcast, type DrawStrokeInput } from '@/api'
 import { useDraw } from '@/stores/draw'
 import { useUi } from '@/stores/ui'
 import { useAuth } from '@/stores/auth'
@@ -156,6 +156,12 @@ let activeStroke: LocalStroke | null = null
 /** 攒批队列：pointermove 的点先堆在这里，80ms 定时器统一上报。 */
 let pendingPoints: Array<{ x: number; y: number }> = []
 let flushTimer: number | null = null
+/**
+ * 自己发起的笔画 id。服务端广播给全房间（含画家本人）—— 不加这个集合，
+ * 画家的浏览器会把自己的笔迹再重放一遍：begin 回声覆盖 localStrokes 里的
+ * 对象、strokeOrder 里同 id 出现两次，本地笔画簿与回声对象分叉。
+ */
+const myStrokeIds = new Set<string>()
 
 function scheduleFlush(): void {
   if (flushTimer !== null) return
@@ -175,9 +181,9 @@ function flushPending(): void {
   if (!activeStroke || pendingPoints.length === 0) return
   const points = pendingPoints
   pendingPoints = []
-  // 本地立即补画这些段
-  const index = activeStroke.points.length - points.length
-  drawSegment(ctx()!, activeStroke, index)
+  // 点在 onPointerMove 里就已经画了、也进了 activeStroke.points ——
+  // 这里只负责把增量上报。之前这里还"补画一遍"，那是在点没进笔画对象时
+  // 的补救；现在两条路合一，再画就是重复描线。
   draw.sendStroke({
     op: 'points',
     strokeId: activeStroke.id,
@@ -213,6 +219,7 @@ function onPointerDown(event: PointerEvent): void {
   }
   localStrokes.set(activeStroke.id, activeStroke)
   strokeOrder.push(activeStroke.id)
+  myStrokeIds.add(activeStroke.id)
   drawDot(activeStroke)
   canvasEl.value?.setPointerCapture(event.pointerId)
   draw.sendStroke({
@@ -228,11 +235,15 @@ function onPointerDown(event: PointerEvent): void {
 
 function onPointerMove(event: PointerEvent): void {
   if (!activeStroke) return
-  pendingPoints.push(toLocal(event))
-  // 攒批期间本地先画出来（不等 80ms），手感才跟手
-  if (pendingPoints.length >= 2) {
-    drawSegment(ctx()!, activeStroke, activeStroke.points.length)
-  }
+  const point = toLocal(event)
+  // 点**必须同时**进笔画对象和攒批队列：前者是本地即时画的依据（画
+  // prev→point 这一小段，不等 80ms，手感才跟手），后者是上报的增量。
+  // 最初只进了攒批队列，本地画线因"笔画对象里点数不足 2"全程失效 ——
+  // 屏幕上能看见的线其实是服务端回声描出来的，慢一拍还依赖广播。
+  const prev = activeStroke.points[activeStroke.points.length - 1]
+  activeStroke.points.push(point)
+  pendingPoints.push(point)
+  if (prev) drawSegment(ctx()!, activeStroke, activeStroke.points.length - 1)
 }
 
 function onPointerUp(): void {
@@ -271,7 +282,12 @@ function clearAll(): void {
 
 // ---------------------------------------------------------------- 别人的笔迹
 
-const offStroke = draw.onStroke((op: DrawStrokeInput) => {
+const offStroke = draw.onStroke((op: DrawStrokeBroadcast) => {
+  // 自己的回声跳过：本地在 pointer 事件里已经画过了（见 myStrokeIds）。
+  // 例外是 clear —— 它没有 strokeId，本地处理过一遍，回声再来一遍会把
+  // 刚画的清掉……所以 clear 也跳过，用"发起人是不是我"判断。
+  if (op.from === myId.value) return
+
   if (op.op === 'clear') {
     localStrokes.clear()
     strokeOrder.length = 0
@@ -410,7 +426,13 @@ async function onStart(): Promise<void> {
 
 async function afterEnterTable(): Promise<void> {
   await nextTick()
-  resizeCanvas()
+  // 两帧之后再设尺寸：避开窗口打开动画的中间态（见 resizeCanvas 的重试），
+  // 并把尺寸观察器建立起来 —— 之前它写在 onMounted 里，那时还在大厅视图，
+  // 画布不存在，observer 永远没建成，进入画桌后窗口再怎么变尺寸都无人纠正。
+  requestAnimationFrame(() => {
+    resizeCanvas()
+    ensureResizeObserver()
+  })
   // 中途进来（别人已画了半张图）补一次全量
   if (viewState.value?.phase === 'drawing') void pullCanvas()
 }
@@ -471,13 +493,26 @@ watch(
 
 // ---------------------------------------------------------------- 生命周期
 
+/** 尺寸尝试过小（窗口打开动画/布局未稳）时的重试计数。 */
+let resizeRetries = 0
+
 function resizeCanvas(): void {
   const el = canvasEl.value
   const box = canvasBox.value
   if (!el || !box) return
-  // 高分屏按 devicePixelRatio 放大，避免笔画发虚
   const dpr = window.devicePixelRatio || 1
   const rect = box.getBoundingClientRect()
+
+  // 桌面窗口打开有过渡动画，动画中的 rect 比终态小。把 canvas 的像素尺寸
+  // 钉在这个小值上，CSS 又把它拉伸到终态 —— 笔迹就会全部挤在左上角。
+  // 实测复现的正是这个现象。宽或高不足 120 逻辑像素就视为还没稳，推迟重试。
+  if ((rect.width < 120 || rect.height < 120) && resizeRetries < 20) {
+    resizeRetries += 1
+    requestAnimationFrame(() => resizeCanvas())
+    return
+  }
+  resizeRetries = 0
+
   el.width = Math.max(200, Math.round(rect.width * dpr))
   el.height = Math.max(150, Math.round(rect.height * dpr))
   el.style.width = `${rect.width}px`
@@ -487,6 +522,19 @@ function resizeCanvas(): void {
 
 let resizeObserver: ResizeObserver | null = null
 
+/**
+ * 画布的尺寸观察器**必须在画布进入 DOM 之后建**。
+ *
+ * 之前它写在 onMounted 里 —— 那时组件还在大厅视图，canvasBox 根本不存在，
+ * 判空之后 observer 就永远没建起来；进入画桌只靠 afterEnterTable 的一次
+ * resizeCanvas，取到的是打开动画中的小尺寸，之后再没有任何东西纠正它。
+ */
+function ensureResizeObserver(): void {
+  if (resizeObserver || typeof ResizeObserver === 'undefined' || !canvasBox.value) return
+  resizeObserver = new ResizeObserver(() => resizeCanvas())
+  resizeObserver.observe(canvasBox.value)
+}
+
 onMounted(() => {
   draw.connectRealtime()
   void draw.loadRooms()
@@ -495,11 +543,6 @@ onMounted(() => {
   if (typeof roomId === 'string' && roomId) {
     view.value = 'table'
     void draw.openRoom(roomId).then(() => afterEnterTable())
-  }
-
-  if (typeof ResizeObserver !== 'undefined' && canvasBox.value) {
-    resizeObserver = new ResizeObserver(() => resizeCanvas())
-    resizeObserver.observe(canvasBox.value)
   }
 
   tickTimer = window.setInterval(() => {

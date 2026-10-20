@@ -1631,6 +1631,11 @@ export interface DrawStrokeInput {
   tool: 'pen' | 'eraser'
 }
 
+/** SSE 广播的笔迹（服务端在 op 外再包一层发起人，供前端过滤自己的回声）。 */
+export interface DrawStrokeBroadcast extends DrawStrokeInput {
+  from: string
+}
+
 /** 按视角裁剪后的游戏状态（服务端 draw.ts viewFor 的镜像）。 */
 export interface DrawGameView {
   phase: DrawPhase

@@ -173,7 +173,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
 直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
 
-全量 **36 个套件 / 2320 条断言**：
+全量 **36 个套件 / 2322 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|
@@ -212,7 +212,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 | `health-degraded-test` | 6 | 磁盘告急时必须 503（把底线设成 1 PiB，断言与机器实际余量无关） |
 | `cert-health-test` | 12 | 证书剩余天数进健康检查；快到期只 `degraded` 不 503；换证书后按 mtime 立刻生效 |
 | `db-migrate-test` | 12 | **4 个真子进程同时迁移一个空库**，只迁一次、没有 `duplicate column` |
-| `ui-smoke-test` | 321 | **在真实 Chrome 里开窗口、发消息、记一笔账、走一步棋、跟机器人下一盘、登记物品、引用与 @、画一笔看对面收到**；另数 `AudioContext` 的声源，确认开窗/试听真在发声、静音后一声不出；用假的 `Notification` 验后台提醒，用频率探针验「轮到你」那一声确实是它 |
+| `ui-smoke-test` | 323 | **在真实 Chrome 里开窗口、发消息、记一笔账、走一步棋、跟机器人下一盘、登记物品、引用与 @、画一笔看对面收到**；另数 `AudioContext` 的声源，确认开窗/试听真在发声、静音后一声不出；用假的 `Notification` 验后台提醒，用频率探针验「轮到你」那一声确实是它 |
 
 `ui-smoke-test` 用 DevTools 协议驱动系统里的 Chrome/Edge，
 验证界面**确实渲染出来了**（不是构建成功就算），并且**真的能操作**；
