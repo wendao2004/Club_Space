@@ -37,6 +37,9 @@ deploy/ca/*.mobileconfig
 deploy/ca/served/
 # 脚本会把证书与安装包复制到这里分发给成员
 deploy/onboard/certs/
+# upgrade.sh 在 HOME 不可写时（见脚本里的前置检查）会退回到这里当 HOME，
+# docker 会在下面建 .home/.docker 存构建上下文与缓存 —— 是本机状态，不该进 git
+deploy/.home/
 
 # 构建产物
 web/dist/

@@ -49,6 +49,27 @@ die() { printf '\n[升级中止] %s\n' "$*" >&2; exit 1; }
 command -v docker >/dev/null || die "找不到 docker 命令（这个脚本要在 NAS 上跑，不是在开发机上）"
 
 # ---------------------------------------------------------------------------
+# 前置检查：HOME 必须可写
+#
+# 这不是洁癖：`docker build` 起步时会去建 ~/.docker 存上下文与缓存，HOME 不可写
+# 就中止在 **构建阶段**，报错是 `mkdir /home/admin: permission denied` ——
+# 既不像权限问题（当前用户明明能写项目目录），也不提 docker，很容易被当成镜像问题。
+#
+# 飞牛 fnOS 上就是这样：admin 是 uid 1000 但 /home/admin 压根不存在，
+# 而 /home 归 root，admin 建不了自己的家目录。这台 NAS 上第一次跑本脚本就卡在这里。
+# ---------------------------------------------------------------------------
+# 注意 `${HOME:-}`：脚本开了 set -u，而"HOME 根本没被设"正是要处理的形态之一
+# （ssh 非交互执行、systemd 单元、cron 里都可能没有），直接写 $HOME 会在判断之前就报
+# "HOME: unbound variable" 退出。
+if [ ! -d "${HOME:-}" ] || [ ! -w "${HOME:-}" ]; then
+  ORIGIN_HOME="${HOME:-<空>}"
+  HOME="$PWD/.home"
+  export HOME
+  mkdir -p "$HOME" || die "HOME（$ORIGIN_HOME）不可写，兜底目录 $HOME 也建不出来"
+  printf '  （HOME=%s 不可写，本次改用 %s）\n' "$ORIGIN_HOME" "$HOME"
+fi
+
+# ---------------------------------------------------------------------------
 # 0) 读 .env 里的备份目标
 #
 # 只读这一个键，不用 `source .env`：.env 里可能有带空格/引号的值，
