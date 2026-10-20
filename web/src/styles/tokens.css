@@ -121,6 +121,8 @@
   --surface-solid: #22272f;
   --surface-raised: rgba(30, 35, 43, 0.78);
   --glass-window: rgba(30, 35, 43, 0.82);
+  /* 拖拽/缩放期间用的实心版本：见 WindowFrame 的 .window--interacting */
+  --glass-window-solid: #1e232b;
 
   --border-strong: rgba(255, 255, 255, 0.22);
   --border: rgba(255, 255, 255, 0.1);
@@ -189,6 +191,7 @@
   --surface-solid: #ffffff;
   --surface-raised: rgba(255, 255, 255, 0.8);
   --glass-window: rgba(255, 255, 255, 0.78);
+  --glass-window-solid: #ffffff;
 
   --border-strong: rgba(16, 40, 72, 0.2);
   --border: rgba(16, 40, 72, 0.1);

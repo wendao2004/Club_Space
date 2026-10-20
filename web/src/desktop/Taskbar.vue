@@ -26,13 +26,7 @@ const chat = useChat()
 const todos = useTodos()
 
 // 未读角标：连接一次就够，任务栏是常驻的。
-// 放在 onMounted 而不是 setup 里，避免组件还没挂载就发起网络请求。
-onMounted(() => {
-  void chat.connect()
-  void chat.loadConversations().catch(() => {
-    // 任务栏的角标拿不到不该影响界面其它部分，静默即可
-  })
-})
+// 具体在下面的 onMounted 里发起（等 clock 等状态都声明完再挂，省得顺序上互相牵扯）。
 
 const startButton = ref<HTMLElement | null>(null)
 const clock = ref(formatClock())
@@ -42,10 +36,28 @@ function formatClock(): string {
   return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
 }
 
-// 每分钟更新一次时钟就够了，没必要每秒唤醒渲染
-window.setInterval(() => {
-  clock.value = formatClock()
-}, 30_000)
+/**
+ * 时钟定时器句柄。
+ *
+ * 原来这个 setInterval 直接写在 setup 顶层、从不清理 —— 任务栏是常驻组件，
+ * 实际不会卸载，所以看不出问题；但它同时意味着**每次热更新/重挂载都会多留一个
+ * 永不消失的定时器**，在开发时能叠出十几个。放进生命周期里只是两行的事。
+ */
+let clockTimer: number | null = null
+
+onMounted(() => {
+  // 未读角标：连接一次就够，任务栏是常驻的。
+  // 放在 onMounted 而不是 setup 里，避免组件还没挂载就发起网络请求。
+  void chat.connect()
+  void chat.loadConversations().catch(() => {
+    // 任务栏的角标拿不到不该影响界面其它部分，静默即可
+  })
+
+  // 每分钟更新一次时钟就够了，没必要每秒唤醒渲染
+  clockTimer = window.setInterval(() => {
+    clock.value = formatClock()
+  }, 30_000)
+})
 
 /** 同一应用开多个窗口时，任务栏只显示一个按钮并标数量 —— 和 Windows 一致。 */
 interface TaskGroup {
@@ -205,6 +217,10 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onGlobalPointerDown)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.clearTimeout(previewTimer)
+  if (clockTimer !== null) {
+    window.clearInterval(clockTimer)
+    clockTimer = null
+  }
 })
 </script>
 

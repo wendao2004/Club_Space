@@ -165,7 +165,10 @@ onBeforeUnmount(() => {
       壁纸分两层：底是预设光斑（wl-wall-N 全局类，与设置里的缩略图同源），
       上面可选叠一张来自文件空间的图片；图片加载失败时 @error 回退到预设。
     -->
-    <div class="desktop__wallpaper" :class="`wl-wall-${ui.wallpaper}`">
+    <div
+      class="desktop__wallpaper"
+      :class="[`wl-wall-${ui.wallpaper}`, { 'desktop__wallpaper--photo': !!ui.wallpaperImage }]"
+    >
       <img
         v-if="ui.wallpaperImage"
         class="desktop__wallpaper-photo"
@@ -238,8 +241,13 @@ onBeforeUnmount(() => {
     radial-gradient(110% 70% at 50% 115%, rgba(16, 40, 72, 0.08), transparent 62%);
 }
 
-/* 图片壁纸时暗角稍重一点，保证桌面标签可读 */
-.desktop__wallpaper:has(.desktop__wallpaper-photo)::after {
+/* 图片壁纸时暗角稍重一点，保证桌面标签可读。
+ *
+ * 这里原本用的是 `:has(.desktop__wallpaper-photo)`。:has() 会让浏览器在**每次
+ * DOM 变动**时重新判断这条选择器是否仍然匹配（这是它的代价，不是免费的语法糖），
+ * 而桌面里的 DOM 变动极其频繁 —— 每来一条消息、每拖一下窗口都在动。
+ * 既然匹配条件本来就是一个布尔状态，直接绑成 class 便宜得多。 */
+.desktop__wallpaper--photo::after {
   background:
     radial-gradient(120% 80% at 50% -10%, rgba(255, 255, 255, 0.12), transparent 60%),
     radial-gradient(110% 70% at 50% 115%, rgba(16, 40, 72, 0.18), transparent 62%);
