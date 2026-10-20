@@ -473,6 +473,100 @@ function onCopy(): void {
   void copyRoomInfo()
 }
 
+// ---------------------------------------------------------------- 电脑"思考"看门狗
+
+/**
+ * 界面侧的兜底：显示"电脑正在思考…"超过一定时间就重新拉一次房间。
+ *
+ * 服务端那边已经有两道保险（落子失败自动兜底、拉房间时自愈），但那两道都要求
+ * 有"一次请求"或"一次定时器"去触发。真正难缠的情况是**客户端根本没收到**机器人
+ * 那一手的推送 —— 断线重连丢了事件、代理把 SSE 缓冲住了、或者标签页被挂起过。
+ * 那时服务端其实早就走完了，只有这一端还停在"思考中"，而且它自己不会好。
+ *
+ * 所以这里给一个纯客户端的看门狗：等太久就主动问一次服务端"现在什么局面"。
+ * 顺序上只做两件事 —— 重新拉房间、实在还卡着就把状态亮出来让人知道点哪里。
+ */
+/** 等多久算"不对劲"。困难档最慢约 1.2 秒搜索 + 0.5 秒停顿，6 秒足够宽。 */
+const BOT_STALL_MS = 6000
+/** 最多自动重试几次，超过就不再骚扰服务端，改为提示用户。 */
+const BOT_STALL_RETRIES = 3
+
+const botStalled = ref(false)
+let stallTimer: ReturnType<typeof setTimeout> | null = null
+let stallChecks = 0
+
+function stopStallTimer(): void {
+  if (stallTimer !== null) {
+    clearTimeout(stallTimer)
+    stallTimer = null
+  }
+}
+
+function armStallTimer(): void {
+  stopStallTimer()
+  const current = games.room
+  if (!current || current.status !== 'playing' || !current.botThinking) return
+  stallTimer = setTimeout(onStallTick, BOT_STALL_MS)
+}
+
+async function onStallTick(): Promise<void> {
+  const current = games.room
+  if (!current || current.status !== 'playing' || !current.botThinking) {
+    stopStallTimer()
+    return
+  }
+  stallChecks++
+  // 重新拉一次：服务端看到"该它走却太久没动"会自己补一手
+  try {
+    await games.openRoom(current.id)
+  } catch {
+    // 拉不到就等下一轮，不要在这里弹错误
+  }
+  const after = games.room
+  if (after && after.status === 'playing' && after.botThinking && stallChecks < BOT_STALL_RETRIES) {
+    armStallTimer()
+    return
+  }
+  if (after && after.status === 'playing' && after.botThinking) botStalled.value = true
+  else botStalled.value = false
+}
+
+/** 手动重试：清掉提示，立刻再拉一次。 */
+async function retryBotTurn(): Promise<void> {
+  const current = games.room
+  if (!current) return
+  botStalled.value = false
+  stallChecks = 0
+  try {
+    await games.openRoom(current.id)
+  } catch {
+    // 忽略
+  }
+  armStallTimer()
+}
+
+// 只在"是否轮到电脑"这个布尔值跳变时重新计时 —— 每一步棋都会让它 false→true，
+// 而普通的局面刷新（同一步被推送两遍）不会重置，避免把异常状态一直盖住。
+watch(
+  () => games.room?.botThinking === true && games.room?.status === 'playing',
+  (thinking) => {
+    stallChecks = 0
+    botStalled.value = false
+    if (thinking) armStallTimer()
+    else stopStallTimer()
+  },
+)
+
+// 只要有新的一手落下来，就说明对面在动 —— 计数与提示一起清掉
+watch(
+  () => games.room?.moves.length ?? 0,
+  () => {
+    stallChecks = 0
+    botStalled.value = false
+    armStallTimer()
+  },
+)
+
 // ---------------------------------------------------------------- 生命周期
 
 onMounted(async () => {
@@ -505,6 +599,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   observer?.disconnect()
   observer = null
+
+  stopStallTimer()
 
   if (flashTimer !== null) {
     clearTimeout(flashTimer)
@@ -726,8 +822,15 @@ onBeforeUnmount(() => {
           <div v-else-if="room?.status === 'playing'" class="turnbox">
             <span v-if="room?.botThinking" class="wl-spinner" />
             <Icon v-else name="clock" :size="16" />
-            <span class="turn-text">{{ turnText }}</span>
+            <span class="turn-text">{{ botStalled ? '电脑没有响应' : turnText }}</span>
             <span v-if="games.checkedSide" class="wl-badge wl-badge--danger">将军</span>
+            <!--
+              看门狗等了几轮还没等到它落子才出现。这时不做假动作：
+              明确告诉用户"没响应"，并给一个手动再催一次的按钮。
+            -->
+            <button v-if="botStalled" class="stall-retry" @click="retryBotTurn">
+              点这里重试
+            </button>
           </div>
 
           <!-- 操作按钮 -->
@@ -1310,6 +1413,28 @@ onBeforeUnmount(() => {
 
 .turn-text {
   font-weight: 600;
+}
+
+/*
+ * "点这里重试"：只在看门狗确认对面真的没响应时出现。
+ * 用文字按钮而不是 wl-btn —— 它出现在回合提示这一行里，撑成一个大按钮会把
+ * 整行撑高，视觉上像是主操作（它不是，主操作还是下棋）。
+ */
+.stall-retry {
+  margin-left: auto;
+  padding: 2px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease-out);
+}
+
+.stall-retry:hover {
+  background: var(--surface-2);
 }
 
 .result {

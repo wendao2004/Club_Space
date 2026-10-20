@@ -106,7 +106,9 @@ import {
   makeMove,
   myStats,
   resign,
+  type RoomView,
 } from './games/rooms.ts'
+import { shutdownBotRunner } from './games/bot-runner.ts'
 import {
   bidLandlord,
   createDoudizhuRoom,
@@ -2796,8 +2798,21 @@ const roomSchema = z.object({
  * 这不是给搜索留的时间（搜索有自己的预算），而是纯粹给人看的节奏：
  * 立刻回一手会显得对面是个脚本，稍微顿一下才像在跟你下棋。
  * 也正好把人落子后的响应（SSE 推送）先送出去，界面不会卡着等结果。
+ *
+ * ⚠️ 它与搜索是**并行**的，不是先后相加：落子那一刻就开始算，只是不允许
+ * 早于这个时间点落地。所以困难档的等待是 max(500, 1200) = 1.2 秒，
+ * 而不是 500 + 1200 = 1.7 秒。
  */
 const BOT_THINK_MS = 500
+
+/**
+ * 判定"机器人该走却没走"的时限。
+ *
+ * 有它兜底，任何一条意外路径（线程挂了、定时器丢了、SSE 断线导致客户端没收到）
+ * 都能在十秒内自愈：客户端等得不耐烦重新拉一次房间时，服务端看到这个房间
+ * 停在"该电脑走"且已经超过这么久，就重新排一手。
+ */
+const BOT_STALL_MS = 8000
 
 /**
  * 正在等机器人落子的房间。
@@ -2809,48 +2824,92 @@ const BOT_THINK_MS = 500
 const pendingBotReplies = new Set<string>()
 
 /**
- * 让机器人走一步（延迟到"像是想了一下"之后再走）。
+ * 让机器人走一步。
  *
- * ⚠️ 搜索是**在主线程上同步跑**的：困难档最长约 1.2 秒，这段时间里
- * 整个进程（含别人的 HTTP 请求与 SSE 心跳）都会被挡住。
- * 这是刻意的取舍：机器人对战是单人对单人的慢节奏场景，
- * 为此起 worker 线程要维护一套跨线程的棋盘状态，复杂度和收益不成比例。
- * 时间预算本身是硬上限（见 xiangqi-ai.ts 的 LEVEL_CONFIG），
- * 8GB 的 NAS 上不会出现"机器人思考把服务拖垮"。
+ * 搜索跑在 worker 线程里（见 games/bot-runner.ts）。原来它是同步跑在主线程上的：
+ * 困难档一手棋 1.2 秒的时间里整个进程停摆，实测 /api/health 的 p99 从 4ms
+ * 涨到 1195ms —— 用户那边的体感就是"下棋卡顿"，点棋子没反应、推送也不来。
+ *
+ * 失败路径全部落到"照样走一步合法棋"上，任何情况下都不会留下一个
+ * 停在"该电脑走"的房间：
+ *   - 第一次正常搜索；
+ *   - 出异常就再来一次，这次跳过搜索（force）；
+ *   - 还是不行，就没有第三次了 —— 但至少已经试过两条独立路径。
  */
 function scheduleBotReply(roomId: string): void {
   if (pendingBotReplies.has(roomId)) return
   pendingBotReplies.add(roomId)
+  const startedAt = Date.now()
 
-  setTimeout(() => {
-    pendingBotReplies.delete(roomId)
-    try {
-      const result = makeBotMove(roomId)
-      if (!result) return // 已经轮不到机器人了（人刚走了别的、或对局已结束）
+  const deliver = async (options: { force?: boolean }): Promise<boolean> => {
+    const result = await makeBotMove(roomId, { ...options, notBefore: startedAt + BOT_THINK_MS })
+    if (!result) return true // 已经轮不到机器人了（人刚走了别的、或对局已结束）
+    if (result.move) {
       pushXiangqiRoom(roomId, 'game-move', { move: result.move, finished: result.finished })
-      if (result.finished) {
-        audit({
-          // actor 明确写 'bot'：审计里要能一眼看出"这一手是电脑下的"，
-          // 而不是把战绩记到创建者头上（actor_id 只是 TEXT，没有外键约束）
-          actorId: 'bot',
-          category: 'system',
-          action: 'game-finished',
-          target: roomId,
-          payload: {
-            winner: result.finished.winner,
-            reason: result.finished.reason,
-            mate: result.finished.mate?.name ?? null,
-            plies: result.room.moves.length,
-            opponent: 'bot',
-            human: result.room.createdBy,
-          },
-        })
-      }
-    } catch (err) {
-      // 机器人自己出问题是后台错误，不该影响任何人的请求；记下来即可
-      console.error(`[棋局] 机器人落子失败（房间 ${roomId}）：`, err instanceof Error ? err.message : err)
+    } else {
+      // 无棋可走被直接判了终局：没有"落子"可推，但结果必须送到两边屏幕上
+      pushXiangqiRoom(roomId, 'game', { action: 'finished' })
     }
-  }, BOT_THINK_MS)
+    if (result.finished) {
+      audit({
+        // actor 明确写 'bot'：审计里要能一眼看出"这一手是电脑下的"，
+        // 而不是把战绩记到创建者头上（actor_id 只是 TEXT，没有外键约束）
+        actorId: 'bot',
+        category: 'system',
+        action: 'game-finished',
+        target: roomId,
+        payload: {
+          winner: result.finished.winner,
+          reason: result.finished.reason,
+          mate: result.finished.mate?.name ?? null,
+          plies: result.room.moves.length,
+          opponent: 'bot',
+          human: result.room.createdBy,
+        },
+      })
+    }
+    return true
+  }
+
+  void (async () => {
+    try {
+      await deliver({})
+    } catch (err) {
+      // 机器人自己出问题是后台错误，不该影响任何人的请求；记下来继续兜底
+      console.error(`[棋局] 机器人落子失败（房间 ${roomId}）：`, err instanceof Error ? err.message : err)
+      try {
+        await deliver({ force: true })
+      } catch (retryErr) {
+        console.error(
+          `[棋局] 机器人兜底落子也失败（房间 ${roomId}）：`,
+          retryErr instanceof Error ? retryErr.message : retryErr,
+        )
+      }
+    } finally {
+      pendingBotReplies.delete(roomId)
+    }
+  })()
+}
+
+/**
+ * 看门狗：发现"该电脑走"的房间停太久，就重新排一手。
+ *
+ * 为什么需要它：机器人落子是一条后台路径（定时器 + 线程搜索 + 按人推送）。
+ * 这条链上任何一环断了 —— 线程崩了、进程刚好重启把定时器丢了、客户端断线
+ * 没收到推送 —— 用户看到的都是同一句话："电脑正在思考…"，而且永远不会变。
+ * 这类"后台任务丢了没人知道"的故障，靠日志是发现不了的，必须有主动补位。
+ *
+ * 触发点放在"客户端来拉房间"上：前端在显示"思考中"超过阈值后会重新拉一次
+ * （GamesApp 里的看门狗），于是这条路径天然闭合 —— 用户不需要刷新页面，
+ * 更不需要重启服务。
+ */
+function healStalledBotTurn(room: RoomView): void {
+  if (room.status !== 'playing') return
+  if (!room.botSide || room.turn !== room.botSide) return
+  if (pendingBotReplies.has(room.id)) return
+  if (Date.now() - room.updatedAt < BOT_STALL_MS) return
+  console.warn(`[棋局] 房间 ${room.id} 停在"该电脑走"超过 ${BOT_STALL_MS}ms，重新安排落子`)
+  scheduleBotReply(room.id)
 }
 
 app.post('/api/games/rooms', async (req) => {
@@ -2889,7 +2948,11 @@ app.post('/api/games/rooms', async (req) => {
 app.get('/api/games/rooms/:id', async (req) => {
   const user = requireUser(req)
   const { id } = req.params as { id: string }
-  return { room: getRoom(id, user.id) }
+  const room = getRoom(id, user.id)
+  // 顺手看一眼这局是不是卡在"该电脑走"上了（见 healStalledBotTurn 的说明）。
+  // 放在返回之前：客户端这次拿到的还是旧局面，但下一手的推送马上就到。
+  healStalledBotTurn(room)
+  return { room }
 })
 
 app.post('/api/games/rooms/:id/join', async (req) => {
@@ -3893,6 +3956,13 @@ async function shutdown(signal: string): Promise<void> {
   // unref 让这个定时器本身不阻止进程退出。
   setTimeout(() => process.exit(1), 5000).unref?.()
 
+  try {
+    // 先把机器人的搜索线程收掉：它可能正算着一手 1.2 秒的棋，
+    // 不主动结束的话，进程退出要等它算完（那期间没人需要这个结果）。
+    await shutdownBotRunner()
+  } catch (err) {
+    app.log.error({ err }, '关闭搜索线程失败')
+  }
   try {
     const closed = disconnectAll()
     if (closed > 0) console.log(`    已关闭 ${closed} 条实时连接`)

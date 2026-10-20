@@ -726,6 +726,14 @@ const LEVEL_CONFIG: Record<BotLevel, LevelConfig> = {
   hard: { maxDepth: 7, timeMs: 1200, blunderChance: 0 },
 }
 
+/**
+ * 某一档的时间预算。给"把搜索放到 worker 线程"的那一层用 —— 它要按同一档位
+ * 设超时，不能自己拍一个数字（两处各写一份迟早会对不上）。
+ */
+export function timeBudgetMs(level: BotLevel): number {
+  return LEVEL_CONFIG[level].timeMs
+}
+
 /** 可复现的伪随机（xorshift32），测试里靠它拿到确定的结果。 */
 function makeRandom(seed: number): () => number {
   let state = seed >>> 0 || 0x9e3779b9

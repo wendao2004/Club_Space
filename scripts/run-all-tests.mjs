@@ -106,6 +106,10 @@ const ONLINE_TESTS = [
   { name: 'assets-test', label: '财物管理（台账与借还）' },
   { name: 'user-admin-test', label: '用户管理 / 个人资料 / 权限补全' },
   { name: 'games-test', label: '象棋房间（与引擎差分比对）' },
+  // 人机对战的两条命门：搜索不能堵主线程（否则整站卡顿），落子链断了要能自愈
+  // （否则界面永远停在"电脑正在思考…"）。它要直接改库造一个"调度丢了"的房间，
+  // 所以需要数据目录。
+  { name: 'xiangqi-bot-test', label: '人机对战（不阻塞主线程 / 卡死自愈）', passDataDir: true },
   // 三种游戏共用 game_rooms 一张表，单独测谁都测不出隔离问题 —— 见这个文件头的说明
   { name: 'game-isolation-test', label: '三种游戏共存时的隔离' },
   { name: 'doudizhu-room-test', label: '斗地主房间（手牌隐藏）' },

@@ -31,7 +31,8 @@ import {
   type Color,
   type Move,
 } from './xiangqi.ts'
-import { BOT_LEVEL_LABELS, chooseMove, positionKey, type BotLevel } from './xiangqi-ai.ts'
+import { BOT_LEVEL_LABELS, positionKey, type BotLevel } from './xiangqi-ai.ts'
+import { searchBotMove } from './bot-runner.ts'
 import { classifyMate, type MatePattern } from './xiangqi-mates.ts'
 
 export type RoomKind = 'xiangqi'
@@ -544,9 +545,54 @@ export function makeMove(
  * 一切由搜索决定；所以它**不是**一个可以被客户端调用的接口，
  * 只由服务端在"轮到机器人"时自己触发（见 index.ts 的 scheduleBotReply）。
  *
- * 返回 null 表示现在不该机器人走（比如人正好在同一瞬间也落了子）。
+ * 返回 null 表示现在不该机器人走（比如人正好在同一瞬间也落了子、或者对局已经结束）。
+ *
+ * 这里有三道"绝不让对局冻住"的保险，都是针对"卡在思考中"这个真实故障加的：
+ *
+ *   1. 无棋可走 → **自己把对局判终局**（返回 move: null），不是安静地 return；
+ *   2. 搜索失败 / 给出一个不在权威合法着法里的着法 → **改走一步合法棋**；
+ *   3. 落子前**重新读一次库**，确认这局还在进行、还轮到它、局面没变 ——
+ *      搜索在线程里要跑一秒多，这段时间里人可能已经认输了，不能把终局写回进行中。
  */
-export function makeBotMove(roomId: string): MoveResult | null {
+export interface BotMoveOutcome {
+  room: RoomView
+  /** 这一手棋；null 表示这一手不是走棋，而是"无棋可走"直接判了终局。 */
+  move: RoomMove | null
+  finished: RoomResult | null
+}
+
+export interface BotMoveOptions {
+  /** 跳过搜索，直接挑一步合法棋（搜索出问题时的兜底路径）。 */
+  force?: boolean
+  /** 不允许早于这个时间点落子（毫秒时间戳）。纯粹是"像是想了一下"的节奏控制。 */
+  notBefore?: number
+}
+
+/** 无棋可走：这一手不落子，直接把对局判成终局。 */
+function finishWithoutMoves(roomId: string, row: RawRoom, side: Color): BotMoveOutcome {
+  const verdict = evaluateResult({ board: deserializeBoard(row.board), turn: side, history: [] })
+  // 正常路径下 verdict 一定是"已结束"（一步合法棋都走不出来 = 将死或困毙）。
+  // 类型上是联合类型，所以这里写全两个分支；`no-legal-moves` 那个兜底分支
+  // 在逻辑上到不了，但万一到了，也要给一个明确的终局而不是让房间悬着。
+  const result: RoomResult = verdict.over
+    ? { winner: verdict.winner, reason: verdict.reason, mate: null }
+    : { winner: side === 'red' ? 'black' : 'red', reason: 'no-legal-moves', mate: null }
+  const ts = now()
+  getDb()
+    .prepare(
+      `UPDATE game_rooms SET status = 'finished', result = ?, updated_at = ?, finished_at = ?
+        WHERE id = ?`,
+    )
+    .run(JSON.stringify(result), ts, ts, roomId)
+  return { room: getRoom(roomId, 'bot'), move: null, finished: result }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+export async function makeBotMove(
+  roomId: string,
+  options: BotMoveOptions = {},
+): Promise<BotMoveOutcome | null> {
   const row = getRaw(roomId)
   if (!row) throw new HttpError(404, '房间不存在')
   if (!row.bot_side || !row.bot_level) return null
@@ -557,18 +603,58 @@ export function makeBotMove(roomId: string): MoveResult | null {
 
   const board = deserializeBoard(row.board)
   const level: BotLevel = row.bot_level
+  const legal = legalMoves(board, botSide)
 
-  const choice = chooseMove({
-    board,
-    side: botSide,
-    level,
-    seenKeys: historyKeys(JSON.parse(row.moves) as RoomMove[]),
+  if (legal.length === 0) return finishWithoutMoves(roomId, row, botSide)
+
+  let picked: Move | null = null
+  if (!options.force) {
+    try {
+      const choice = await searchBotMove({
+        board,
+        side: botSide,
+        level,
+        seenKeys: historyKeys(JSON.parse(row.moves) as RoomMove[]),
+      })
+      if (choice) picked = legal.find((m) => m.from === choice.from && m.to === choice.to) ?? null
+    } catch (err) {
+      // searchBotMove 内部已经兜过一层，走到这里说明连降级路径也炸了 ——
+      // 记一笔，下面照样用"随便挑一步合法棋"继续。
+      console.error(`[棋局] 机器人搜索失败（房间 ${roomId}）：`, err instanceof Error ? err.message : err)
+    }
+  }
+
+  if (options.notBefore) {
+    const wait = options.notBefore - Date.now()
+    if (wait > 0) await sleep(wait)
+  }
+
+  // 落子前重新读一次：搜索期间这一局可能已经结束、或者人已经走了别的。
+  const fresh = getRaw(roomId)
+  if (!fresh || fresh.status !== 'playing' || fresh.turn !== botSide) return null
+  if (fresh.board !== row.board) return null
+
+  // 用**权威规则引擎**再确认一次这一步真的合法。搜索用的是为速度另写的一份实现
+  // （见 xiangqi-ai.ts 开头），两份实现万一在某个冷门局面上分叉，直接提交会被
+  // applySideMove 以 400 拒掉 —— 那正是一个"机器人再也不落子"的死局。
+  // 这里花几毫秒把它挡在落子之前：不在合法表里就换一步。
+  const freshLegal = legalMoves(deserializeBoard(fresh.board), botSide)
+  const finalMove =
+    (picked && freshLegal.find((m) => m.from === picked.from && m.to === picked.to)) || freshLegal[0]
+  if (!finalMove) return finishWithoutMoves(roomId, fresh, botSide)
+
+  return transaction(() => {
+    const result = applySideMove(
+      roomId,
+      fresh,
+      botSide,
+      finalMove.from,
+      finalMove.to,
+      'bot',
+      botName(level),
+    )
+    return { room: result.room, move: result.move, finished: result.finished }
   })
-  if (!choice) return null // 无棋可走：这一手之后的对局判定由上一层（人走完那一步）负责
-
-  return transaction(() =>
-    applySideMove(roomId, row, botSide, choice.from, choice.to, 'bot', botName(level)),
-  )
 }
 
 /** 认输。对手获胜。 */
