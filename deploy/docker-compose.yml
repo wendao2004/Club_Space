@@ -43,18 +43,27 @@ services:
       # （本机实测就被一个 code-server 占了）。部署前先 `ss -tln` 看一眼。
       #
       # 映射两侧用**同一个变量**：Caddyfile 里的站点地址是 `:{$WL_HTTPS_PORT}`，
-      # 也就是 Caddy 在容器内监听的端口就是它。写死成 `:8443` 的话，
-      # 把 WL_HTTPS_PORT 改成 9443 之后就会变成宿主机 9443 → 容器 8443，
-      # 而 Caddy 在容器里听的是 9443 —— 端口通、服务不通，表现为连接被拒。
-      - "${WL_HTTPS_PORT:-8443}:${WL_HTTPS_PORT:-8443}"
+      # 也就是 Caddy 在容器内监听的端口就是它。只在一侧写死（例如
+      # `"9443:8443"`）时，宿主机是 9443 → 容器 8443，而 Caddy 在容器里
+      # 仍然监听变量值 —— 端口通、服务不通，表现为连接被拒。
+      - "${WL_HTTPS_PORT:-9443}:${WL_HTTPS_PORT:-9443}"
       # 明文引导页端口。**必须发布**：证书还没装到成员设备上时，
       # 这是唯一能打开这个站点的入口。这里原来漏了发布，
       # 导致文档里让成员访问的 http://<IP>:8080/onboard 打不开。
       - "${WL_ONBOARD_PORT:-8080}:8080"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      # 内部 CA 签发的证书（由 ca/gen-certs.sh 生成，不进 git）
-      - ./ca:/certs:ro
+      # 内部 CA 签发的**对外证书**（由 ca/gen-certs.sh 生成，不进 git）。
+      #
+      # ⚠️ 只挂 ca/served/ 这一个子目录，**不要挂整个 ./ca**。
+      # 根 CA 私钥 ca.key 就在上一级；挂整个目录之后，Caddy 容器里
+      # `cat /certs/ca.key` 就能把整条内网信任链的根私钥读走。Caddy 根本不需要它 ——
+      # Caddyfile 里只引用了 /certs/server.crt 与 /certs/server.key。
+      # 拿到 ca.key 意味着这台 NAS 上所有服务的证书都能被伪造，
+      # 而且换掉根 CA 要让每个成员的每台设备重新装一遍证书。
+      #
+      # 目录由 gen-certs.sh 维护，里面只有 server.crt（644）与 server.key（600）。
+      - ./ca/served:/certs:ro
       # 成员进场用的明文引导页（在证书被信任之前，这是唯一能打开的页面）
       - ./onboard:/srv/onboard:ro
       - caddy_data:/data
@@ -62,7 +71,7 @@ services:
     environment:
       # Caddyfile 里的 {$WL_HTTPS_PORT} / {$WL_ONBOARD_BASE} 从这里取值，
       # 所以换端口**不需要改 Caddyfile**，改 .env 就行。
-      WL_HTTPS_PORT: ${WL_HTTPS_PORT:-8443}
+      WL_HTTPS_PORT: ${WL_HTTPS_PORT:-9443}
       WL_ONBOARD_BASE: ${WL_ONBOARD_BASE:-http://192.168.1.100:8080}
       # 软上限，让 Go 的 GC 提前收敛，避免它跟着峰值一路涨上去
       GOMEMLIMIT: 128MiB

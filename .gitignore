@@ -31,6 +31,10 @@ deploy/ca/*.csr
 deploy/ca/*.ext
 deploy/ca/*.srl
 deploy/ca/*.mobileconfig
+# 对外证书目录（server.crt / server.key，只挂进 caddy 容器）。
+# 上面的 `deploy/ca/*.key` 只匹配一层目录，匹配不到 served/ 里的文件，
+# 所以必须单独忽略 —— server.key 同样是私钥。
+deploy/ca/served/
 # 脚本会把证书与安装包复制到这里分发给成员
 deploy/onboard/certs/
 

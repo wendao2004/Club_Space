@@ -50,7 +50,7 @@
 # 证书仍然必须有 IP SAN（见 deploy/ca/gen-certs.sh）—— 那是浏览器校验 TLS 用的，
 # 和这里按不按 Host 匹配无关。
 # ---------------------------------------------------------------------------
-:{$WL_HTTPS_PORT:8443} {
+:{$WL_HTTPS_PORT:9443} {
 	# 一张多 SAN 证书同时覆盖主机名、mDNS 名和 IP
 	tls /certs/server.crt /certs/server.key
 
