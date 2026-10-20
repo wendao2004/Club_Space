@@ -14,11 +14,26 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # ⚠️ 这里必须与 deploy/Dockerfile 的基础镜像（node:24-alpine）一致。
+  #
+  # 刻意**不**读 .nvmrc：它目前还写着 22，用它就等于"CI 用 22 验证、
+  # 生产用 24 运行" —— 正是本次要拦的那类问题（Node 24 才默认稳定地
+  # 直接跑 .ts，server/package.json 的 start 与镜像 CMD 都依赖这个行为）。
+  # .nvmrc 的对齐属于仓库其他部分，不在本工作流的修改范围内，
+  # 下面"版本基线自检"里会对不一致给出 ::warning:: 提示。
+  NODE_VERSION: '24'
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1：源码层面的验证（类型 + 构建 + 测试）
+  # ---------------------------------------------------------------------------
   verify:
-    name: 类型检查 + 构建 + 测试
+    # 这里写死 24 而不是 ${{ env.NODE_VERSION }}：job.name 不支持 env 上下文，
+    # 用了会以 "Unrecognized named-value: 'env'" 直接拒绝整份工作流。
+    name: 类型检查 + 构建 + 测试（Node 24）
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -31,8 +46,31 @@ jobs:
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+
+      # 版本漂移是"本地过、生产挂"的头号来源（本地 22 / CI 22 / 镜像 24），
+      # 所以不靠人眼：实际跑起来的 node、pnpm 与声明不一致就立刻红。
+      - name: 版本基线自检
+        run: |
+          set -euo pipefail
+          major=$(node -p "process.versions.node.split('.')[0]")
+          if [ "$major" != "24" ]; then
+            echo "::error::期望 Node 24（与 deploy/Dockerfile 的 node:24-alpine 一致），实际 $(node -v)"
+            exit 1
+          fi
+          want=$(node -p "require('./package.json').packageManager.split('@')[1]")
+          got=$(pnpm -v)
+          if [ "$got" != "$want" ]; then
+            echo "::error::pnpm 实际 ${got}，package.json 的 packageManager 声明 ${want}"
+            exit 1
+          fi
+          nvmrc=$(tr -d '[:space:]' < .nvmrc)
+          if [ "$nvmrc" != "24" ]; then
+            echo "::warning::.nvmrc 写的是 ${nvmrc}，与生产镜像的 Node 24 不一致；照它装本地环境会重现「本地过、生产挂」"
+          fi
+          lockfile=$(node -p "require('fs').readFileSync('pnpm-lock.yaml','utf8').match(/lockfileVersion: '([^']+)'/)[1]")
+          echo "Node $(node -v) / pnpm ${got} / lockfile ${lockfile}"
 
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
@@ -43,11 +81,46 @@ jobs:
       - name: 构建前端
         run: pnpm build
 
-      # --skip-ui：ui-smoke-test 需要一个真实的 Chrome（本仓库是在 Windows 上
-      # 用 CDP 驱动本机 Chrome 写的，Chromium 路径是写死的），CI 里跑不了。
-      # 其余 25 个套件全部在 CI 里跑，任何一条断言失败都会亮红。
+      # --skip-ui（= pnpm test:fast）：ui-smoke-test 用 CDP 驱动浏览器，
+      # 浏览器路径在脚本里是**写死的 Windows 绝对路径**
+      # （scripts/ui-smoke-test.mjs:36-41：C:/Program Files/Google/Chrome/...）。
+      # ubuntu-latest 自带 google-chrome 也没用，脚本不会去找 /usr/bin/google-chrome，
+      # 所以这里跳过，而不是让它在 Linux 上以"找不到浏览器"为由红掉。
+      # 代价：浏览器里的运行时错误（白屏、控制台报错）CI 拦不住，只能靠本地跑
+      # `pnpm test`（不带 --skip-ui）。其余 28 个套件全部在 CI 里跑。
       - name: 测试（跳过需要真实浏览器的套件）
         run: pnpm test:fast
         env:
           # 测试自己会起服务端与临时数据库，这里只是显式声明，便于排错
           CI: 'true'
+
+  # ---------------------------------------------------------------------------
+  # Job 2：生产镜像构建 + 容器冒烟
+  #
+  # 与 Job 1 并行（不写 needs）：镜像构建自己做一遍 pnpm install，
+  # 与 Job 1 之间没有可复用的中间产物，串行只会把总时长从 ~10 分钟拉成 ~18 分钟。
+  # ---------------------------------------------------------------------------
+  container:
+    name: 生产镜像构建 + 容器冒烟
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # context 必须是**仓库根**：deploy/Dockerfile 里的 COPY 全部是仓库根相对路径
+      # （.npmrc / package.json / pnpm-workspace.yaml / pnpm-lock.yaml /
+      #   server/package.json / web/package.json / tsconfig.base.json / web / server）。
+      # 若写成 context: deploy，第一条 COPY .npmrc 就会失败。
+      # 镜像不需要任何 --build-arg：Dockerfile 里没有 ARG，也没有 apk add（不装 apk 包，
+      # 所以不存在 APK_MIRROR 之类的镜像源参数）。
+      - name: 构建生产镜像
+        run: docker build --tag wl-club/app:ci --file deploy/Dockerfile .
+
+      # 镜像元数据是"生产启动命令"的唯一来源，单独断言，失败信息更直接
+      - name: 校验镜像元数据（Node 版本 / CMD / USER / EXPOSE / HEALTHCHECK）
+        run: bash .github/workflows/container-smoke.sh inspect wl-club/app:ci
+
+      # 真的把容器起起来，按镜像自带的 CMD 跑，验 /api/health + /api/bootstrap + /data 可写
+      - name: 容器冒烟（生产 CMD + 健康检查 + 数据目录可写）
+        run: bash .github/workflows/container-smoke.sh smoke wl-club/app:ci 3494

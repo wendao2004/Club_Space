@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/wendao2004/Club_Space/actions/workflows/ci.yml/badge.svg)](https://github.com/wendao2004/Club_Space/actions/workflows/ci.yml)
-[![Node](https://img.shields.io/badge/node-%E2%89%A5%2022-339933?logo=node.js&logoColor=white)](.nvmrc)
+[![Node](https://img.shields.io/badge/node-24-339933?logo=node.js&logoColor=white)](.nvmrc)
 
 部署在社团自己的 NAS 上、只对局域网开放的协作平台。桌面式界面，操作习惯贴近 Windows。
 
@@ -249,7 +249,7 @@ docker compose up -d --build
 | 窗口管理 | **自研** | 评测过 winbox（2023 停更）、golden-layout（2022 停更）、OS.js（强锁定），都无法满足"自由重叠窗口 + 任务栏 + 贴边分屏"，皮肤类库（98.css 等）只有外观 |
 | 棋盘 | **自研 SVG** | 同上：能画对河界/九宫/位置标记，且完全可控 |
 | 象棋规则 | **自研 + perft 验证** | 上游库版本线无法核实（本机拿不到 GitHub/npm 官方源），而规则正确性不能押在无法核实的依赖上 |
-| 后端 | Node.js 24（容器）/ ≥22（本机） + Fastify 5 | 用 Node 原生类型剥离直接跑 `.ts`，无编译步骤 |
+| 后端 | Node.js 24（容器与本机，见 `.nvmrc`） + Fastify 5 | 用 Node 原生类型剥离直接跑 `.ts`，无编译步骤 |
 | 数据库 | **`node:sqlite`**（内置，WAL） | 省掉一个 250-400MB 的 Postgres 容器；本机无 Docker 也能原生跑 |
 | 口令哈希 | `node:crypto` scrypt | 避开 argon2 的原生编译依赖 |
 | 会话 | httpOnly cookie + 服务端会话表 | 可即时吊销；localStorage 里的 JWT 做不到 |
@@ -292,7 +292,7 @@ docker compose up -d --build
 
 ```
 Club_Space/
-├── server/                 # 后端（Node ≥22 + Fastify，直接跑 .ts）
+├── server/                 # 后端（Node 24 + Fastify，直接跑 .ts）
 │   └── src/
 │       ├── index.ts        # HTTP 入口与全部路由
 │       ├── db.ts           # node:sqlite + schema 迁移（v1 文件 v2 聊天 v3 记账 v4 游戏 v5 两步验证）

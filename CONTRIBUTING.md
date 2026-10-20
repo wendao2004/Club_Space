@@ -7,7 +7,7 @@
 
 | 依赖 | 版本 | 说明 |
 |---|---|---|
-| Node.js | ≥ 22（推荐 22 LTS） | 服务端直接用 `node:sqlite`、`node:crypto`，**不需要** SQLite 二进制 |
+| Node.js | 24（见 `.nvmrc`，与生产镜像一致） | 服务端直接用 `node:sqlite`、`node:crypto`，**不需要** SQLite 二进制 |
 | pnpm | 9.x | 仓库是 pnpm workspace（`web/` + `server/`） |
 | Docker | 可选 | 只在部署时用；本地开发不需要 |
 
