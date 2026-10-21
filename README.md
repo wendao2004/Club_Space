@@ -173,7 +173,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
 直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
 
-全量 **37 个套件 / 2453 条断言**：
+全量 **39 个套件 / 2506 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|
@@ -189,14 +189,15 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 | `werewolf-test` | 274 | 身份分配随机性、隐藏信息、超时兜底、房主退房解散房间 |
 | `werewolf-route-test` | 59 | 9 个真实账号走 HTTP 全流程，逐个比对 view 有没有泄露 |
 | `draw-test` | 79 | 你画我猜引擎：计分/提示公式、阶段机、**视角裁剪逐视角断言**（词漏了游戏就死了） |
-| `draw-room-test` | 90 | 你画我猜 HTTP 层：画笔写入口校验、猜词计分、SSE 实时同步与载荷形状、回合轮转清屏、**对局存档（谁画了什么词、那张画）**、轮数上限；用真库改时间戳加速超时推进 |
+| `draw-room-test` | 103 | 你画我猜 HTTP 层：画笔写入口校验、猜词计分、SSE 实时同步与载荷形状、回合轮转清屏、**对局存档（谁画了什么词、那张画）**、轮数上限；用真库改时间戳加速超时推进 |
 | `board-test` | 31 | 留言板：谁能发/谁能标记已处理/谁能删（权限边界是这模块的命脉）、类型筛选、撤回语义 |
+| `file-range-test` | 42 | HTTP Range：206/416/后缀段/**逐字节比对**（拖进度条拿到的就是那一段）、多段与语法错误退回整份、下载续传、带 Range 不放宽鉴权 |
 | `totp-test` | 36 | **RFC 6238 附录 B 的 6 条标准向量**全部匹配 |
 | `totp-ratelimit-test` | 13 | 两步登录限流按 IP / 按账号分桶，两个桶不互相污染 |
 | `admin-test` | 88 | 运维管控的权限门禁与参数白名单 |
 | `ops-runner-test` | 43 | 执行器的独立白名单校验 |
 | `admin-e2e-test` | 71 | 两步验证绑定/确认/关闭、秘密不外泄 |
-| `e2e-test` | 58 | 文件分片续传、秒传、**任何格式上传（内容定类型）**、跨空间隔离、路径穿越 |
+| `e2e-test` | 64 | 文件分片续传、秒传、**任何格式上传（内容定类型）**、跨空间隔离、路径穿越 |
 | `upload-limit-test` | 11 | 磁盘余量守卫（余量不足时拒绝并告知差多少） |
 | `ratelimit-test` | 12 | 真打满阈值的限流 |
 | `image-tools-test` | 37 | 图片转换/缩放/压缩，含"透明转 JPEG 不能变黑" |
@@ -206,14 +207,15 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 | `convert-test` | 32 | 与 Gotenberg 的接口契约（用一个假服务验证，不需要真装） |
 | `chat-test` | 111 | SSE 实时推送、中文全文检索、撤回不留正文、加人/退群、引用快照、@ 未读 |
 | `realtime-test` | 34 | 在线状态：**连接表说了算**（库里痕迹全抹掉仍显示在线）、断线立刻变灰 |
-| `ledger-test` | 190 | 金额精度、状态机不许跳步、分摊合计、CSV 注入防护、活动汇总与逐笔对账 |
+| `ledger-test` | 201 | 金额精度、状态机不许跳步、分摊合计、CSV 注入防护、活动汇总与逐笔对账 |
 | `assets-test` | 93 | 可用量算而不存、事务内防超借、逾期派生、退役保留历史 |
 | `user-admin-test` | 82 | 管理员改成员、安全红线拒绝路径、借还记录的作废与恢复 |
 | `health-test` | 25 | 健康检查：写探针、磁盘余量、**增量审计链**、审计表**真的**不可改删 |
 | `health-degraded-test` | 6 | 磁盘告急时必须 503（把底线设成 1 PiB，断言与机器实际余量无关） |
 | `cert-health-test` | 12 | 证书剩余天数进健康检查；快到期只 `degraded` 不 503；换证书后按 mtime 立刻生效 |
 | `db-migrate-test` | 12 | **4 个真子进程同时迁移一个空库**，只迁一次、没有 `duplicate column` |
-| `ui-smoke-test` | 327 | **在真实 Chrome 里开窗口、发消息、记一笔账、走一步棋、跟机器人下一盘、登记物品、引用与 @、画一笔看对面收到**；另数 `AudioContext` 的声源，确认开窗/试听真在发声、静音后一声不出；用假的 `Notification` 验后台提醒，用频率探针验「轮到你」那一声确实是它 |
+| `video-seek-test` | 12 | **真浏览器里录一段视频→上传→播放→拖进度条**：`seeked` 位置到位、画面就绪、网络层确认拿到 206 |
+| `ui-smoke-test` | 359 | **在真实 Chrome 里开窗口、发消息、记一笔账、走一步棋、跟机器人下一盘、登记物品、引用与 @、画一笔看对面收到**；另数 `AudioContext` 的声源，确认开窗/试听真在发声、静音后一声不出；用假的 `Notification` 验后台提醒，用频率探针验「轮到你」那一声确实是它 |
 
 `ui-smoke-test` 用 DevTools 协议驱动系统里的 Chrome/Edge，
 验证界面**确实渲染出来了**（不是构建成功就算），并且**真的能操作**；
@@ -341,7 +343,7 @@ Club_Space/
 │       ├── mobile/         # 移动端外壳（独立界面）
 │       ├── views/          # 登录页 / 安全上下文提示条
 │       └── styles/         # 设计令牌与基础样式
-├── scripts/                # 测试（37 个套件、2453 条断言，`pnpm test` 全跑）
+├── scripts/                # 测试（39 个套件、2506 条断言，`pnpm test` 全跑）
 ├── deploy/                 # 部署：compose / Caddyfile / 证书 / 引导页 / 备份 / 转换镜像
 └── docs/                   # 需求、部署、开发纪实、迭代记录（索引见 docs/README.md）
 ```

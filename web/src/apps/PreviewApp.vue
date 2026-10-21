@@ -124,6 +124,7 @@ function turn(delta: number): void {
   // 上一张可能是"PDF 版"状态，翻页即回到原图
   convertedFrom.value = null
   failed.value = false
+  mediaError.value = ''
   shown.value = next
   windows.setTitle(props.win.id, next.name)
   prefetchNeighbors()
@@ -179,6 +180,26 @@ const showNav = computed(() => isImage.value && gallery.value.length > 1)
 
 /** 加载失败（文件被删 / 无权限 / 解码失败）时给一个体面的兜底。 */
 const failed = ref(false)
+
+/**
+ * 失败时到底说哪句话。
+ *
+ * `MEDIA_ERR_SRC_NOT_SUPPORTED` 与别的失败不是一回事：前者是**服务端把文件
+ * 完整给了、浏览器解不了码**（手机拍的 HEVC / H.265 最常见），下载下来用
+ * 本地播放器就能看；后者才是网络或权限问题。混成一句"暂时无法预览"
+ * 会让人以为文件坏了。
+ */
+const mediaError = ref('')
+
+function onMediaError(event: Event): void {
+  const el = event.target as HTMLVideoElement | HTMLAudioElement
+  if (el.error?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+    mediaError.value = '视频能连上，但这种编码浏览器解不了（常见于手机拍的 HEVC / H.265），下载后用本地播放器观看即可'
+  } else {
+    mediaError.value = ''
+  }
+  failed.value = true
+}
 
 /** "转成 PDF 预览"得到的产物，用于回看原文件。 */
 const convertedFrom = ref<FileEntry | null>(null)
@@ -411,7 +432,21 @@ watch([isOffice, isTable], ([office, tbl]) => {
 
       <img v-else-if="isImage && !failed" class="pv__img" :src="url" :alt="shown.name" @error="failed = true" />
 
-      <video v-else-if="isVideo && !failed" class="pv__media" :src="url" controls @error="failed = true" />
+      <!--
+        preload="metadata"：只先拿容器头（时长/尺寸）就停，不自动下完整段 ——
+        起播与拖动进度条靠的是 HTTP Range（服务端已支持 206），这里不声明的话
+        有的浏览器会打开窗口就开始整段下载。
+        playsinline：iOS Safari 上不加会强制全屏接管。
+      -->
+      <video
+        v-else-if="isVideo && !failed"
+        class="pv__media"
+        :src="url"
+        controls
+        playsinline
+        preload="metadata"
+        @error="onMediaError"
+      />
 
       <audio v-else-if="isAudio && !failed" class="pv__audio" :src="url" controls @error="failed = true" />
 
@@ -495,7 +530,7 @@ watch([isOffice, isTable], ([office, tbl]) => {
 
       <div v-else class="wl-empty">
         <Icon name="alert" :size="30" />
-        <span>{{ failed ? '这个文件暂时无法预览，可以下载后本地查看' : '此类文件不支持在线预览' }}</span>
+        <span>{{ failed ? (mediaError || '这个文件暂时无法预览，可以下载后本地查看') : '此类文件不支持在线预览' }}</span>
         <button class="wl-btn wl-btn--primary" @click="download">
           <Icon name="download" :size="15" />
           <span>下载文件</span>

@@ -7,7 +7,7 @@
  */
 import cookie from '@fastify/cookie'
 import fastifyStatic from '@fastify/static'
-import Fastify, { type FastifyError, type FastifyRequest } from 'fastify'
+import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify'
 import { existsSync } from 'node:fs'
 import { statfs } from 'node:fs/promises'
 import { ZodError, z } from 'zod'
@@ -229,11 +229,13 @@ import {
   listChildren,
   moveNode,
   openNodeStream,
+  parseByteRange,
   renameNode,
   isEditableMime,
   replaceNodeContent,
   storageStats,
   storageBreakdown,
+  type Node as FileNode,
   type Space,
 } from './files.ts'
 import {
@@ -1095,6 +1097,45 @@ app.put('/api/files/:id/content', async (req) => {
   }
 })
 
+/**
+ * 给文件响应铺好 Range 相关的头，并告诉调用方该发哪一段。
+ *
+ * 为什么必须支持 Range：音视频播放**不是**一次普通 GET。
+ * Chrome 播 mp4 会先发 `Range: bytes=0-` 读头部，找不到 moov 再发
+ * `Range: bytes=-65536` 扫文件尾；拖一下进度条又是一次 Range 请求。
+ * 服务端若无视 Range、每次都回 200 + 整份文件，浏览器的反应是：
+ *   - 大文件要等整段下载完才起播（用户看到的是「视频打不开」）；
+ *   - 拖进度条时拿不到目标片段，断流重来（用户看到的是「进度条拖不动」）。
+ * 两种症状同一个根因，所以修在这一处，preview 与 download 都走它。
+ *
+ * 返回值：`'whole'` 整份发、`{start,end}` 只发这一段、`null` 表示已经回过 416
+ * （调用方不要再发 body）。
+ */
+function applyByteRange(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  node: FileNode,
+): { start: number; end: number } | 'whole' | null {
+  // 不带 Range 的响应也声明支持：播放器据此知道"这个源可以拖"
+  reply.header('accept-ranges', 'bytes')
+
+  const range = parseByteRange(req.headers.range, node.size)
+  if (range === 'unsatisfiable') {
+    // 416 必须带 `Content-Range: bytes * /size`（星号后面紧跟斜杠，不能有空格），
+    // 播放器据此判断"文件变短了"并重新请求整份，而不是一直重试同一段。
+    reply.code(416).header('content-range', `bytes */${node.size}`)
+    void reply.send()
+    return null
+  }
+  if (!range) return 'whole'
+
+  reply
+    .code(206)
+    .header('content-range', `bytes ${range.start}-${range.end}/${node.size}`)
+    .header('content-length', String(range.end - range.start + 1))
+  return range
+}
+
 /** 下载（attachment）。 */
 app.get('/api/files/:id/download', async (req, reply) => {
   const user = requireUser(req)
@@ -1119,9 +1160,15 @@ app.get('/api/files/:id/download', async (req, reply) => {
 
   reply
     .header('content-type', node.mime ?? 'application/octet-stream')
-    .header('content-length', String(node.size))
     .header('content-disposition', contentDisposition(node.name))
-  return reply.send(openNodeStream(node))
+
+  const range = applyByteRange(req, reply, node)
+  if (range === null) return reply
+  if (range === 'whole') {
+    reply.header('content-length', String(node.size))
+    return reply.send(openNodeStream(node))
+  }
+  return reply.send(openNodeStream(node, range))
 })
 
 /**
@@ -1158,7 +1205,6 @@ app.get('/api/files/:id/preview', async (req, reply) => {
 
   reply
     .header('content-type', mime)
-    .header('content-length', String(node.size))
     .header(
       'content-disposition',
       inline ? `inline; filename*=UTF-8''${encodeURIComponent(node.name)}` : contentDisposition(node.name),
@@ -1167,7 +1213,15 @@ app.get('/api/files/:id/preview', async (req, reply) => {
     // 即使是允许内联的类型，也加一条最严格的 CSP：
     // 万一将来有人把某个活动类型加进了白名单，这条 CSP 还能兜住。
     .header('content-security-policy', "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox")
-  return reply.send(openNodeStream(node))
+
+  // 音视频的 seek / PDF 的按页加载都靠这个（见 applyByteRange 的注释）
+  const range = applyByteRange(req, reply, node)
+  if (range === null) return reply
+  if (range === 'whole') {
+    reply.header('content-length', String(node.size))
+    return reply.send(openNodeStream(node))
+  }
+  return reply.send(openNodeStream(node, range))
 })
 
 /**

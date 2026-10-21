@@ -791,10 +791,63 @@ async function hashFile(path: string): Promise<string> {
   return hash.digest('hex')
 }
 
-/** 打开节点的文件流供下载。 */
-export function openNodeStream(node: Node) {
+/**
+ * 打开节点的文件流供下载。
+ *
+ * 传 `byteRange` 时只读这一段 —— 这是 HTTP Range 的落地点，也是视频能
+ * 拖动进度条的前提（见 index.ts 里 preview 路由的注释）。
+ */
+export function openNodeStream(node: Node, byteRange?: { start: number; end: number }) {
   if (node.kind !== 'file' || !node.storage_key) throw new HttpError(400, '该节点不是文件')
-  return createReadStream(resolveStoragePath(join('blobs', node.storage_key.slice(0, 2), node.storage_key)))
+  const path = resolveStoragePath(join('blobs', node.storage_key.slice(0, 2), node.storage_key))
+  return byteRange ? createReadStream(path, byteRange) : createReadStream(path)
+}
+
+export interface ByteRange {
+  start: number
+  end: number
+}
+
+/**
+ * 解析单段 HTTP Range。
+ *
+ * 三种返回：
+ *   - `{ start, end }` —— 回 206，只发这一段；
+ *   - `'unsatisfiable'` —— 起点在文件末尾之外，必须回 416（带 `Content-Range: bytes * /size`）；
+ *   - `null` —— 当作没带 Range，整份 200 发。
+ *
+ * 为什么多段（`bytes=0-99,200-299`）直接按 null 处理：响应得自己拼
+ * `multipart/byteranges` 的分隔符，而浏览器播放音视频只会发单段。
+ * 规范允许服务器忽略 Range 整份发回，播放器照样能用 —— 用一个不出错的分支
+ * 换掉一个几乎不会被走到的分支。
+ */
+export function parseByteRange(
+  header: string | undefined,
+  size: number,
+): ByteRange | 'unsatisfiable' | null {
+  if (!header) return null
+  const matched = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+  if (!matched) return null // 多段 / 单位不是 bytes / 语法不认识：整份发
+  const rawStart = matched[1] ?? ''
+  const rawEnd = matched[2] ?? ''
+  if (rawStart === '' && rawEnd === '') return null
+
+  // 后缀式 `bytes=-500`：最后 500 字节。浏览器在文件末尾找 moov 时就这么发。
+  if (rawStart === '') {
+    const suffix = Number(rawEnd)
+    if (!Number.isFinite(suffix) || suffix <= 0) return 'unsatisfiable'
+    if (size === 0) return 'unsatisfiable'
+    if (suffix >= size) return { start: 0, end: size - 1 }
+    return { start: size - suffix, end: size - 1 }
+  }
+
+  const start = Number(rawStart)
+  if (!Number.isFinite(start) || start >= size) return 'unsatisfiable'
+  if (rawEnd === '') return { start, end: size - 1 }
+  const end = Number(rawEnd)
+  // 语法合法但语义矛盾（end < start）：当没带，整份发，比回一个 416 温和
+  if (!Number.isFinite(end) || end < start) return null
+  return { start, end: Math.min(end, size - 1) }
 }
 
 /**

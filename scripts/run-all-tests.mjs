@@ -178,6 +178,10 @@ const ONLINE_TESTS = [
   },
   { name: 'board-test', label: '留言板（发帖/处理标记/撤回/权限边界）' },
   {
+    name: 'file-range-test',
+    label: '文件 Range 请求（视频拖进度条/断点续传）',
+  },
+  {
     name: 'werewolf-route-test',
     label: '狼人杀路由（视角裁剪与接口契约）',
     // 这个测试要拿**真实身份**去比对每个人的 view 有没有泄露，所以需要读服务端的库
@@ -191,6 +195,11 @@ const ONLINE_TESTS = [
     // 应用侧必须在**启动时**就拿到这个地址（availability() 在启动时读配置），
     // 所以这里给服务端补一个环境变量。
     serverEnv: { WL_CONVERT_SERVICE_URL: 'http://127.0.0.1:9919' },
+  },
+  {
+    name: 'video-seek-test',
+    label: '视频预览（真浏览器里播放与拖进度条）',
+    // 它用真 Chrome 录一段视频再上传、播放、seek —— 必须排在 ui-smoke 之外单独起浏览器
   },
   { name: 'ui-smoke-test', label: '真实浏览器渲染与交互' },
 ]
