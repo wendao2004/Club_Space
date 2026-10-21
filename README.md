@@ -173,7 +173,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
 直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
 
-全量 **42 个套件 / 2605 条断言**：
+全量 **43 个套件 / 2626 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|
@@ -194,6 +194,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 | `poll-test` | 39 | 投票：一人一票与改票语义（全量替换）、关闭/截止两个定稿态、谁能关谁能删、实名结果聚合 |
 | `music-room-test` | 27 | 听歌房：排播权限（只能排自己读得到的音频）、切歌状态机（token 防旧上报）、文件删除不断声 |
 | `typing-test` | 858 | 打字练习：词库逐词校验（无重复/纯字母/有释义）、个人进度 upsert、错题本累加与清理、数据隔离 |
+| `whiteboard-test` | 21 | 白板：全员可读/作者可写、场景 JSON 形状校验（缺 elements/非 JSON/超 2MB 都拒） |
 | `file-range-test` | 42 | HTTP Range：206/416/后缀段/**逐字节比对**（拖进度条拿到的就是那一段）、多段与语法错误退回整份、下载续传、带 Range 不放宽鉴权 |
 | `totp-test` | 36 | **RFC 6238 附录 B 的 6 条标准向量**全部匹配 |
 | `totp-ratelimit-test` | 13 | 两步登录限流按 IP / 按账号分桶，两个桶不互相污染 |
@@ -346,7 +347,7 @@ Club_Space/
 │       ├── mobile/         # 移动端外壳（独立界面）
 │       ├── views/          # 登录页 / 安全上下文提示条
 │       └── styles/         # 设计令牌与基础样式
-├── scripts/                # 测试（42 个套件、2605 条断言，`pnpm test` 全跑）
+├── scripts/                # 测试（43 个套件、2626 条断言，`pnpm test` 全跑）
 ├── deploy/                 # 部署：compose / Caddyfile / 证书 / 引导页 / 备份 / 转换镜像
 └── docs/                   # 需求、部署、开发纪实、迭代记录（索引见 docs/README.md）
 ```

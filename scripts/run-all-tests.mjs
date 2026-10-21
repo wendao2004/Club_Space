@@ -180,6 +180,7 @@ const ONLINE_TESTS = [
   { name: 'poll-test', label: '投票（一人一票/改票/关闭与截止/权限边界）' },
   { name: 'music-room-test', label: '听歌房（排播权限/切歌状态机/删除不断声）' },
   { name: 'typing-test', label: '打字练习（个人进度/错题本/数据隔离）' },
+  { name: 'whiteboard-test', label: '白板（全员可读/作者可写/场景校验）' },
   {
     name: 'file-range-test',
     label: '文件 Range 请求（视频拖进度条/断点续传）',

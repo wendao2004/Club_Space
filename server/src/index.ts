@@ -115,6 +115,7 @@ import { registerBoardRoutes } from './routes/board.ts'
 import { registerPollRoutes } from './routes/poll.ts'
 import { musicPurgeDeleted, registerMusicRoutes } from './routes/music.ts'
 import { registerTypingRoutes } from './routes/typing.ts'
+import { registerWhiteboardRoutes } from './routes/whiteboard.ts'
 import { pushDrawRoom, pushDrawStroke, registerDrawRoutes } from './routes/draw.ts'
 import {
   bidLandlord,
@@ -3925,6 +3926,7 @@ registerBoardRoutes(app)
 registerPollRoutes(app)
 registerMusicRoutes(app)
 registerTypingRoutes(app)
+registerWhiteboardRoutes(app)
 
 // ---------------------------------------------------------------- 待办
 

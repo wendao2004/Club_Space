@@ -851,6 +851,28 @@ function migrate(database: DatabaseSync): void {
         CREATE INDEX ix_typing_wrong_user ON typing_wrong(user_id, last_at DESC);
       `)
     },
+
+    // ---- v18: 白板 ----
+    (d) => {
+      d.exec(`
+        -- Excalidraw 协作白板的场景存储。存 DB 而不是文件系统：场景是
+        -- 小而频繁改写的 JSON（几 KB～几百 KB），文件系统的"上传会话 +
+        -- 内容寻址"是为大文件设计的，每次改一笔都走一遍 sha256 是浪费。
+        --
+        -- 权限取最简单的模型：**全员可读、作者/管理员可写** —— 白板墙的
+        -- 意义就是公开讨论，协作是"最后写入胜"（不做 OT/CRDT，见
+        -- routes/whiteboard.ts 的注释），复杂权限会把轻量协作变成文档管理。
+        CREATE TABLE whiteboards (
+          id         TEXT PRIMARY KEY,
+          name       TEXT NOT NULL,
+          owner_id   TEXT NOT NULL REFERENCES users(id),
+          data       TEXT NOT NULL DEFAULT '{"elements":[]}',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX ix_whiteboards_updated ON whiteboards(updated_at DESC);
+      `)
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

@@ -956,6 +956,22 @@ export const api = {
     clearWrong: (input: { dict?: string; word?: string }) =>
       request<{ removed: number }>('/api/typing/wrong/clear', { json: input }),
   },
+
+  // ---------------------------------------------------------------- 白板
+
+  whiteboards: {
+    list: () => request<{ boards: WhiteboardMeta[] }>('/api/whiteboards'),
+
+    get: (id: string) => request<{ board: WhiteboardDetail }>(`/api/whiteboards/${id}`),
+
+    create: (name: string) => request<{ board: WhiteboardDetail }>('/api/whiteboards', { json: { name } }),
+
+    /** 全量覆盖保存（协作 = 最后写入胜，见 routes/whiteboard.ts）。 */
+    save: (id: string, data: string) =>
+      request<{ board: WhiteboardMeta }>(`/api/whiteboards/${id}`, { method: 'PUT', json: { data } }),
+
+    remove: (id: string) => request<{ ok: true }>(`/api/whiteboards/${id}`, { method: 'DELETE' }),
+  },
 }
 
 // ---------------------------------------------------------------- 分片上传
@@ -1886,6 +1902,24 @@ export interface TypingWrong {
   word: string
   wrongCount: number
   lastAt: number
+}
+
+// ---------------------------------------------------------------- 白板
+
+export interface WhiteboardMeta {
+  id: string
+  name: string
+  ownerId: string
+  ownerName: string
+  updatedAt: number
+  /** 作者或管理员（前端据此显示保存/删除）。 */
+  canEdit: boolean
+}
+
+export interface WhiteboardDetail extends WhiteboardMeta {
+  /** 场景 JSON（Excalidraw 官方文件格式）。 */
+  data: string
+  createdAt: number
 }
 
 // ---------------------------------------------------------------- 投票

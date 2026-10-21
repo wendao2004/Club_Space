@@ -105,6 +105,11 @@ export type RealtimeEvent =
    * 没有隐藏信息，broadcast + 客户端重拉。
    */
   | { type: 'music'; data: unknown }
+  /**
+   * 白板有变化（新建/保存/删除）。协作语义是"最后写入胜"：收到 saved
+   * 事件的客户端自行决定自动载入还是提示新版本（本地有未保存改动时）。
+   */
+  | { type: 'whiteboard'; data: unknown }
 
 interface Connection {
   id: string
