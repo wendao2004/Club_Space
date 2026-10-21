@@ -21,14 +21,16 @@
      "管理员该跑什么"，而不是转一个永远等不到的圈。
 -->
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { api, formatBytes, type FileEntry, type JobView } from '@/api'
 import { isDelimitedText, isOfficeMime, OFFICE_LABEL } from '@/lib/file-kinds'
 import { parseDelimited, type ParsedTable } from '@/lib/csv'
-import type { WindowInstance } from '@/stores/windows'
+import { useWindows, type WindowInstance } from '@/stores/windows'
 
 const props = defineProps<{ win: WindowInstance }>()
+
+const windows = useWindows()
 
 /** 只接受形状合法的 FileEntry；坏参数当作"没有文件"处理，不炸界面。 */
 const node = computed<FileEntry | null>(() => {
@@ -59,6 +61,121 @@ const isAudio = computed(() => mime.value.startsWith('audio/'))
 const isFrame = computed(() => mime.value === 'application/pdf' || mime.value.startsWith('text/'))
 const isOffice = computed(() => isOfficeMime(mime.value))
 const isTable = computed(() => isDelimitedText(mime.value))
+
+// ------------------------------------------------------------------ 图片翻页
+
+/**
+ * 同目录的图片排成一条队列，用「上一张 / 下一张」按钮或方向键在它们之间走。
+ *
+ * 队列只装**图片**：如果按"同目录所有文件"翻，按一下跳到一份要转 PDF 的 PPT 上，
+ * 用户会以为翻页坏了。文档类的相邻浏览是另一件事（也没有统一的排序语义）。
+ *
+ * 顺序以文件管理器传来的 `queue`（id 列表）为准 —— 用户可能按大小/时间排过序，
+ * 翻页顺序该跟他眼前看到的一致。窗口被布局恢复重开时没有 queue，
+ * 那就退回目录自身的顺序（文件夹在前、名字升序），总比"翻不动"好。
+ *
+ * 为什么只传 id 不传整个 entry：窗口布局会写进 localStorage，
+ * 目录里几百张图时带全量元数据只会让那份快照无谓地变大。
+ */
+const gallery = ref<FileEntry[]>([])
+
+const galleryPos = computed(() =>
+  shown.value ? gallery.value.findIndex((e) => e.id === shown.value?.id) : -1,
+)
+const canPrev = computed(() => galleryPos.value > 0)
+const canNext = computed(() => galleryPos.value >= 0 && galleryPos.value < gallery.value.length - 1)
+
+async function loadGallery(): Promise<void> {
+  const target = shown.value
+  if (!target || !isImage.value) {
+    gallery.value = []
+    return
+  }
+  const hinted = props.win.args?.queue
+  const queueIds = Array.isArray(hinted) ? hinted.filter((id): id is string => typeof id === 'string') : []
+  try {
+    const listing = await api.listFiles(target.parentId, target.space)
+    const images = listing.entries.filter(
+      (e) => e.kind === 'file' && (e.mime ?? '').startsWith('image/'),
+    )
+    let ordered: FileEntry[]
+    if (queueIds.length > 0) {
+      const byId = new Map(images.map((e) => [e.id, e]))
+      ordered = queueIds.map((id) => byId.get(id)).filter((e): e is FileEntry => !!e)
+    } else {
+      ordered = images
+    }
+    // 当前这张必须在队列里，否则位置算成 -1、两个按钮永远是灰的
+    if (!ordered.some((e) => e.id === target.id)) ordered = [target, ...ordered]
+    gallery.value = ordered
+    prefetchNeighbors()
+  } catch {
+    // 拿不到目录列表（无权限/网络抖动）就退化成"只有这一张"，翻页按钮不出现
+    gallery.value = [target]
+  }
+}
+
+/** 翻页。delta = -1 上一张，+1 下一张。 */
+function turn(delta: number): void {
+  const pos = galleryPos.value
+  if (pos < 0) return
+  const next = gallery.value[pos + delta]
+  if (!next) return
+  // 上一张可能是"PDF 版"状态，翻页即回到原图
+  convertedFrom.value = null
+  failed.value = false
+  shown.value = next
+  windows.setTitle(props.win.id, next.name)
+  prefetchNeighbors()
+}
+
+/**
+ * 预取前后各一张。
+ *
+ * 手机拍的图动辄几 MB，不预取的话每按一次方向键都要空等一轮下载。
+ * 用 `new Image()` 只是把图丢进浏览器缓存，不插入 DOM、不影响当前显示。
+ */
+function prefetchNeighbors(): void {
+  const pos = galleryPos.value
+  for (const offset of [1, -1]) {
+    const target = gallery.value[pos + offset]
+    if (!target) continue
+    const img = new Image()
+    img.src = api.previewUrl(target.id)
+  }
+}
+
+/**
+ * 方向键翻页。
+ *
+ * 只有**这个窗口在最上面**时才响应 —— 否则在聊天框里按 ← 会把背后那张图翻掉。
+ * 左右与上下都算：图片浏览器的通行做法，用户不用记哪个键。
+ */
+function onKeydown(event: KeyboardEvent): void {
+  if (windows.activeId !== props.win.id) return
+  if (!showNav.value) return
+  if (event.ctrlKey || event.metaKey || event.altKey) return
+  const el = event.target as HTMLElement | null
+  if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+    if (!canPrev.value) return
+    event.preventDefault()
+    turn(-1)
+  } else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+    if (!canNext.value) return
+    event.preventDefault()
+    turn(1)
+  }
+}
+
+/**
+ * 有第二张图才显示翻页控件（含计数器）。
+ *
+ * 刻意不把"加载失败"算进来：某一张图坏了（磁盘上文件被删、格式怪）时，
+ * 用户更需要的是"继续翻下一张"，而不该被卡在这一张上。
+ */
+const showNav = computed(() => isImage.value && gallery.value.length > 1)
 
 /** 加载失败（文件被删 / 无权限 / 解码失败）时给一个体面的兜底。 */
 const failed = ref(false)
@@ -238,6 +355,13 @@ onMounted(() => {
   if (isOffice.value) void checkTool()
   // 表格：直接解析
   if (isTable.value) void loadTable()
+  // 图片：拉同目录的图片清单，凑出一条可以左右翻的队列
+  if (isImage.value) void loadGallery()
+  window.addEventListener('keydown', onKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown)
 })
 
 watch([isOffice, isTable], ([office, tbl]) => {
@@ -256,6 +380,7 @@ watch([isOffice, isTable], ([office, tbl]) => {
       />
       <span class="pv__name" :title="shown?.name">{{ shown?.name ?? '文件预览' }}</span>
       <span v-if="shown" class="wl-badge">{{ formatBytes(shown.size) }}</span>
+      <span v-if="showNav" class="pv__counter">{{ galleryPos + 1 }} / {{ gallery.length }}</span>
       <span v-if="convertedFrom" class="pv__converted">PDF 版</span>
 
       <span class="pv__spacer" />
@@ -376,6 +501,26 @@ watch([isOffice, isTable], ([office, tbl]) => {
           <span>下载文件</span>
         </button>
       </div>
+
+      <!-- 图片翻页：同目录还有其他图时才出现 -->
+      <button
+        v-if="showNav && canPrev"
+        class="pv__nav pv__nav--prev"
+        title="上一张（← / ↑）"
+        aria-label="上一张"
+        @click="turn(-1)"
+      >
+        <Icon name="chevron-left" :size="20" />
+      </button>
+      <button
+        v-if="showNav && canNext"
+        class="pv__nav pv__nav--next"
+        title="下一张（→ / ↓）"
+        aria-label="下一张"
+        @click="turn(1)"
+      >
+        <Icon name="chevron-right" :size="20" />
+      </button>
     </div>
   </div>
 </template>
@@ -421,6 +566,14 @@ watch([isOffice, isTable], ([office, tbl]) => {
   border-radius: 999px;
 }
 
+/* 「3 / 12」：等宽数字，翻页时宽度不跳 */
+.pv__counter {
+  flex: none;
+  font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
 .pv__spacer {
   flex: 1;
 }
@@ -434,6 +587,8 @@ watch([isOffice, isTable], ([office, tbl]) => {
   overflow: auto;
   padding: var(--space-3);
   background: var(--surface-0);
+  /* 翻页按钮贴在图片两侧，用绝对定位（不占布局，图片仍居中） */
+  position: relative;
 }
 
 /* 表格与 Office 卡片是"从上往下读"的内容，居中反而会把第一行推到中间 */
@@ -449,6 +604,47 @@ watch([isOffice, isTable], ([office, tbl]) => {
   border-radius: 6px;
   background: var(--surface-1);
   box-shadow: var(--shadow-card);
+}
+
+/* ------------------------------------------------------------ 图片翻页 */
+
+.pv__nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line-hair);
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+  opacity: 0.88;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+  z-index: 2;
+}
+
+.pv__nav:hover {
+  opacity: 1;
+  color: var(--text-primary);
+  background: var(--surface-2);
+}
+
+.pv__nav:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.pv__nav--prev {
+  left: var(--space-3);
+}
+
+.pv__nav--next {
+  right: var(--space-3);
 }
 
 .pv__media {

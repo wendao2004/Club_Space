@@ -2647,6 +2647,178 @@ async function main() {
       `${closedPreview.windows} > ${windowsBefore}`,
     )
 
+    // ---- 图片翻页：目录里有多张图时，按钮与方向键都能翻 ----
+    //
+    // 这条防的是"预览一次只能看一张"：以前想看下一张必须关窗口、回列表、
+    // 再双击 —— 看十张图要来回二十次。翻页是纯前端行为，但顺序依赖
+    // 文件管理器传过来的队列，所以整条链路都走真实界面。
+    console.log('\n【图片翻页】')
+
+    const galFolder = `图片翻页-${SUFFIX}`
+    const galNames = [`翻页-1-${SUFFIX}.png`, `翻页-2-${SUFFIX}.png`, `翻页-3-${SUFFIX}.png`]
+
+    // 建一个干净的目录，里面只放 3 张图 —— 队列里不该混进别的图片
+    const madeFolder = await apiAs(sessionCookie, '/api/files/folder', {
+      method: 'POST',
+      json: { parentId: null, name: galFolder, space: 'shared' },
+    })
+    assert(madeFolder.status === 200, '为翻页测试建了独立目录', `status ${madeFolder.status}`)
+    const galFolderId = madeFolder.body?.node?.id ?? ''
+
+    /** 往指定目录放一张图（走真实上传链路，和界面上拖文件进去一样）。 */
+    async function putImage(parentId, name) {
+      const init = await apiAs(sessionCookie, '/api/uploads', {
+        method: 'POST',
+        json: { parentId, name, size: pngBytes.length, space: 'shared' },
+      })
+      if (init.status !== 200) return `init ${init.status}`
+      if (init.body.instant) return true
+      const put = await apiAs(sessionCookie, `/api/uploads/${init.body.uploadId}/chunk?offset=0`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: pngBytes,
+      })
+      if (put.status !== 200) return `chunk ${put.status}`
+      const done = await apiAs(sessionCookie, `/api/uploads/${init.body.uploadId}/complete`, {
+        method: 'POST',
+        json: {},
+      })
+      return done.status === 200 ? true : `complete ${done.status}`
+    }
+
+    for (const name of galNames) {
+      const put = await putImage(galFolderId, name)
+      assert(put === true, `图片已入库：${name}`, String(put))
+    }
+
+    // 文件管理器是 API 之前打开的，点一下刷新把新目录拉出来
+    await evaluate(`
+      (() => {
+        document.querySelector('.fm__toolbar .wl-icon-btn[title="刷新"]')?.click()
+        return true
+      })()
+    `)
+    await sleep(900)
+
+    const enteredGallery = await evaluate(`
+      (() => {
+        const el = [...document.querySelectorAll('.tile__name, .row__name')].find((x) =>
+          x.textContent.includes(${JSON.stringify(galFolder)}),
+        )
+        if (!el) return 'no-folder'
+        ;(el.closest('.tile, .row') ?? el).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+        return 'ok'
+      })()
+    `)
+    assert(enteredGallery === 'ok', '进入图片目录', String(enteredGallery))
+    await sleep(900)
+
+    const openFirstImage = await evaluate(`
+      (() => {
+        const el = [...document.querySelectorAll('.tile__name, .row__name')].find((x) =>
+          x.textContent.includes(${JSON.stringify(galNames[0])}),
+        )
+        if (!el) return 'no-image'
+        ;(el.closest('.tile, .row') ?? el).dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+        return 'ok'
+      })()
+    `)
+    assert(openFirstImage === 'ok', '双击第一张图打开预览', String(openFirstImage))
+    await sleep(1200)
+
+    /** 读预览窗口的翻页相关状态（按 .pv 找窗口：标题会随翻页变化，不能按标题找）。 */
+    async function galleryState() {
+      return JSON.parse(
+        await evaluate(`JSON.stringify((() => {
+          const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.pv'))
+          if (!win) return { found: false }
+          return {
+            found: true,
+            title: win.querySelector('.window__title')?.textContent.trim() ?? '',
+            name: win.querySelector('.pv__name')?.textContent.trim() ?? '',
+            counter: win.querySelector('.pv__counter')?.textContent.trim() ?? '',
+            prev: !!win.querySelector('.pv__nav--prev'),
+            next: !!win.querySelector('.pv__nav--next'),
+            img: win.querySelector('.pv__img')?.getAttribute('src') ?? '',
+          }
+        })())`),
+      )
+    }
+
+    /** 真按一次方向键（走 CDP 的输入管线，和用户按的完全同一条路）。 */
+    async function pressArrow(key, code, vk) {
+      const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk }
+      await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base }, sessionId)
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base }, sessionId)
+      await sleep(450)
+    }
+
+    const pv1 = await galleryState()
+    assert(pv1.found === true, '预览窗口已打开（图片翻页）')
+    assert(pv1.counter === '1 / 3', '预览显示「1 / 3」', pv1.counter)
+    assert(pv1.prev === false, '第一张不显示「上一张」按钮')
+    assert(pv1.next === true, '第一张显示「下一张」按钮')
+
+    await pressArrow('ArrowRight', 'ArrowRight', 39)
+    const pv2 = await galleryState()
+    assert(pv2.name === galNames[1], '按 → 翻到第二张', pv2.name)
+    assert(pv2.counter === '2 / 3', '计数器跟着变成「2 / 3」', pv2.counter)
+    assert(pv2.img !== pv1.img, '翻页后图片地址确实换了（不是同一张）', `${pv2.img} ≠ ${pv1.img}`)
+    assert(pv2.title === galNames[1], '窗口标题跟着变成第二张的名字', pv2.title)
+
+    // 下箭头也算「下一张」：不用记哪个键
+    await pressArrow('ArrowDown', 'ArrowDown', 40)
+    const pv3 = await galleryState()
+    assert(pv3.name === galNames[2], '按 ↓ 翻到第三张', pv3.name)
+    assert(pv3.counter === '3 / 3', '到第三张计数为「3 / 3」', pv3.counter)
+    assert(pv3.next === false, '最后一张不显示「下一张」按钮', String(pv3.next))
+
+    // 到头了再按不该绕回第一张（用户会以为按错了）
+    await pressArrow('ArrowRight', 'ArrowRight', 39)
+    const pv3b = await galleryState()
+    assert(pv3b.name === galNames[2], '最后一张再按 → 停住（不循环）', pv3b.name)
+
+    await pressArrow('ArrowLeft', 'ArrowLeft', 37)
+    const pv4 = await galleryState()
+    assert(pv4.name === galNames[1], '按 ← 退回第二张', pv4.name)
+
+    // 按钮也要能点（触屏 / 不摸键盘的人靠它）
+    const clickedPrev = await evaluate(`
+      (() => {
+        const btn = document.querySelector('.pv__nav--prev')
+        if (!btn) return false
+        btn.click()
+        return true
+      })()
+    `)
+    assert(clickedPrev === true, '点「上一张」按钮')
+    await sleep(400)
+    const pv5 = await galleryState()
+    assert(pv5.name === galNames[0], '按钮翻页与方向键效果一致', pv5.name)
+
+    // 关掉预览，回到根目录 —— 后面几节都在根目录里找文件
+    await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.pv'))
+        win?.querySelector('.window__ctl--close')?.click()
+        return true
+      })()
+    `)
+    await sleep(400)
+    await evaluate(`
+      (() => {
+        document.querySelector('.fm__toolbar .wl-icon-btn[title="回到根目录"]')?.click()
+        return true
+      })()
+    `)
+    await sleep(700)
+    const backToRoot = await evaluate(`
+      [...document.querySelectorAll('.tile__name, .row__name')].some((x) =>
+        x.textContent.includes(${JSON.stringify(wpName)}),
+      )
+    `)
+    assert(backToRoot === true, '翻页测试结束后回到根目录')
+
     // ---- 预览测试用的小工具（只为下面两节服务）----
 
     /** 走真实的上传接口往共享空间放一个文件。上传窗口里的手动上传走的就是这条链路。 */

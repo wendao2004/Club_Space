@@ -723,10 +723,22 @@ async function createOfficeFile(kind: 'sheet' | 'doc'): Promise<void> {
  * 方便两张图并排比较。
  */
 function openPreview(entry: FileEntry): void {
+  // 图片：把"当前列表里能看到的图片"按同样的顺序串成一条队列交给预览窗口，
+  // 它据此显示「3 / 12」并支持按钮 / 方向键翻页。用 filtered 而不是 entries：
+  // 用户搜了关键字、或者按大小排过序时，翻页顺序该跟他眼前看到的一致。
+  //
+  // 只传 id 不传整个 entry —— 窗口布局会持久化到 localStorage，
+  // 目录里几百张图时带全量元数据只会让那份快照无谓地变大。
+  const queue = (entry.mime ?? '').startsWith('image/')
+    ? filtered.value
+        .filter((e) => e.kind === 'file' && (e.mime ?? '').startsWith('image/'))
+        .map((e) => e.id)
+    : []
+
   windows.open({
     appId: 'preview',
     title: entry.name,
-    args: { node: entry },
+    args: { node: entry, queue },
     w: 940,
     h: 660,
     minW: 420,
