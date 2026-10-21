@@ -818,6 +818,39 @@ function migrate(database: DatabaseSync): void {
         );
       `)
     },
+
+    // ---- v17: 打字练习（个人进度与错题本） ----
+    (d) => {
+      d.exec(`
+        -- 打字背单词的个人数据。词库本身在前端（静态 JSON，随构建走），
+        -- 服务端只存"练到哪了"和"错在哪"—— 两张表都是个人维度的，
+        -- 没有共享语义，也就没有权限问题：一律只读写自己的行。
+        --
+        -- 进度按 (dict, chapter) 粒度记 position（第几个词，0 起）：
+        -- 够"接着上次练"用了。整章的正确率这类统计不做 —— 错题本
+        -- 已经是更有效的复习入口，统计会鼓励凑数字。
+        CREATE TABLE typing_progress (
+          user_id    TEXT NOT NULL REFERENCES users(id),
+          dict       TEXT NOT NULL,
+          chapter    INTEGER NOT NULL,
+          position   INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (user_id, dict, chapter)
+        );
+
+        -- 错题本：在这个词上出过错就记一笔，重复错累加次数（排序复习用）。
+        -- word 存原词而不是下标 —— 词库内容日后修订，下标会漂，原词不会。
+        CREATE TABLE typing_wrong (
+          user_id    TEXT NOT NULL REFERENCES users(id),
+          dict       TEXT NOT NULL,
+          word       TEXT NOT NULL,
+          wrong_count INTEGER NOT NULL DEFAULT 1,
+          last_at    INTEGER NOT NULL,
+          PRIMARY KEY (user_id, dict, word)
+        );
+        CREATE INDEX ix_typing_wrong_user ON typing_wrong(user_id, last_at DESC);
+      `)
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

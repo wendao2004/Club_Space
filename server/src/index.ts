@@ -114,6 +114,7 @@ import { AuthError, actorIp, requireRole, requireUser } from './routes/auth-guar
 import { registerBoardRoutes } from './routes/board.ts'
 import { registerPollRoutes } from './routes/poll.ts'
 import { musicPurgeDeleted, registerMusicRoutes } from './routes/music.ts'
+import { registerTypingRoutes } from './routes/typing.ts'
 import { pushDrawRoom, pushDrawStroke, registerDrawRoutes } from './routes/draw.ts'
 import {
   bidLandlord,
@@ -3923,6 +3924,7 @@ registerDrawRoutes(app)
 registerBoardRoutes(app)
 registerPollRoutes(app)
 registerMusicRoutes(app)
+registerTypingRoutes(app)
 
 // ---------------------------------------------------------------- 待办
 

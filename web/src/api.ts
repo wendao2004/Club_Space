@@ -937,6 +937,25 @@ export const api = {
     ended: (playedToken: number) =>
       request<{ advanced: boolean }>('/api/music/ended', { json: { playedToken } }),
   },
+
+  // ---------------------------------------------------------------- 打字练习
+
+  typing: {
+    progress: () => request<{ progress: TypingProgress[] }>('/api/typing/progress'),
+
+    /** 记录某章练到第几个词（0 起）。 */
+    saveProgress: (input: { dict: string; chapter: number; position: number }) =>
+      request<{ progress: TypingProgress }>('/api/typing/progress', { method: 'PUT', json: input }),
+
+    wrong: () => request<{ wrong: TypingWrong[] }>('/api/typing/wrong'),
+
+    recordWrong: (input: { dict: string; word: string }) =>
+      request<{ ok: true }>('/api/typing/wrong', { json: input }),
+
+    /** 清错题：传 word 删单个，传 dict 清某库，都不传全清。 */
+    clearWrong: (input: { dict?: string; word?: string }) =>
+      request<{ removed: number }>('/api/typing/wrong/clear', { json: input }),
+  },
 }
 
 // ---------------------------------------------------------------- 分片上传
@@ -1851,6 +1870,22 @@ export interface MusicNowPlaying {
 export interface MusicRoomView {
   nowPlaying: MusicNowPlaying | null
   queue: MusicQueueItem[]
+}
+
+// ---------------------------------------------------------------- 打字练习
+
+export interface TypingProgress {
+  dict: string
+  chapter: number
+  position: number
+  updatedAt: number
+}
+
+export interface TypingWrong {
+  dict: string
+  word: string
+  wrongCount: number
+  lastAt: number
 }
 
 // ---------------------------------------------------------------- 投票
