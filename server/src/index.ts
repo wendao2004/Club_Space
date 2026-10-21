@@ -113,6 +113,7 @@ import { shutdownBotRunner } from './games/bot-runner.ts'
 import { AuthError, actorIp, requireRole, requireUser } from './routes/auth-guard.ts'
 import { registerBoardRoutes } from './routes/board.ts'
 import { registerPollRoutes } from './routes/poll.ts'
+import { musicPurgeDeleted, registerMusicRoutes } from './routes/music.ts'
 import { pushDrawRoom, pushDrawStroke, registerDrawRoutes } from './routes/draw.ts'
 import {
   bidLandlord,
@@ -986,6 +987,9 @@ app.delete('/api/files/:id', async (req) => {
   if (!canWrite(node, user.id, roleAtLeast(user.role, 'admin'))) {
     throw new HttpError(403, '只能删除自己上传的内容')
   }
+  // 听歌房的队列/当前曲目可能引用这个文件 —— 先把引用清掉（推进到下一首）
+  // 再删节点，顺序反了厅里会断声
+  musicPurgeDeleted(id)
   await deleteNode(id)
   audit({
     actorId: user.id,
@@ -3918,6 +3922,7 @@ registerDrawRoutes(app)
 // 路由在 routes/board.ts（拆分 index.ts 的第一步）。这里只登记，位置与搬家前一致。
 registerBoardRoutes(app)
 registerPollRoutes(app)
+registerMusicRoutes(app)
 
 // ---------------------------------------------------------------- 待办
 

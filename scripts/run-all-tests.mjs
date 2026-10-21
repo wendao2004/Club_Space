@@ -178,6 +178,7 @@ const ONLINE_TESTS = [
   },
   { name: 'board-test', label: '留言板（发帖/处理标记/撤回/权限边界）' },
   { name: 'poll-test', label: '投票（一人一票/改票/关闭与截止/权限边界）' },
+  { name: 'music-room-test', label: '听歌房（排播权限/切歌状态机/删除不断声）' },
   {
     name: 'file-range-test',
     label: '文件 Range 请求（视频拖进度条/断点续传）',

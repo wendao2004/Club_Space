@@ -917,6 +917,26 @@ export const api = {
 
     remove: (id: string) => request<{ ok: true }>(`/api/polls/${id}`, { method: 'DELETE' }),
   },
+
+  // ---------------------------------------------------------------- 听歌房
+
+  music: {
+    room: () => request<MusicRoomView>('/api/music/room'),
+
+    /** 文件系统里我读得到的音频（排播候选）。 */
+    tracks: () => request<{ tracks: Array<{ id: string; name: string; ownerName: string }> }>('/api/music/tracks'),
+
+    enqueue: (nodeId: string) => request<MusicRoomView>('/api/music/queue', { json: { nodeId } }),
+
+    removeQueued: (itemId: string) =>
+      request<MusicRoomView>(`/api/music/queue/${itemId}`, { method: 'DELETE' }),
+
+    skip: () => request<MusicRoomView>('/api/music/skip', { json: {} }),
+
+    /** 播放器自然播完的上报。advanced=false 表示 token 已过期（别人先报了）。 */
+    ended: (playedToken: number) =>
+      request<{ advanced: boolean }>('/api/music/ended', { json: { playedToken } }),
+  },
 }
 
 // ---------------------------------------------------------------- 分片上传
@@ -1805,6 +1825,32 @@ export interface BoardPost {
   createdAt: number
   /** 是不是我发的（前端据此显示「撤回」）。 */
   mine: boolean
+}
+
+// ---------------------------------------------------------------- 听歌房
+
+export interface MusicQueueItem {
+  id: string
+  nodeId: string
+  name: string
+  addedBy: string
+  addedByName: string
+  addedAt: number
+}
+
+export interface MusicNowPlaying {
+  nodeId: string
+  name: string
+  startedBy: string
+  startedByName: string
+  startedAt: number
+  /** 上报 ended 时必须带上（每次换曲自增，防旧上报错切新曲）。 */
+  playedToken: number
+}
+
+export interface MusicRoomView {
+  nowPlaying: MusicNowPlaying | null
+  queue: MusicQueueItem[]
 }
 
 // ---------------------------------------------------------------- 投票

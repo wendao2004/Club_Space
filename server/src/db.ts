@@ -784,6 +784,40 @@ function migrate(database: DatabaseSync): void {
         CREATE INDEX ix_poll_votes_user ON poll_votes(user_id);
       `)
     },
+
+    // ---- v16: 听歌房 ----
+    (d) => {
+      d.exec(`
+        -- 轻量听歌房（u-wave 的 DJ 队列思路，自己实现）：全站**一个**房间，
+        -- 共享播放队列。不做逐字节音频同步 —— 服务端只记"当前曲目 + 起播
+        -- 时间戳"，客户端各自拉流对齐进度；误差对"大家一起听"足够了，
+        -- 换来的是不用搭媒体同步服务。
+        --
+        -- 为什么全站一个房间：听歌房的乐趣在于"不管谁上线都在同一个厅"，
+        -- 拆多房间就把人散掉了。以后真需要再多也不迟。
+        CREATE TABLE music_queue (
+          id         TEXT PRIMARY KEY,
+          node_id    TEXT NOT NULL REFERENCES nodes(id),
+          added_by   TEXT NOT NULL REFERENCES users(id),
+          added_at   INTEGER NOT NULL
+        );
+        CREATE INDEX ix_music_queue_added ON music_queue(added_at);
+
+        -- 当前正在播的曲目。单行表（id 恒为 1）：当前曲目是"状态"不是
+        -- "队列成员"，单独放才好表达"队头被跳过 → 提升为正在播"。
+        -- started_at 用来让客户端对齐进度；played_token 每次换曲自增，
+        -- 客户端上报 ended 时带 token 比对，防止旧的上报错 advance 新曲。
+        CREATE TABLE music_state (
+          id            INTEGER PRIMARY KEY CHECK (id = 1),
+          -- ON DELETE CASCADE：文件被删时这一行跟着消失（ purge 在删除前
+          -- 调用会先推进到下一首，正常路径轮不到级联；这是兜底）
+          node_id       TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+          started_by    TEXT NOT NULL REFERENCES users(id),
+          started_at    INTEGER NOT NULL,
+          played_token  INTEGER NOT NULL DEFAULT 0
+        );
+      `)
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

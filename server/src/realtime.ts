@@ -100,6 +100,11 @@ export type RealtimeEvent =
    * 有人投票也广播 —— 结果是全透明的，"实时看到票数涨"就是这个功能的乐趣。
    */
   | { type: 'poll'; data: unknown }
+  /**
+   * 听歌房有变化（排歌/跳歌/播完切歌/文件删除波及）。全站一个厅、
+   * 没有隐藏信息，broadcast + 客户端重拉。
+   */
+  | { type: 'music'; data: unknown }
 
 interface Connection {
   id: string
