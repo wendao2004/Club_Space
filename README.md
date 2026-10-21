@@ -173,7 +173,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
 直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
 
-全量 **37 个套件 / 2401 条断言**：
+全量 **37 个套件 / 2429 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|
@@ -305,7 +305,9 @@ docker compose up -d --build
 Club_Space/
 ├── server/                 # 后端（Node 24 + Fastify，直接跑 .ts）
 │   └── src/
-│       ├── index.ts        # HTTP 入口与全部路由
+│       ├── index.ts        # HTTP 入口：中间件、定时器、静态资源，以及尚未搬走的路由
+│       ├── routes/         # 已从 index.ts 抽出的路由模块（auth-guard / board / draw）
+│       ├── board.ts        # 留言板数据层
 │       ├── db.ts           # node:sqlite + schema 迁移（v1 文件 v2 聊天 v3 记账 v4 游戏 v5 两步验证）
 │       ├── auth.ts         # scrypt / 会话 / 邀请码 / RBAC
 │       ├── files.ts        # 文件树 / 内容寻址 / 分片上传
@@ -339,7 +341,7 @@ Club_Space/
 │       ├── mobile/         # 移动端外壳（独立界面）
 │       ├── views/          # 登录页 / 安全上下文提示条
 │       └── styles/         # 设计令牌与基础样式
-├── scripts/                # 测试（34 个套件、2170 条断言，`pnpm test` 全跑）
+├── scripts/                # 测试（37 个套件、2429 条断言，`pnpm test` 全跑）
 ├── deploy/                 # 部署：compose / Caddyfile / 证书 / 引导页 / 备份 / 转换镜像
 └── docs/                   # 需求、部署、开发纪实、迭代记录（索引见 docs/README.md）
 ```
