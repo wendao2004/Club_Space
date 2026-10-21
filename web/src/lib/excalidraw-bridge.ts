@@ -13,6 +13,21 @@ import { createElement, type ComponentType } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Excalidraw } from '@excalidraw/excalidraw'
 
+/**
+ * 资产同源化：不设它，Excalidraw 会从 esm.sh 外网 CDN 拉字体 —— 内网
+ * 拉不到，线上 CSP（default-src 'self'）也会拦，表现为画布字体全丢。
+ * 资产由 web/scripts/copy-excalidraw-assets.mjs 在构建后拷进
+ * dist/excalidraw-assets/（随站点同源提供）。
+ *
+ * 在渲染前设置即可（Excalidraw 是运行时读这个值，不是模块初始化时）。
+ */
+declare global {
+  interface Window {
+    EXCALIDRAW_ASSET_PATH?: string
+  }
+}
+window.EXCALIDRAW_ASSET_PATH = '/excalidraw-assets/'
+
 export interface ExcalidrawApi {
   updateScene(scene: { elements: unknown[] }): void
   getSceneElements(): unknown[]
@@ -44,6 +59,13 @@ export function mountExcalidraw(
     createElement(ExcalidrawAny, {
       // 主题跟随 CSS：不传 theme，用默认亮色（画布内容自成一体的视觉）
       gridModeEnabled: false,
+      // 关掉"嵌入库"按钮 —— 它会开一个指向 excalidraw.com 的 iframe，
+      // 内网够不到，CSP 的 frame-src 'self' 也会拦
+      UIOptions: {
+        canvasActions: {
+          loadLibrary: null,
+        },
+      },
       excalidrawAPI: (instance: ExcalidrawApi) => {
         api = instance
         onReady?.()
