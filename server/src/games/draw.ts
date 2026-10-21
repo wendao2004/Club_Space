@@ -44,11 +44,16 @@
 
 export type DrawPhase = 'waiting' | 'choosing' | 'drawing' | 'reveal' | 'finished'
 
+import { randomInt } from 'node:crypto'
+
 import { DRAW_WORDS as WORD_POOL } from './draw-words.ts'
 
 const DRAW_WORDS_EASY = WORD_POOL.easy
 const DRAW_WORDS_MEDIUM = WORD_POOL.medium
 const DRAW_WORDS_HARD = WORD_POOL.hard
+
+/** 全词库（洗牌用；模块级只建一次，别在每回合选词时重新拼数组）。 */
+const ALL_WORDS: string[] = [...DRAW_WORDS_EASY, ...DRAW_WORDS_MEDIUM, ...DRAW_WORDS_HARD]
 
 export interface DrawPlayer {
   userId: string
@@ -140,29 +145,52 @@ export function newDrawState(names: Array<{ userId: string; name: string }>, tot
 
 // ---------------------------------------------------------------- 选词
 
-/** 从词池里挑 n 个不重复、且本局没用过的候选。 */
-export function pickWordChoices(state: DrawState, count = WORD_CHOICES): string[] {
-  const all = [...DRAW_WORDS_EASY, ...DRAW_WORDS_MEDIUM, ...DRAW_WORDS_HARD]
-  const pool = all.filter((w) => !state.usedWords.includes(w))
-  const picked: string[] = []
-  // 池子耗尽（不太可能：词库 200+，一局最多 8×3=24 词）就放宽"本局未用"
-  const source = pool.length >= count ? pool : all.filter((w) => !picked.includes(w))
-  while (picked.length < count && source.length > 0) {
-    const index = Math.floor(Math.random() * source.length)
-    const word = source.splice(index, 1)[0]!
-    if (!picked.includes(word)) picked.push(word)
+/**
+ * Fisher-Yates 洗牌，随机源用 crypto.randomInt 而不是 Math.random：
+ * 后者是无偏性无保证的 PRNG，派对游戏虽然无所谓，但成本为零没必要省。
+ */
+function shuffled<T>(list: readonly T[]): T[] {
+  const a = [...list]
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = randomInt(0, i + 1)
+    ;[a[i], a[j]] = [a[j]!, a[i]!]
   }
-  return picked
+  return a
+}
+
+/**
+ * 从词池里挑 n 个不重复的候选。
+ *
+ * 随机性保证（"每次游玩的词要随机"）：
+ *  - 每回合对整个可用池**全量洗牌**后取前 n 个 —— 不是从固定顺序里"跳着取"，
+ *    也不是"上次用过的往后排"这类伪随机；
+ *  - 排除 `state.usedWords`（本局已出过的词）和 `exclude`（房间层传进来的
+ *    近期词记忆，跨局生效，见 draw-rooms.ts 的 recentWords）；
+ *  - 池子真耗尽（词库 431 词，几乎不可能）才清空 usedWords 重新来过。
+ */
+export function pickWordChoices(
+  state: DrawState,
+  count = WORD_CHOICES,
+  exclude: readonly string[] = [],
+): string[] {
+  const skip = new Set([...state.usedWords, ...exclude])
+  let pool = ALL_WORDS.filter((w) => !skip.has(w))
+  if (pool.length < count) {
+    state.usedWords = []
+    const skip2 = new Set(exclude)
+    pool = ALL_WORDS.filter((w) => !skip2.has(w))
+  }
+  return shuffled(pool).slice(0, count)
 }
 
 /** 进入 choosing：清上一回合痕迹，生成候选。调用方负责设置 phaseEndsAt。 */
-export function beginChoosing(state: DrawState, now: number): void {
+export function beginChoosing(state: DrawState, now: number, exclude: readonly string[] = []): void {
   state.phase = 'choosing'
   state.turnNo += 1
   state.word = null
   state.revealed = []
   state.hintOffsets = []
-  state.wordChoices = pickWordChoices(state)
+  state.wordChoices = pickWordChoices(state, WORD_CHOICES, exclude)
   state.phaseEndsAt = now + CHOOSE_MS
   for (const p of state.players) p.guessed = false
 }
@@ -186,9 +214,10 @@ export function chooseWord(state: DrawState, userId: string, word: string, now: 
   return true
 }
 
-/** 选词超时的兜底：随机选一个候选。 */
+/** 选词超时的兜底：随机选一个候选（randomInt 上限不含，空数组直接返回 null）。 */
 export function pickFallbackWord(state: DrawState): string | null {
-  return state.wordChoices[Math.floor(Math.random() * state.wordChoices.length)] ?? null
+  const n = state.wordChoices.length
+  return n > 0 ? (state.wordChoices[randomInt(0, n)] ?? null) : null
 }
 
 // ---------------------------------------------------------------- 提示
@@ -326,7 +355,7 @@ export function beginReveal(state: DrawState, now: number): void {
  * 画家断线的回合也会走到这里 —— 断线的人那回合没人能猜对（房间层会拦掉
  * 他的画笔），照常轮转，不重置分数：skribbl 类游戏对挂机就是这么处理的。
  */
-export function advanceTurn(state: DrawState, now: number): boolean {
+export function advanceTurn(state: DrawState, now: number, exclude: readonly string[] = []): boolean {
   if (state.phase === 'finished') return false
 
   const nextIndex = state.drawerIndex + 1
@@ -342,7 +371,7 @@ export function advanceTurn(state: DrawState, now: number): boolean {
     state.result = { ranking: ranking(state) }
     return true
   }
-  beginChoosing(state, now)
+  beginChoosing(state, now, exclude)
   return true
 }
 

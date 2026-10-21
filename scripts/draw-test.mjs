@@ -92,6 +92,48 @@ assert(ALL_DRAW_WORDS.every((w) => w.length >= 1 && w.length <= 4), '词长 1-4 
   bigState.usedWords = [...ALL_DRAW_WORDS]
   const picked2 = pickWordChoices(bigState, 3)
   eq(picked2.length, 3, '词池耗尽时仍能给出候选（放宽本局未用）')
+  eq(bigState.usedWords, [], '词池耗尽时清空本局已用（重新开始去重）')
+}
+
+{
+  // "每次游玩的词要随机"的三条保证
+  console.log('\n【选词随机性】')
+
+  // 1) 本局已用的词不会再出现
+  const s1 = game3()
+  const first = pickWordChoices(s1, 3)
+  s1.usedWords = [...first]
+  const second = pickWordChoices(s1, 3)
+  assert(
+    second.every((w) => !first.includes(w)),
+    '本局已出过的词不再进入候选',
+    first.join('/') + ' vs ' + second.join('/'),
+  )
+
+  // 2) exclude（跨局近期词记忆）也被排除 —— 连玩几局不马上撞词
+  const s2 = game3()
+  const recent = ALL_DRAW_WORDS.slice(0, 200)
+  const picks = pickWordChoices(s2, 3, recent)
+  assert(
+    picks.every((w) => !recent.includes(w)),
+    '跨局 exclude 的词不进入候选',
+    picks.join('/'),
+  )
+
+  // 3) exclude + 本局已用把池子挤干时，仍能出词且避开 exclude
+  const s3 = game3()
+  s3.usedWords = ALL_DRAW_WORDS.filter((w) => !recent.includes(w))
+  const picks3 = pickWordChoices(s3, 3, recent)
+  eq(picks3.length, 3, '词池被 exclude 挤干时清空本局已用重新出词')
+  assert(picks3.every((w) => !recent.includes(w)), '即使放宽也避开 exclude')
+
+  // 4) 候选分布有变化：同一状态连续取两组，词序/组成几乎必然不同
+  //    （431 词里取 3，两组完全同序的概率 < 1/千万，偶发相同不算失败 ——
+  //    这里只断言"多次采样出现过不同结果"，防的是有人改回固定顺序取词）
+  const s4 = game3()
+  const seen = new Set()
+  for (let i = 0; i < 20; i++) seen.add(pickWordChoices(s4, 3).join(','))
+  assert(seen.size >= 10, '20 次采样出现至少 10 种不同候选组合', `${seen.size} 种`)
 }
 
 // ---------------------------------------------------------------- 提示时间表

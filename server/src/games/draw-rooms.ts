@@ -62,6 +62,25 @@ const MAX_POINTS_PER_OP = 200
 /** 房内聊天（含猜错词）的保留条数 —— 只为刷新/重连补发，再多没有意义。 */
 const MAX_CHAT = 50
 
+// ---------------------------------------------------------------- 近期词记忆
+//
+// "每次游玩的词要随机"除了洗牌本身，还有一层体验问题：玩家连开几局时，
+// 上一局刚画过的词不该马上又出现在候选里。本局去重由 state.usedWords 管
+// （随房间状态序列化），跨局去重靠这条进程内的滑动窗口 —— 房间是一次性的、
+// 状态不跨房，所以这个记忆只能住在这里。重启清零可接受：等于记忆重置，
+// 不影响正确性，只影响"连玩不撞词"的体验上限。
+
+/** 最近出过的词最多记这么多个（约两三个 8 人局的量）。 */
+const RECENT_WORDS_LIMIT = 60
+
+const recentWords: string[] = []
+
+function rememberWord(word: string): void {
+  if (!word) return
+  recentWords.push(word)
+  if (recentWords.length > RECENT_WORDS_LIMIT) recentWords.splice(0, recentWords.length - RECENT_WORDS_LIMIT)
+}
+
 interface RoomVolatile {
   strokes: DrawStrokeOp[]
   chat: DrawChatMsg[]
@@ -314,7 +333,7 @@ export function startDrawRoom(roomId: string, userId: string, onlineIds: Set<str
   if (state.phase !== 'waiting') throw new HttpError(400, '已经开始了')
   if (state.players.length < DRAW_MIN_PLAYERS) throw new HttpError(400, `至少要 ${DRAW_MIN_PLAYERS} 个人才能开始`)
 
-  beginChoosing(state, now())
+  beginChoosing(state, now(), recentWords)
   resetDrawCanvas(roomId)
   volatileOf(roomId).chat = []
   persist(roomId, state)
@@ -331,6 +350,7 @@ export function chooseDrawWord(roomId: string, userId: string, word: string, onl
   if (!chooseWord(state, userId, word, now())) {
     throw new HttpError(400, '现在不能选这个词（可能已经选过、不是你选、或词无效）')
   }
+  rememberWord(word)
   // 新回合从白纸开始。即使 advanceTurn 已经清过，这里再清一次是幂等的 ——
   // 而"选词后画布上还留着上一题的图"是最难解释的现象之一。
   resetDrawCanvas(roomId)
@@ -531,7 +551,10 @@ export function processDrawTimeouts(nowTs: number): DrawTimeoutEvent[] {
 
     if (state.phase === 'choosing' && nowTs >= state.phaseEndsAt) {
       const fallback = pickFallbackWord(state)
-      if (fallback) chooseWord(state, state.players[state.drawerIndex]?.userId ?? '', fallback, nowTs)
+      if (fallback) {
+        chooseWord(state, state.players[state.drawerIndex]?.userId ?? '', fallback, nowTs)
+        rememberWord(fallback)
+      }
       changed = true
     } else if (state.phase === 'drawing') {
       const due = dueHints(state, nowTs)
@@ -549,7 +572,7 @@ export function processDrawTimeouts(nowTs: number): DrawTimeoutEvent[] {
     } else if (state.phase === 'reveal' && nowTs >= state.phaseEndsAt) {
       // 轮转成功 = 进入新回合：画布跟着换新的（这里不清，客户端下一帧就会
       // 用 pullCanvas 把上一题拉回来 —— 见 resetDrawCanvas 的注释）
-      if (advanceTurn(state, nowTs)) {
+      if (advanceTurn(state, nowTs, recentWords)) {
         resetDrawCanvas(row.id)
         canvasCleared = true
       }
