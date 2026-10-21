@@ -153,8 +153,8 @@ export function resolveBoardPost(
   resolution?: string | null,
 ): BoardPostView {
   if (!isAdmin) throw new HttpError(403, '只有管理员能标记处理状态')
-  const current = getBoardPost(id, userId)
-  if (!current) throw new HttpError(404, '这条留言不存在')
+  // getBoardPost 自己就会抛 404，不必再判一次（这里的 null 分支永远走不到）
+  getBoardPost(id, userId)
 
   const note = resolution?.trim() || null
   if (note && note.length > 200) throw new HttpError(400, '处理说明最多 200 字')

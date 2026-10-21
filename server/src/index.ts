@@ -114,6 +114,7 @@ import {
   BOARD_KINDS,
   createBoardPost,
   deleteBoardPost,
+  getBoardPost,
   listBoardPosts,
   resolveBoardPost,
   type BoardKind,
@@ -4094,6 +4095,20 @@ app.post('/api/board/posts/:id/resolve', async (req) => {
     body.resolved !== false,
     typeof body.resolution === 'string' ? body.resolution : null,
   )
+  // 标记状态也是"官方的处理动作"，谁在什么时候把哪条标掉的要留痕 ——
+  // 与"删活动必须写审计"同一条原则（见 ledger-delete-event）。
+  audit({
+    actorId: user.id,
+    actorIp: actorIp(req),
+    category: 'system',
+    action: 'board-resolve',
+    target: id,
+    payload: {
+      kind: post.kind,
+      resolved: post.resolvedAt !== null,
+      noteLength: post.resolution?.length ?? 0,
+    },
+  })
   broadcast({ type: 'board', data: { reason: 'resolved', postId: id } })
   return { post }
 })
@@ -4101,7 +4116,23 @@ app.post('/api/board/posts/:id/resolve', async (req) => {
 app.delete('/api/board/posts/:id', async (req) => {
   const user = requireUser(req)
   const { id } = req.params as { id: string }
+  // 先读一遍：删完就查不到了，而审计里要留下"删的是谁的、什么类型、有没有被处理过"。
+  const before = getBoardPost(id, user.id)
   deleteBoardPost(id, user.id, roleAtLeast(user.role, 'admin'))
+  // 留言板的定位是"收集 bug 的工单"，删除是破坏性操作 —— 必须留痕。
+  audit({
+    actorId: user.id,
+    actorIp: actorIp(req),
+    category: 'system',
+    action: 'board-delete',
+    target: id,
+    payload: {
+      kind: before.kind,
+      authorId: before.authorId,
+      wasResolved: before.resolvedAt !== null,
+      length: before.body.length,
+    },
+  })
   broadcast({ type: 'board', data: { reason: 'deleted', postId: id } })
   return { ok: true }
 })
