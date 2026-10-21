@@ -2238,15 +2238,17 @@ async function main() {
       await sleep(1500)
 
       // 画一笔：按住鼠标在画布上拖一段（走真实的 pointer 事件链）
+      // 坐标按**容器**取（用户看到并点击的是 .canvas-box；canvas 只是它里面的
+      // 绘制层）。这与 DrawApp 的 toLocal 用同一个权威来源。
       const canvasBox = await evaluate(`
         (() => {
-          const c = document.querySelector('.board-canvas')
-          if (!c) return null
-          const r = c.getBoundingClientRect()
+          const box = document.querySelector('.canvas-box')
+          if (!box) return null
+          const r = box.getBoundingClientRect()
           return JSON.stringify({ x: r.x + r.width * 0.3, y: r.y + r.height * 0.4, w: r.width * 0.4 })
         })()
       `)
-      assert(!!canvasBox, '找到了画布')
+      assert(!!canvasBox, '找到了画布', String(canvasBox))
       if (canvasBox) {
         const { x, y, w } = JSON.parse(canvasBox)
         const mouse = (type, px, py, buttons = 1) =>
@@ -2256,9 +2258,13 @@ async function main() {
             sessionId,
           )
         await mouse('mousePressed', x, y)
-        for (let i = 1; i <= 8; i++) {
-          void mouse('mouseMoved', x + i * (w / 8), y + i * 6)
-          await sleep(20)
+        // 必须逐个 await：曾经为了"更像真实帧率"改成不等待，结果 8 个 CDP
+        // 事件几乎同时到达，浏览器把相邻的 pointermove 合并掉了 —— 只画出
+        // 一半的轨迹，像素断言的横向跨度直接腰斩。真实用户拖拽是连续事件，
+        // 不会合并；合成事件要自己控制节奏。
+        for (let i = 1; i <= 12; i++) {
+          await mouse('mouseMoved', x + i * (w / 12), y + i * 4)
+          await sleep(16)
         }
         await mouse('mouseReleased', x + w, y + 48, 0)
         await sleep(400)

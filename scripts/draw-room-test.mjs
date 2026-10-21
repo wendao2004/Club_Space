@@ -47,7 +47,7 @@ function sleep(ms) {
 
 function makeClient() {
   let cookie = ''
-  return async function request(path, method = 'GET', body) {
+  const request = async function request(path, method = 'GET', body) {
     const headers = { 'content-type': 'application/json' }
     if (cookie) headers.cookie = cookie
     const res = await fetch(`${BASE}${path}`, {
@@ -66,6 +66,9 @@ function makeClient() {
     }
     return { status: res.status, body: json }
   }
+  /** SSE 需要原始 cookie（绕开 request 的封装）。 */
+  request.currentCookie = () => cookie
+  return request
 }
 
 async function register(client, username, displayName) {
@@ -361,6 +364,107 @@ console.log('\n【超时推进】')
   eq(finished?.view?.phase, 'finished', '一局跑完进入结算')
   assert(Array.isArray(finished?.view?.result?.ranking), '有结算排名')
   eq(finished?.view?.result?.ranking?.length, 3, '排名包含 3 人')
+}
+
+console.log('\n【实时同步与回合清屏】')
+
+{
+  // 独立开一局，避免和上面那局的时序纠缠
+  const created = await alice('/api/games/draw/rooms', 'POST', { title: '实时同步测试', rounds: 1 })
+  const room3 = created.body?.room
+  await bob(`/api/games/draw/rooms/${room3.id}/join`, 'POST', {})
+  await alice(`/api/games/draw/rooms/${room3.id}/start`, 'POST', {})
+  const drawerView = await currentWordOf(alice, room3.id)
+  const word = drawerView?.view?.wordChoices?.[0]
+  await alice(`/api/games/draw/rooms/${room3.id}/word`, 'POST', { word })
+
+  // 乙挂 SSE 长连接（模拟"另一个人开着画桌"）
+  const controller = new AbortController()
+  const sseRes = await fetch(`${BASE}/api/chat/stream`, {
+    headers: { cookie: bob.currentCookie(), accept: 'text/event-stream' },
+    signal: controller.signal,
+  })
+  assert(sseRes.status === 200, '乙建立了 SSE 长连接')
+
+  const chunks = []
+  const reader = sseRes.body.getReader()
+  const decoder = new TextDecoder()
+  const readLoop = (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        chunks.push(decoder.decode(value, { stream: true }))
+      }
+    } catch {
+      // abort 时会抛，正常
+    }
+  })()
+  await sleep(600)
+
+  // 甲画一笔 → 乙应该实时收到 draw-stroke
+  await alice(`/api/games/draw/rooms/${room3.id}/strokes`, 'POST', {
+    op: 'begin',
+    strokeId: 'rt1',
+    points: [{ x: 120, y: 300 }],
+    color: '#ff0000',
+    width: 4,
+    tool: 'pen',
+  })
+  await sleep(1200)
+  const stream = chunks.join('')
+  assert(stream.includes('event: draw-stroke'), '乙实时收到了画笔事件（不用刷新）')
+
+  // payload 形状是这次 bug 的核心：服务端必须把 from 平铺进 op，
+  // 而不是包成 { from, op } —— 包一层的话前端的 op.op 恒为 undefined，
+  // begin/points/clear 所有分支都不匹配，笔迹被静默丢弃。
+  const payloads = stream
+    .split('\n')
+    .filter((l) => l.startsWith('data:') && l.includes('strokeId":"rt1"'))
+    .map((l) => {
+      try {
+        return JSON.parse(l.slice(5).trim())
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
+  assert(payloads.length >= 1, '收到至少一条笔迹载荷', `${payloads.length} 条`)
+  if (payloads.length > 0) {
+    const p = payloads[0]
+    eq(p.op, 'begin', '载荷是平铺的 op（不是 { from, op } 包了一层）')
+    assert(typeof p.from === 'string' && p.from.length > 0, '载荷带发起人 from', String(p.from))
+    assert(Array.isArray(p.points) && p.points.length === 1, '载荷带坐标')
+  }
+
+  // 回合轮转 → 画布缓冲必须清空（"每到下一题应该清空画布"）
+  const canvasBefore = await bob(`/api/games/draw/rooms/${room3.id}/canvas`, 'GET')
+  assert((canvasBefore.body?.strokes?.length ?? 0) >= 1, '轮转前画布上有这一笔')
+
+  hurryPhaseEnds(room3.id, 300)
+  await sleep(3200) // drawing → reveal
+  hurryPhaseEnds(room3.id, 300)
+  await sleep(3200) // reveal → 下一个画家（新回合）
+
+  const afterTurn = await currentWordOf(alice, room3.id)
+  assert(
+    afterTurn?.view?.phase === 'choosing' || afterTurn?.view?.phase === 'drawing',
+    '回合已轮转',
+    afterTurn?.view?.phase,
+  )
+  const canvasAfter = await bob(`/api/games/draw/rooms/${room3.id}/canvas`, 'GET')
+  eq(canvasAfter.body?.strokes?.length, 0, '新回合的画布缓冲已清空')
+
+  // 轮转时服务端还广播了一次 clear（客户端据此清屏）
+  await sleep(400)
+  controller.abort()
+  await readLoop
+  const after = chunks.join('')
+  assert(after.includes('"op":"clear"'), '回合轮转时广播了 clear（客户端清屏）')
+
+  // 收尾
+  await alice(`/api/games/draw/rooms/${room3.id}/leave`, 'POST', {})
+  await bob(`/api/games/draw/rooms/${room3.id}/leave`, 'POST', {})
 }
 
 console.log('\n【退房与解散】')

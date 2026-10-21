@@ -278,6 +278,7 @@ export function leaveDrawRoom(roomId: string, userId: string, onlineIds: Set<str
     if (state.phase === 'choosing') {
       state.drawerIndex = state.drawerIndex % state.players.length
       beginChoosing(state, now())
+      resetDrawCanvas(roomId)
     } else if (state.phase === 'drawing') {
       state.word = null
       beginReveal(state, now())
@@ -298,7 +299,7 @@ export function startDrawRoom(roomId: string, userId: string, onlineIds: Set<str
   if (state.players.length < DRAW_MIN_PLAYERS) throw new HttpError(400, `至少要 ${DRAW_MIN_PLAYERS} 个人才能开始`)
 
   beginChoosing(state, now())
-  volatileOf(roomId).strokes = []
+  resetDrawCanvas(roomId)
   volatileOf(roomId).chat = []
   persist(roomId, state)
   return getDrawRoom(roomId, userId, onlineIds)
@@ -314,6 +315,9 @@ export function chooseDrawWord(roomId: string, userId: string, word: string, onl
   if (!chooseWord(state, userId, word, now())) {
     throw new HttpError(400, '现在不能选这个词（可能已经选过、不是你选、或词无效）')
   }
+  // 新回合从白纸开始。即使 advanceTurn 已经清过，这里再清一次是幂等的 ——
+  // 而"选词后画布上还留着上一题的图"是最难解释的现象之一。
+  resetDrawCanvas(roomId)
   persist(roomId, state)
   return getDrawRoom(roomId, userId, onlineIds)
 }
@@ -395,6 +399,18 @@ export function getDrawCanvas(roomId: string): DrawStrokeOp[] {
   return volatileOf(roomId).strokes
 }
 
+/**
+ * 清空画布缓冲（**回合切换时必须调用**）。
+ *
+ * 这是"每到下一题画布不清空"那个 bug 的根因：缓冲从不随回合重置，于是
+ * 新回合客户端 pullCanvas 一拉，上一题整张图又回来了 —— 前端就算在
+ * phase 变化时 clearCanvas 也没用，下一帧就被补发覆盖回去。
+ * 服务器才是画布的权威，重置必须在这里做，并广播给所有人。
+ */
+export function resetDrawCanvas(roomId: string): void {
+  volatileOf(roomId).strokes = []
+}
+
 // ---------------------------------------------------------------- 聊天 / 猜词
 
 function appendChat(roomId: string, msg: DrawChatMsg): void {
@@ -455,6 +471,8 @@ export interface DrawTimeoutEvent {
   state: DrawState
   /** 揭示了提示（需要广播，让已画布面之外的信息更新）。 */
   hintsRevealed: boolean
+  /** 回合轮转了（画布缓冲已重置，调用方要广播一次 clear 让所有客户端清屏）。 */
+  canvasCleared: boolean
 }
 
 /**
@@ -481,6 +499,7 @@ export function processDrawTimeouts(nowTs: number): DrawTimeoutEvent[] {
     const state = parseState(row.state)
     let changed = false
     let hintsRevealed = false
+    let canvasCleared = false
 
     if (state.phase === 'choosing' && nowTs >= state.phaseEndsAt) {
       const fallback = pickFallbackWord(state)
@@ -498,13 +517,18 @@ export function processDrawTimeouts(nowTs: number): DrawTimeoutEvent[] {
         changed = true
       }
     } else if (state.phase === 'reveal' && nowTs >= state.phaseEndsAt) {
-      advanceTurn(state, nowTs)
+      // 轮转成功 = 进入新回合：画布跟着换新的（这里不清，客户端下一帧就会
+      // 用 pullCanvas 把上一题拉回来 —— 见 resetDrawCanvas 的注释）
+      if (advanceTurn(state, nowTs)) {
+        resetDrawCanvas(row.id)
+        canvasCleared = true
+      }
       changed = true
     }
 
     if (changed) {
       persist(row.id, state)
-      events.push({ roomId: row.id, state, hintsRevealed })
+      events.push({ roomId: row.id, state, hintsRevealed, canvasCleared })
     }
   }
   return events

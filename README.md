@@ -173,7 +173,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
 直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
 
-全量 **36 个套件 / 2322 条断言**：
+全量 **36 个套件 / 2331 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|
@@ -189,7 +189,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 | `werewolf-test` | 274 | 身份分配随机性、隐藏信息、超时兜底、房主退房解散房间 |
 | `werewolf-route-test` | 59 | 9 个真实账号走 HTTP 全流程，逐个比对 view 有没有泄露 |
 | `draw-test` | 79 | 你画我猜引擎：计分/提示公式、阶段机、**视角裁剪逐视角断言**（词漏了游戏就死了） |
-| `draw-room-test` | 58 | 你画我猜 HTTP 层：画笔写入口校验（只认画家/坐标/颜色/批量上限）、猜词计分、用真库改时间戳加速超时推进 |
+| `draw-room-test` | 68 | 你画我猜 HTTP 层：画笔写入口校验（只认画家/坐标/颜色/批量上限）、猜词计分、用真库改时间戳加速超时推进 |
 | `totp-test` | 36 | **RFC 6238 附录 B 的 6 条标准向量**全部匹配 |
 | `totp-ratelimit-test` | 13 | 两步登录限流按 IP / 按账号分桶，两个桶不互相污染 |
 | `admin-test` | 88 | 运维管控的权限门禁与参数白名单 |

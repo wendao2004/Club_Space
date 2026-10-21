@@ -3865,13 +3865,17 @@ function pushDrawRoom(roomId: string): void {
   }
 }
 
-function pushDrawStroke(roomId: string, from: string, op: unknown): void {
+function pushDrawStroke(roomId: string, from: string, op: DrawStrokeOp): void {
   const memberIds = drawMembers(roomId)
   if (memberIds.length === 0) return
-  // 广播带 from（发起人）：画家的浏览器会收到自己的笔迹回声 —— 他本地已经
-  // 画过了，再重放一遍是重复绘制；前端按 from 过滤。房间广播不带身份的话
-  // 这个过滤做不了（客户端无法区分"我的回声"和"别人的新笔迹"）。
-  pushTo(memberIds, { type: 'draw-stroke', data: { from, op } })
+  // 广播把 from **平铺**进 op（而不是包一层 { from, op }）。
+  //
+  // 这里踩过一次：最初发的是 { from, op }，而前端把整个 payload 当 op 用 ——
+  // `op.op` 永远是 undefined，begin/points/clear 所有分支都不匹配，别人的
+  // 笔迹被静默丢弃。症状是"画面不实时同步，关掉重开才看得到"（重开走的是
+  // /canvas 补发）。协议形状必须和前端类型（DrawStrokeBroadcast）一致，
+  // 否则是一个只在运行时暴露的静默失败。
+  pushTo(memberIds, { type: 'draw-stroke', data: { ...op, from } })
 }
 
 app.get('/api/games/draw/rooms', async (req) => {
@@ -4115,6 +4119,18 @@ setInterval(() => {
 setInterval(() => {
   try {
     for (const event of processDrawTimeouts(now())) {
+      // 回合轮转时缓冲已重置，发一条 clear 让所有人（含画家自己）清屏。
+      // from 用 'system'：不是任何真实用户 id，客户端不会把它当自己的回声跳过。
+      if (event.canvasCleared) {
+        pushDrawStroke(event.roomId, 'system', {
+          op: 'clear',
+          strokeId: '',
+          points: [],
+          color: '#000000',
+          width: 4,
+          tool: 'pen',
+        })
+      }
       pushDrawRoom(event.roomId)
     }
   } catch (err) {

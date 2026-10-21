@@ -95,7 +95,6 @@ function scaleOf(): { sx: number; sy: number } {
   if (!el) return { sx: 1, sy: 1 }
   return { sx: el.width / 1000, sy: el.height / 1000 }
 }
-
 function drawSegment(
   g: CanvasRenderingContext2D,
   stroke: { color: string; width: number; tool: 'pen' | 'eraser'; points: Array<{ x: number; y: number }> },
@@ -195,8 +194,14 @@ function flushPending(): void {
 }
 
 function toLocal(event: PointerEvent): { x: number; y: number } {
-  const el = canvasEl.value!
-  const rect = el.getBoundingClientRect()
+  // **用容器的矩形，不用 canvas 自己的**。
+  //
+  // canvas 是 position:absolute; inset:0，它的显示尺寸由容器决定；但它自己的
+  // getBoundingClientRect 在布局未稳时可能返回视口级宽度（窗口刚打开/切视图
+  // 的那几帧），与容器不一致。用它换算出来的是错的逻辑坐标 —— 实测笔迹被
+  // 压缩到真实位置的 0.44 倍，视觉上就是"只有左上角能画"。
+  // 容器是布局的权威，映射只认它。
+  const rect = (canvasBox.value ?? canvasEl.value)!.getBoundingClientRect()
   const x = Math.round(((event.clientX - rect.left) / rect.width) * 1000)
   const y = Math.round(((event.clientY - rect.top) / rect.height) * 1000)
   return {
@@ -208,6 +213,10 @@ function toLocal(event: PointerEvent): { x: number; y: number } {
 function onPointerDown(event: PointerEvent): void {
   if (!canDraw.value) return
   if (event.button !== 0) return
+  // 落笔前对齐画布像素尺寸（见 syncCanvasSize 注释）。
+  // 必须在 toLocal 之前：toLocal 按 CSS 矩形换算，绘制按像素尺寸缩放，
+  // 两者脱节时笔迹就会跑到左上角。
+  syncCanvasSize()
   const point = toLocal(event)
   strokeSeq += 1
   activeStroke = {
@@ -426,9 +435,10 @@ async function onStart(): Promise<void> {
 
 async function afterEnterTable(): Promise<void> {
   await nextTick()
-  // 两帧之后再设尺寸：避开窗口打开动画的中间态（见 resizeCanvas 的重试），
-  // 并把尺寸观察器建立起来 —— 之前它写在 onMounted 里，那时还在大厅视图，
-  // 画布不存在，observer 永远没建成，进入画桌后窗口再怎么变尺寸都无人纠正。
+  // 两帧之后再设尺寸：避开窗口打开动画的中间态（见 resizeCanvas 的重试）。
+  // 观察器在 nextTick 后就建 —— 它只依赖"画布已在 DOM 里"，不必等动画；
+  // 建立得越早，"尺寸脱节"的窗口期越短。
+  ensureResizeObserver()
   requestAnimationFrame(() => {
     resizeCanvas()
     ensureResizeObserver()
@@ -477,8 +487,16 @@ watch(
   () => viewState.value?.phase,
   (phase, prev) => {
     if (phase === prev) return
+    if (phase === 'choosing') {
+      // 新回合的选词阶段：本地先清一遍。服务端也会广播 clear（权威），
+      // 但断线重连后可能错过那一条 —— 两条路只管清，重复清是无害的。
+      localStrokes.clear()
+      strokeOrder.length = 0
+      clearCanvas()
+      return
+    }
     if (phase === 'drawing') {
-      // 新回合：清空本地画布，补发（通常此时服务端缓冲也是空的）
+      // 新回合：清空本地画布，补发（此时服务端缓冲也刚被重置，通常是空的）
       localStrokes.clear()
       strokeOrder.length = 0
       clearCanvas()
@@ -500,24 +518,51 @@ function resizeCanvas(): void {
   const el = canvasEl.value
   const box = canvasBox.value
   if (!el || !box) return
+  // 高分屏按 devicePixelRatio 放大，避免笔画发虚
   const dpr = window.devicePixelRatio || 1
   const rect = box.getBoundingClientRect()
 
   // 桌面窗口打开有过渡动画，动画中的 rect 比终态小。把 canvas 的像素尺寸
-  // 钉在这个小值上，CSS 又把它拉伸到终态 —— 笔迹就会全部挤在左上角。
-  // 实测复现的正是这个现象。宽或高不足 120 逻辑像素就视为还没稳，推迟重试。
-  if ((rect.width < 120 || rect.height < 120) && resizeRetries < 20) {
+  // 钉在这个小值上、CSS 又把它拉伸回终态 —— 笔迹就会全部挤在左上角。
+  if ((rect.width < 120 || rect.height < 120) && resizeRetries < 30) {
     resizeRetries += 1
     requestAnimationFrame(() => resizeCanvas())
     return
   }
   resizeRetries = 0
 
-  el.width = Math.max(200, Math.round(rect.width * dpr))
-  el.height = Math.max(150, Math.round(rect.height * dpr))
-  el.style.width = `${rect.width}px`
-  el.style.height = `${rect.height}px`
+  const nextW = Math.max(200, Math.round(rect.width * dpr))
+  const nextH = Math.max(150, Math.round(rect.height * dpr))
+  // 尺寸没变就不动（resize 会清空画布，必须紧跟 replayAll；
+  // 落笔前的自愈检查会频繁调用它，白重放一次是浪费）
+  if (el.width === nextW && el.height === nextH) return
+
+  el.width = nextW
+  el.height = nextH
+  // ⚠️ **不要设 style.width/height**：canvas 是 `position:absolute; inset:0`，
+  // 显示尺寸由容器拉伸决定。写过 style.width 之后，那个旧值会覆盖 inset 的
+  // 拉伸（width 优先于 right:0），画布从此比容器宽 —— 而且 getBoundingClientRect
+  // 也跟着变大，取到了错误宽度却"看起来很自洽"，是最难查的一类错。
   replayAll()
+}
+
+/**
+ * 落笔前的尺寸自愈。
+ *
+ * 只在进入画桌时对齐一次不够 —— 实测仍会出现"只有左上角能画"：
+ * 观察器建立晚于落笔、浏览器缩放改了 dpr、窗口被拖大而回调还没来，
+ * 都会让 canvas 像素尺寸与 CSS 尺寸脱节。落笔是唯一"百分之百会发生的
+ * 时机"，在这里兜一次，把窗口/动画/观察器全都不再是前提条件。
+ */
+function syncCanvasSize(): void {
+  const el = canvasEl.value
+  const box = canvasBox.value
+  if (!el || !box) return
+  const dpr = window.devicePixelRatio || 1
+  const rect = box.getBoundingClientRect()
+  const wantW = Math.max(200, Math.round(rect.width * dpr))
+  const wantH = Math.max(150, Math.round(rect.height * dpr))
+  if (el.width !== wantW || el.height !== wantH) resizeCanvas()
 }
 
 let resizeObserver: ResizeObserver | null = null
@@ -1091,6 +1136,14 @@ function chatTextOf(msg: DrawChatMsg): string {
 .board-canvas {
   position: absolute;
   inset: 0;
+  /* ⚠️ 这两行不能省：canvas 是**替换元素**，`inset:0` 对它的 width:auto
+     不会产生拉伸 —— auto 宽度取的是固有尺寸（attribute width，默认 300）。
+     没有这两行，画布就只有左上角 300×150 那么大，鼠标在别处按下根本
+     落不到 canvas 上，用户看到的就是"只有左上角一小块能画"。
+     用百分比而不是 px：百分比参照 canvas-box，窗口怎么变都跟着走，
+     也不会像 px 那样把布局钉死。 */
+  width: 100%;
+  height: 100%;
   touch-action: none;
 }
 
