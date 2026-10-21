@@ -682,6 +682,39 @@ function migrate(database: DatabaseSync): void {
         END;
       `)
     },
+
+    // ---- v13: 你画我猜的对局存档 ----
+    (d) => {
+      d.exec(`
+        -- 用户要"历史对局里能看到每个人画了什么"。
+        --
+        -- 为什么不塞进 game_rooms.state：那只装"当前这一局"的状态，一局结束
+        -- 就该有人接管它；而"每个回合一张图"是 append-only 的存档，天然是
+        -- 一张子表。也不塞进 backups —— 那是备份，不是可查询的数据。
+        --
+        -- strokes 存的是**回合结束时**的画布（JSON 序列化的笔画数组），
+        -- 回合内的增量只走内存广播、永不落库（见 draw-rooms.ts 的说明）。
+        -- 单回合点数有上限（archiveRound 里截断），一行通常几十 KB。
+        CREATE TABLE draw_rounds (
+          id          TEXT PRIMARY KEY,
+          room_id     TEXT NOT NULL,
+          round_no    INTEGER NOT NULL,
+          -- 本局第几个回合（1 起，跨轮累加）。存档的唯一键用它而不是
+          -- (round, drawer)：有人中途退房时 players 会变，同一个"第 2 轮
+          -- 第 1 位"可能对应过不同的人。
+          turn_no     INTEGER NOT NULL,
+          drawer_id   TEXT NOT NULL,
+          drawer_name TEXT NOT NULL,
+          word        TEXT NOT NULL,
+          strokes     TEXT NOT NULL,
+          results     TEXT NOT NULL,
+          started_at  INTEGER NOT NULL,
+          ended_at    INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX ux_draw_rounds_turn ON draw_rounds(room_id, turn_no);
+        CREATE INDEX ix_draw_rounds_room ON draw_rounds(room_id, turn_no);
+      `)
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

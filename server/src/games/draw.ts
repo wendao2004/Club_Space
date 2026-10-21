@@ -79,6 +79,13 @@ export interface DrawState {
   /** 第几轮（1 起）。一轮 = 每个在场玩家画一次。 */
   round: number
   totalRounds: number
+  /**
+   * 本局第几个回合（1 起，跨轮累加）。**对局存档的唯一键**。
+   *
+   * 不用 (round, drawerIndex)：有人中途退房后 players 会变，"第 2 轮第 1 位"
+   * 可能先后对应过不同的人，键会撞。
+   */
+  turnNo: number
   /** 当前要画的词。choosing 阶段为 null；reveal 后公开。 */
   word: string | null
   /** choosing 阶段的候选词，只发给画家本人。 */
@@ -119,6 +126,7 @@ export function newDrawState(names: Array<{ userId: string; name: string }>, tot
     drawerIndex: 0,
     round: 1,
     totalRounds,
+    turnNo: 0,
     word: null,
     wordChoices: [],
     revealed: [],
@@ -150,6 +158,7 @@ export function pickWordChoices(state: DrawState, count = WORD_CHOICES): string[
 /** 进入 choosing：清上一回合痕迹，生成候选。调用方负责设置 phaseEndsAt。 */
 export function beginChoosing(state: DrawState, now: number): void {
   state.phase = 'choosing'
+  state.turnNo += 1
   state.word = null
   state.revealed = []
   state.hintOffsets = []

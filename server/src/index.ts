@@ -127,10 +127,12 @@ import {
   disposeDrawRoom,
   drawMembers,
   getDrawCanvas,
+  getDrawHistoryDetail,
   getDrawRoom,
   guessDrawWord,
   joinDrawRoom,
   leaveDrawRoom,
+  listDrawHistory,
   listDrawRooms,
   processDrawTimeouts,
   startDrawRoom,
@@ -3973,6 +3975,25 @@ app.get('/api/games/draw/rooms/:id/canvas', async (req) => {
   const { id } = req.params as { id: string }
   getDrawRoom(id, user.id, onlineUserIds()) // 顺带做成员校验
   return { strokes: getDrawCanvas(id) }
+})
+
+/**
+ * 历史对局。
+ *
+ * 登录用户都能看：这是社团内部的娱乐记录，不是私密内容；如果限定"只看自己
+ * 参加过的"，"我们上礼拜那局"这种最常见的问法反而查不出来。
+ */
+app.get('/api/games/draw/history', async (req) => {
+  requireUser(req)
+  const q = req.query as { limit?: string }
+  const limit = Math.min(Math.max(Number.parseInt(q.limit ?? '30', 10) || 30, 1), 100)
+  return { rooms: listDrawHistory(limit) }
+})
+
+app.get('/api/games/draw/history/:id', async (req) => {
+  requireUser(req)
+  const { id } = req.params as { id: string }
+  return { detail: getDrawHistoryDetail(id) }
 })
 
 app.post('/api/games/draw/rooms/:id/guess', async (req) => {

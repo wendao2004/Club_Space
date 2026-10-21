@@ -827,6 +827,12 @@ export const api = {
         `/api/games/draw/rooms/${id}/guess`,
         { json: { text } },
       ),
+
+    /** 历史对局列表（已结束的局，倒序）。 */
+    history: (limit = 30) => request<{ rooms: DrawHistoryItem[] }>(`/api/games/draw/history?limit=${limit}`),
+
+    /** 某一局的全部回合（每个回合都带那一张画）。 */
+    historyDetail: (id: string) => request<{ detail: DrawHistoryDetail }>(`/api/games/draw/history/${id}`),
   },
 }
 
@@ -1668,6 +1674,35 @@ export interface DrawRoom {
   chat: DrawChatMsg[]
   createdAt: number
   updatedAt: number
+}
+
+/** 历史对局列表项。 */
+export interface DrawHistoryItem {
+  roomId: string
+  title: string
+  finishedAt: number
+  ranking: Array<{ userId: string; name: string; score: number }>
+  roundCount: number
+}
+
+/** 历史对局里的一个回合（含那一回合的画）。 */
+export interface DrawHistoryRound {
+  turnNo: number
+  roundNo: number
+  drawerId: string
+  drawerName: string
+  word: string
+  strokes: DrawStrokeInput[]
+  results: Array<{ userId: string; name: string; guessed: boolean; score: number }>
+  endedAt: number
+}
+
+export interface DrawHistoryDetail {
+  roomId: string
+  title: string
+  finishedAt: number
+  ranking: Array<{ userId: string; name: string; score: number }>
+  rounds: DrawHistoryRound[]
 }
 
 export interface DdzRoom {

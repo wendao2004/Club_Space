@@ -14,7 +14,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
-import { api, ApiError, type DrawChatMsg, type DrawStrokeBroadcast, type DrawStrokeInput } from '@/api'
+import {
+  api,
+  ApiError,
+  type DrawChatMsg,
+  type DrawHistoryDetail,
+  type DrawHistoryItem,
+  type DrawHistoryRound,
+  type DrawStrokeBroadcast,
+  type DrawStrokeInput,
+} from '@/api'
 import { useDraw } from '@/stores/draw'
 import { useUi } from '@/stores/ui'
 import { useAuth } from '@/stores/auth'
@@ -29,7 +38,7 @@ const auth = useAuth()
 
 const myId = computed(() => auth.user?.id ?? '')
 
-type View = 'lobby' | 'table'
+type View = 'lobby' | 'table' | 'history' | 'historyDetail'
 const view = ref<View>('lobby')
 const busy = ref(false)
 
@@ -403,6 +412,111 @@ async function onCreate(): Promise<void> {
 
 const rounds = ref(2)
 
+// ---------------------------------------------------------------- 历史对局
+
+const historyItems = ref<DrawHistoryItem[]>([])
+const historyDetail = ref<DrawHistoryDetail | null>(null)
+const selectedTurn = ref<DrawHistoryRound | null>(null)
+const historyBusy = ref(false)
+const historyError = ref<string | null>(null)
+const historyCanvasEl = ref<HTMLCanvasElement | null>(null)
+
+async function openHistory(): Promise<void> {
+  view.value = 'history'
+  historyBusy.value = true
+  historyError.value = null
+  try {
+    const { rooms } = await api.draw.history()
+    historyItems.value = rooms
+  } catch (err) {
+    historyError.value = err instanceof ApiError ? err.message : '加载历史失败'
+  } finally {
+    historyBusy.value = false
+  }
+}
+
+async function openHistoryDetail(roomId: string): Promise<void> {
+  view.value = 'historyDetail'
+  historyBusy.value = true
+  historyError.value = null
+  try {
+    const { detail } = await api.draw.historyDetail(roomId)
+    historyDetail.value = detail
+    // 默认停在最后一回合（大家最想看刚才那张）
+    selectedTurn.value = detail.rounds[detail.rounds.length - 1] ?? null
+    await nextTick()
+    renderHistoryTurn()
+  } catch (err) {
+    historyError.value = err instanceof ApiError ? err.message : '加载这一局失败'
+  } finally {
+    historyBusy.value = false
+  }
+}
+
+function selectTurn(round: DrawHistoryRound): void {
+  selectedTurn.value = round
+  void nextTick(() => renderHistoryTurn())
+}
+
+/**
+ * 把存档的笔画画到只读画布上。
+ *
+ * 存档里每一笔已经按 strokeId 合并成一条完整笔画（服务端 archiveRound
+ * 做的），所以这里不需要还原撤销/清空语义 —— 直接一笔一笔照着画。
+ */
+function renderHistoryTurn(): void {
+  const c = historyCanvasEl.value
+  if (!c) return
+  const g = c.getContext('2d')
+  if (!g) return
+
+  const dpr = window.devicePixelRatio || 1
+  const rect = c.getBoundingClientRect()
+  const w = Math.max(200, Math.round(rect.width * dpr))
+  const h = Math.max(150, Math.round(rect.height * dpr))
+  if (c.width !== w || c.height !== h) {
+    c.width = w
+    c.height = h
+  }
+  g.clearRect(0, 0, c.width, c.height)
+
+  const round = selectedTurn.value
+  if (!round) return
+  const sx = c.width / 1000
+  const sy = c.height / 1000
+
+  for (const op of round.strokes) {
+    if (op.points.length === 0) continue
+    g.save()
+    g.lineCap = 'round'
+    g.lineJoin = 'round'
+    g.strokeStyle = op.tool === 'eraser' ? '#ffffff' : op.color
+    g.fillStyle = g.strokeStyle
+    g.lineWidth = op.width * (op.tool === 'eraser' ? 4 : 1) * sx
+    if (op.points.length === 1) {
+      const p = op.points[0]!
+      g.beginPath()
+      g.arc(p.x * sx, p.y * sy, g.lineWidth / 2, 0, Math.PI * 2)
+      g.fill()
+    } else {
+      g.beginPath()
+      g.moveTo(op.points[0]!.x * sx, op.points[0]!.y * sy)
+      for (let i = 1; i < op.points.length; i++) {
+        g.lineTo(op.points[i]!.x * sx, op.points[i]!.y * sy)
+      }
+      g.stroke()
+    }
+    g.restore()
+  }
+}
+
+function formatTime(ts: number): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 async function onRefresh(): Promise<void> {
   await draw.loadRooms()
 }
@@ -625,6 +739,9 @@ function chatTextOf(msg: DrawChatMsg): string {
       <header class="bar">
         <div class="bar-title"><Icon name="brush" :size="18" />你画我猜</div>
         <div class="spacer" />
+        <button class="wl-btn wl-btn--ghost" @click="openHistory">
+          <Icon name="clock" :size="15" />历史对局
+        </button>
         <button class="wl-icon-btn" :disabled="draw.loading" title="刷新" @click="onRefresh">
           <Icon name="refresh" :size="16" :class="{ spin: draw.loading }" />
         </button>
@@ -634,9 +751,7 @@ function chatTextOf(msg: DrawChatMsg): string {
         <div class="new-room">
           <input v-model="newTitle" class="wl-input" placeholder="房间名（可留空）" maxlength="40" @keydown.enter="onCreate" />
           <select v-model.number="rounds" class="wl-input rounds-select" aria-label="轮数">
-            <option :value="1">1 轮</option>
-            <option :value="2">2 轮</option>
-            <option :value="3">3 轮</option>
+            <option v-for="n in 10" :key="n" :value="n">{{ n }} 轮</option>
           </select>
           <button class="wl-btn wl-btn--primary" :disabled="busy" @click="onCreate">
             <Icon name="plus" :size="16" />新建房间
@@ -676,6 +791,115 @@ function chatTextOf(msg: DrawChatMsg): string {
             </div>
           </article>
         </div>
+      </div>
+    </template>
+
+    <!-- ======================================================= 历史对局列表 -->
+    <template v-else-if="view === 'history'">
+      <header class="bar">
+        <button class="wl-icon-btn" title="返回大厅" @click="view = 'lobby'">
+          <Icon name="chevron-left" :size="16" />
+        </button>
+        <div class="bar-title"><Icon name="clock" :size="18" />历史对局</div>
+        <div class="spacer" />
+        <button class="wl-icon-btn" :disabled="historyBusy" title="刷新" @click="openHistory">
+          <Icon name="refresh" :size="16" :class="{ spin: historyBusy }" />
+        </button>
+      </header>
+
+      <div class="body wl-scroll">
+        <div v-if="historyError" class="wl-hint">{{ historyError }}</div>
+        <div v-else-if="!historyBusy && historyItems.length === 0" class="wl-empty">
+          <Icon name="clock" :size="32" />
+          <span>还没有打完的对局</span>
+        </div>
+        <div v-else class="room-list">
+          <article v-for="item in historyItems" :key="item.roomId" class="room-card room-card--clickable" @click="openHistoryDetail(item.roomId)">
+            <div class="room-main">
+              <div class="room-head">
+                <span class="room-title">{{ item.title || '你画我猜' }}</span>
+                <span class="wl-badge">{{ item.roundCount }} 回合</span>
+                <span class="history-time">{{ formatTime(item.finishedAt) }}</span>
+              </div>
+              <div class="history-ranking">
+                <span v-for="(p, i) in item.ranking.slice(0, 5)" :key="p.userId" class="rank-chip">
+                  <span class="rank-no">{{ i + 1 }}</span>{{ p.name }}
+                  <strong>{{ p.score }}</strong>
+                </span>
+              </div>
+            </div>
+            <Icon name="chevron-right" :size="16" class="room-arrow" />
+          </article>
+        </div>
+      </div>
+    </template>
+
+    <!-- ======================================================= 历史对局详情 -->
+    <template v-else-if="view === 'historyDetail'">
+      <header class="bar">
+        <button class="wl-icon-btn" title="返回列表" @click="view = 'history'">
+          <Icon name="chevron-left" :size="16" />
+        </button>
+        <div class="bar-title">
+          <Icon name="brush" :size="18" />
+          <span class="selectable">{{ historyDetail?.title || '历史对局' }}</span>
+        </div>
+        <span v-if="historyDetail" class="history-time">{{ formatTime(historyDetail.finishedAt) }}</span>
+        <div class="spacer" />
+      </header>
+
+      <div v-if="!historyDetail" class="wl-empty">
+        <span v-if="historyBusy" class="wl-spinner" />
+        <span>{{ historyError || '正在加载…' }}</span>
+      </div>
+
+      <div v-else class="history-detail">
+        <!-- 左：回合列表 -->
+        <aside class="turn-list wl-scroll">
+          <div
+            v-for="round in historyDetail.rounds"
+            :key="round.turnNo"
+            class="turn-item"
+            :class="{ 'turn-item--on': selectedTurn?.turnNo === round.turnNo }"
+            @click="selectTurn(round)"
+          >
+            <span class="turn-no">{{ round.turnNo }}</span>
+            <div class="turn-main">
+              <span class="turn-drawer">{{ round.drawerName }}</span>
+              <span class="turn-word">「{{ round.word }}」</span>
+            </div>
+            <span class="turn-round">第 {{ round.roundNo }} 轮</span>
+          </div>
+          <div v-if="historyDetail.rounds.length === 0" class="wl-empty">
+            <span>这一局没有留下回合记录</span>
+          </div>
+        </aside>
+
+        <!-- 右：画布 + 该回合结果 -->
+        <section class="history-board">
+          <div class="history-board-head">
+            <span v-if="selectedTurn" class="word-display">
+              {{ selectedTurn.drawerName }} 画的是：<strong>{{ selectedTurn.word }}</strong>
+            </span>
+            <span v-else class="hint-text">选一个回合看画</span>
+          </div>
+          <div class="canvas-box canvas-box--readonly">
+            <canvas ref="historyCanvasEl" class="board-canvas" />
+            <div v-if="!selectedTurn" class="canvas-veil"><span>还没有选回合</span></div>
+          </div>
+          <div v-if="selectedTurn" class="history-results">
+            <span
+              v-for="r in selectedTurn.results"
+              :key="r.userId"
+              class="result-chip"
+              :class="{ 'result-chip--guessed': r.guessed }"
+            >
+              <Icon :name="r.guessed ? 'check' : 'close'" :size="12" />
+              {{ r.name }}
+              <strong>{{ r.score }}</strong>
+            </span>
+          </div>
+        </section>
       </div>
     </template>
 
@@ -1273,6 +1497,173 @@ function chatTextOf(msg: DrawChatMsg): string {
 .chat-input-row .wl-input {
   flex: 1;
   min-width: 0;
+}
+
+/* ---------------- 历史对局 */
+
+.room-card--clickable {
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.room-card--clickable:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.room-arrow {
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.history-time {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.history-ranking {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rank-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.rank-chip strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.rank-chip .rank-no {
+  width: auto;
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.history-detail {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+
+.turn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  overflow-y: auto;
+}
+
+.turn-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.turn-item:hover {
+  background: var(--surface-2);
+}
+
+.turn-item--on {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.turn-no {
+  width: 18px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.turn-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.turn-drawer {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-word {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.turn-round {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.history-board {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 0;
+}
+
+.history-board-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+}
+
+.canvas-box--readonly {
+  background: #ffffff;
+}
+
+.history-results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.result-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.result-chip--guessed {
+  background: rgba(48, 164, 108, 0.14);
+  color: #1f7a4d;
+}
+
+.result-chip strong {
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------------- 等人 / 结算 */

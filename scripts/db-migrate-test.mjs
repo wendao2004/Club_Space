@@ -92,10 +92,10 @@ async function main() {
     const rows = db.prepare('SELECT version FROM schema_version').all()
     assert(rows.length === 1, 'schema_version 只有一行（并发写没有写出重复行）', `${rows.length} 行`)
 
-    // 12 = 审计表加触发器。这个数字每次加迁移都会变，跟着改就行 ——
+    // 13 = 你画我猜对局存档。这个数字每次加迁移都会变，跟着改就行 ——
     // 它的作用不是"钉死版本号"，而是防止"迁移跑了一半就提交"。
     const version = rows[0]?.version
-    assert(version === 12, '版本号是当前最新（v12）', `version=${version}`)
+    assert(version === 13, '版本号是当前最新（v13）', `version=${version}`)
 
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -116,6 +116,13 @@ async function main() {
       '审计表的两条触发器已建（v12 的内容真的执行了）',
       triggers.join(', '),
     )
+
+    // v13 的内容同样要验：只改版本号断言的话，"迁移写漏了"会静默通过
+    assert(
+      tables.includes('draw_rounds'),
+      '你画我猜的存档表已建（v13 的内容真的执行了）',
+      tables.join(', '),
+    )
   } finally {
     db.close()
   }
@@ -127,7 +134,7 @@ async function main() {
   const db2 = new DatabaseSync(join(dataDir, 'app.sqlite'))
   try {
     const v = db2.prepare('SELECT version FROM schema_version').get()?.version
-    assert(v === 12, '版本号没有被重复执行改坏', `version=${v}`)
+    assert(v === 13, '版本号没有被重复执行改坏', `version=${v}`)
   } finally {
     db2.close()
   }

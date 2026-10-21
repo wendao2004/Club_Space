@@ -467,6 +467,88 @@ console.log('\n【实时同步与回合清屏】')
   await bob(`/api/games/draw/rooms/${room3.id}/leave`, 'POST', {})
 }
 
+console.log('\n【历史对局存档】')
+
+{
+  // 前面那局已经打完了（rounds=1，3 个人），应该留下了每回合的记录
+  const history = await alice('/api/games/draw/history', 'GET')
+  assert(history.status === 200, '历史列表可访问')
+  const items = history.body?.rooms ?? []
+  const mine = items.find((r) => r.roomId === room.id)
+  assert(!!mine, '刚打完的那局出现在历史里', `${items.length} 局`)
+  if (mine) {
+    assert(mine.roundCount >= 1, '历史里带回合数', `${mine.roundCount} 回合`)
+    assert(Array.isArray(mine.ranking) && mine.ranking.length === 3, '历史里带排名')
+    assert(typeof mine.finishedAt === 'number' && mine.finishedAt > 0, '历史里带结束时间')
+  }
+
+  const detail = await alice(`/api/games/draw/history/${room.id}`, 'GET')
+  assert(detail.status === 200, '历史详情可访问')
+  const rounds = detail.body?.detail?.rounds ?? []
+  assert(rounds.length >= 1, '详情里有回合记录', `${rounds.length} 个回合`)
+  if (rounds.length > 0) {
+    const first = rounds[0]
+    assert(typeof first.word === 'string' && first.word.length > 0, '每个回合记着画的是什么词', first.word)
+    assert(typeof first.drawerName === 'string' && first.drawerName.length > 0, '每个回合记着是谁画的', first.drawerName)
+    assert(Array.isArray(first.strokes), '每个回合带笔画数据')
+    assert(Array.isArray(first.results), '每个回合带结果')
+  }
+
+  // 上面那局画完被 clear 过（画笔用例的收尾），画布本来就空 —— 所以"存下了画"
+  // 用一局干净的来验：真画一笔、真超时，再回头看存档里有没有那一笔。
+  const archiveRoom = await alice('/api/games/draw/rooms', 'POST', { title: '存档验证局', rounds: 1 })
+  const archiveId = archiveRoom.body?.room?.id
+  assert(!!archiveId, '开了存档验证局')
+  await bob(`/api/games/draw/rooms/${archiveId}/join`, 'POST', {})
+  await alice(`/api/games/draw/rooms/${archiveId}/start`, 'POST', {})
+  const archiveView = await currentWordOf(alice, archiveId)
+  const archiveWord = archiveView?.view?.wordChoices?.[0]
+  await alice(`/api/games/draw/rooms/${archiveId}/word`, 'POST', { word: archiveWord })
+  await alice(`/api/games/draw/rooms/${archiveId}/strokes`, 'POST', {
+    op: 'begin',
+    strokeId: 'arch1',
+    points: [
+      { x: 100, y: 100 },
+      { x: 200, y: 200 },
+      { x: 300, y: 150 },
+    ],
+    color: '#123456',
+    width: 6,
+    tool: 'pen',
+  })
+  // 绘画超时 → beginReveal → 存档
+  hurryPhaseEnds(archiveId, 300)
+  await sleep(3200)
+
+  const archived = await alice(`/api/games/draw/history/${archiveId}`, 'GET')
+  const archivedRounds = archived.body?.detail?.rounds ?? []
+  assert(archivedRounds.length === 1, '验证局存下了 1 个回合', `${archivedRounds.length} 个`)
+  if (archivedRounds.length > 0) {
+    const r0 = archivedRounds[0]
+    eq(r0.word, archiveWord, '存档记着当时的词')
+    eq(r0.drawerName, '画师甲', '存档记着画家是谁')
+    assert(r0.strokes.length >= 1, '存档里存下了那一笔', `${r0.strokes.length} 笔`)
+    if (r0.strokes.length > 0) {
+      assert(r0.strokes[0].points.length >= 3, '笔画点是完整的', `${r0.strokes[0].points.length} 个点`)
+      eq(r0.strokes[0].color, '#123456', '颜色也存下来了')
+    }
+    assert(Array.isArray(r0.results) && r0.results.length === 1, '存档里有另一个人的结果')
+  }
+
+  // 回合数上限放宽到 10
+  const big = await alice('/api/games/draw/rooms', 'POST', { title: '十轮局', rounds: 10 })
+  eq(big.body?.room?.view?.totalRounds, 10, '轮数可以开到 10')
+  const tooBig = await alice('/api/games/draw/rooms', 'POST', { title: '超限局', rounds: 99 })
+  eq(tooBig.body?.room?.view?.totalRounds, 10, '超过 10 轮被收敛到 10')
+  await alice(`/api/games/draw/rooms/${big.body?.room?.id}/leave`, 'POST', {})
+  await alice(`/api/games/draw/rooms/${tooBig.body?.room?.id}/leave`, 'POST', {})
+
+  // 未登录看历史
+  const anon = makeClient()
+  const anonRes = await anon('/api/games/draw/history', 'GET')
+  assert(anonRes.status === 401, '未登录不能看历史')
+}
+
 console.log('\n【退房与解散】')
 
 {

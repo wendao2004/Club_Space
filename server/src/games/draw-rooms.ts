@@ -121,6 +121,7 @@ function emptyState(): DrawState {
     drawerIndex: 0,
     round: 1,
     totalRounds: 2,
+    turnNo: 0,
     word: null,
     wordChoices: [],
     revealed: [],
@@ -217,7 +218,9 @@ export function getDrawRoom(roomId: string, viewerId: string, onlineIds: Set<str
 export function createDrawRoom(input: { title: string; creatorId: string; creatorName: string; rounds?: number }): DrawRoomView {
   const title = input.title.trim() || '一局你画我猜'
   if (title.length > 40) throw new HttpError(400, '房间名过长')
-  const rounds = Math.min(Math.max(input.rounds ?? 2, 1), 5)
+  // 轮数上限 10：再多一局就是两三个小时，社团活动撑不住；
+  // 下限 1（6 个人画一轮就已经 10 分钟了，不强制多轮）。
+  const rounds = Math.min(Math.max(Math.round(input.rounds ?? 2), 1), 10)
 
   const id = newId('room')
   const ts = now()
@@ -450,7 +453,11 @@ export function guessDrawWord(
     const outcome = applyGuess(state, userId, trimmed, now())
     if (outcome.correct) {
       appendChat(roomId, { userId, name: userName, text: trimmed, at: now(), correct: true })
-      if (outcome.allGuessed) beginReveal(state, now())
+      if (outcome.allGuessed) {
+        beginReveal(state, now())
+        // 全员猜对即结束绘画：这一回合的画与结果在这里定稿存档
+        archiveRound(roomId, state)
+      }
       persist(roomId, state)
       return { room: getDrawRoom(roomId, userId, onlineIds), correct: true, close: false, allGuessed: outcome.allGuessed }
     }
@@ -514,6 +521,8 @@ export function processDrawTimeouts(nowTs: number): DrawTimeoutEvent[] {
       }
       if (nowTs >= state.phaseEndsAt) {
         beginReveal(state, nowTs)
+        // 绘画超时：这一回合定稿存档（画到哪儿算哪儿 —— 半张图也是记录）
+        archiveRound(row.id, state)
         changed = true
       }
     } else if (state.phase === 'reveal' && nowTs >= state.phaseEndsAt) {
@@ -537,4 +546,219 @@ export function processDrawTimeouts(nowTs: number): DrawTimeoutEvent[] {
 /** 房间销毁（删除）时把内存一起带走，防止 Map 缓慢膨胀。 */
 export function disposeDrawRoom(roomId: string): void {
   dropVolatile(roomId)
+}
+
+// ---------------------------------------------------------------- 对局存档
+
+/**
+ * 单回合存档的点数上限。
+ *
+ * 80 秒的密集涂鸦能上万点，一局十轮就是几十 MB —— 存档的价值在"回头看画了
+ * 什么"，前 6000 个点已经能看出整张图（超出的部分通常是最后反复描的细节）。
+ * 截断而不是拒绝存档：宁可图不完整，也不要因为"画得太满"丢了整回合记录。
+ */
+const MAX_ARCHIVE_POINTS = 6000
+
+/**
+ * 把一个回合存档到 draw_rounds。
+ *
+ * 时机是**绘画结束时**（beginReveal 之后）：那一瞬间笔画完整、词已知、
+ * 谁猜对也已经定下来 —— 之后再调只会覆盖同一份（id = room:turnNo，幂等）。
+ *
+ * 画笔只在这里落库一次，回合内的增量永远只走内存广播（见文件头的说明）。
+ */
+function archiveRound(roomId: string, state: DrawState): void {
+  // 画家中途退房时词被清空（回合作废）—— 没画成，不值得存
+  if (!state.word) return
+  const drawer = state.players[state.drawerIndex]
+  if (!drawer) return
+
+  // 按"点"截断，并把同一笔的增量合并成一条（clear/undo 折叠掉）。
+  // 存的是"最终这张图"，不是一串操作日志 —— 复盘时不该还要重放撤销语义；
+  // 合并另一个好处是体积：同一笔的 N 条增量变成一个数组，少 N 份元数据。
+  let budget = MAX_ARCHIVE_POINTS
+  const byStroke = new Map<string, DrawStrokeOp>()
+  const order: string[] = []
+  for (const op of getDrawCanvas(roomId)) {
+    if (op.op === 'clear') {
+      byStroke.clear()
+      order.length = 0
+      continue
+    }
+    if (op.op === 'undo') {
+      const last = order.pop()
+      if (last) byStroke.delete(last)
+      continue
+    }
+    if (budget <= 0) continue
+    const points = op.points.slice(0, budget)
+    budget -= points.length
+    if (points.length === 0) continue
+
+    const existing = byStroke.get(op.strokeId)
+    if (existing) {
+      existing.points.push(...points)
+    } else {
+      byStroke.set(op.strokeId, { ...op, points: [...points] })
+      order.push(op.strokeId)
+    }
+  }
+  const strokes = order.map((id) => byStroke.get(id)!).filter(Boolean)
+
+  const results = state.players
+    .filter((_, i) => i !== state.drawerIndex)
+    .map((p) => ({ userId: p.userId, name: p.name, guessed: p.guessed, score: p.score }))
+
+  const id = `${roomId}:${state.turnNo}`
+  getDb()
+    .prepare(
+      `INSERT OR REPLACE INTO draw_rounds
+         (id, room_id, round_no, turn_no, drawer_id, drawer_name, word, strokes, results, started_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      roomId,
+      state.round,
+      state.turnNo,
+      drawer.userId,
+      drawer.name,
+      state.word,
+      JSON.stringify(strokes),
+      JSON.stringify(results),
+      state.drawingStartedAt,
+      now(),
+    )
+}
+
+export interface DrawHistoryItem {
+  roomId: string
+  title: string
+  finishedAt: number
+  /** 排名（game_rooms.result 里存的）。 */
+  ranking: Array<{ userId: string; name: string; score: number }>
+  roundCount: number
+}
+
+/**
+ * 历史对局列表。
+ *
+ * 权限取舍：**登录用户都能看**。这是社团内部的娱乐记录，不是私密内容；
+ * 而"只能看自己参加过的"会让"我们上礼拜那局"这种最常见的问法问不出结果。
+ */
+export function listDrawHistory(limit = 30): DrawHistoryItem[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT r.id, r.title, r.result, r.finished_at,
+              (SELECT COUNT(*) FROM draw_rounds d WHERE d.room_id = r.id) AS round_count
+         FROM game_rooms r
+        WHERE r.kind = 'draw' AND r.status = 'finished'
+        ORDER BY COALESCE(r.finished_at, r.updated_at) DESC
+        LIMIT ?`,
+    )
+    .all(limit) as Array<{
+    id: string
+    title: string
+    result: string | null
+    finished_at: number | null
+    round_count: number
+  }>
+
+  return rows.map((row) => {
+    let ranking: Array<{ userId: string; name: string; score: number }> = []
+    try {
+      ranking = (JSON.parse(row.result ?? '{}') as { ranking?: typeof ranking }).ranking ?? []
+    } catch {
+      ranking = []
+    }
+    return {
+      roomId: row.id,
+      title: row.title,
+      finishedAt: row.finished_at ?? 0,
+      ranking,
+      roundCount: row.round_count,
+    }
+  })
+}
+
+export interface DrawHistoryRound {
+  turnNo: number
+  roundNo: number
+  drawerId: string
+  drawerName: string
+  word: string
+  /** 存档的笔画（前端直接重放）。 */
+  strokes: DrawStrokeOp[]
+  results: Array<{ userId: string; name: string; guessed: boolean; score: number }>
+  endedAt: number
+}
+
+export interface DrawHistoryDetail {
+  roomId: string
+  title: string
+  finishedAt: number
+  ranking: Array<{ userId: string; name: string; score: number }>
+  rounds: DrawHistoryRound[]
+}
+
+/** 某一局的全部回合（含每回合的画）。 */
+export function getDrawHistoryDetail(roomId: string): DrawHistoryDetail {
+  const room = getDb()
+    .prepare(`SELECT id, title, result, finished_at FROM game_rooms WHERE id = ? AND kind = 'draw'`)
+    .get(roomId) as { id: string; title: string; result: string | null; finished_at: number | null } | undefined
+  if (!room) throw new HttpError(404, '这一局不存在')
+
+  const rows = getDb()
+    .prepare(
+      `SELECT turn_no, round_no, drawer_id, drawer_name, word, strokes, results, ended_at
+         FROM draw_rounds WHERE room_id = ? ORDER BY turn_no ASC`,
+    )
+    .all(roomId) as Array<{
+    turn_no: number
+    round_no: number
+    drawer_id: string
+    drawer_name: string
+    word: string
+    strokes: string
+    results: string
+    ended_at: number
+  }>
+
+  let ranking: Array<{ userId: string; name: string; score: number }> = []
+  try {
+    ranking = (JSON.parse(room.result ?? '{}') as { ranking?: typeof ranking }).ranking ?? []
+  } catch {
+    ranking = []
+  }
+
+  return {
+    roomId: room.id,
+    title: room.title,
+    finishedAt: room.finished_at ?? 0,
+    ranking,
+    rounds: rows.map((row) => {
+      let strokes: DrawStrokeOp[] = []
+      let results: DrawHistoryRound['results'] = []
+      try {
+        strokes = JSON.parse(row.strokes) as DrawStrokeOp[]
+      } catch {
+        strokes = []
+      }
+      try {
+        results = JSON.parse(row.results) as DrawHistoryRound['results']
+      } catch {
+        results = []
+      }
+      return {
+        turnNo: row.turn_no,
+        roundNo: row.round_no,
+        drawerId: row.drawer_id,
+        drawerName: row.drawer_name,
+        word: row.word,
+        strokes,
+        results,
+        endedAt: row.ended_at,
+      }
+    }),
+  }
 }
