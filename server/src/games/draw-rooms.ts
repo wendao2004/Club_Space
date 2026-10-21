@@ -265,6 +265,19 @@ export function leaveDrawRoom(roomId: string, userId: string, onlineIds: Set<str
   state.players = state.players.filter((p) => p.userId !== userId)
 
   if (state.players.length === 0) {
+    // 人走光了。
+    //
+    // ⚠️ **打完的局不删行**：历史对局（listDrawHistory）是从 game_rooms 读的，
+    // 删了行就等于把这一局从历史里抹掉 —— 而 draw_rounds 里的存档还在，
+    // 变成没有任何入口能查到的孤儿。一局打完就不再是"房间"而是"一条记录"，
+    // 保留多少条交给 pruneDrawHistory（默认最近 200 局）。
+    //
+    // 没打完就散伙的局照旧删行：它没有存档，也没有记录价值。
+    if (row.status === 'finished') {
+      persist(roomId, state)
+      disposeDrawRoom(roomId)
+      throw new HttpError(404, '已退出房间（这一局已存入历史）')
+    }
     // 人走光了：删行，房间从列表消失（斗地主/狼人杀同款处理）
     getDb().prepare('DELETE FROM game_rooms WHERE id = ?').run(roomId)
     disposeDrawRoom(roomId)
@@ -641,12 +654,45 @@ export interface DrawHistoryItem {
 }
 
 /**
+ * 历史对局的保留条数（默认最近 200 局）。
+ *
+ * 为什么是"按局数"而不是"按天数"：这个社团一局可能一周一次，也可能一天十局。
+ * 按天数存，闲的时候会把仅有的几局删掉；按局数存，"我们上礼拜那局"永远在最近
+ * 200 条里。每局存档上限 6000 点/回合，200 局是几百 MB 量级 —— 也还在可接受范围。
+ */
+export const DRAW_HISTORY_KEEP = Math.max(Number(process.env.WL_DRAW_HISTORY_KEEP ?? 200) || 200, 1)
+
+/**
+ * 修剪历史：只留最近 keep 局，顺手清掉"房间早被删掉"的孤儿存档。
+ *
+ * 触发点放在**打开历史列表时**，而不是定时器：这是唯一的写入方（没有别的入口会
+ * 产生历史），一次 GET 的代价是一条带 LIMIT/OFFSET 的 DELETE；而定时器要在
+ * 每个 2 秒的 tick 里判断"今天修剪过没有"，反而更绕。
+ *
+ * 顺序很重要：先删存档（子表），再删房间。反过来的话，删完房间就找不到
+ * "哪些存档属于被删的那几局"了 —— 表上没有外键。
+ */
+export function pruneDrawHistory(keep = DRAW_HISTORY_KEEP): { rooms: number; rounds: number } {
+  const db = getDb()
+  const stale = `SELECT id FROM game_rooms
+                  WHERE kind = 'draw' AND status = 'finished'
+                  ORDER BY COALESCE(finished_at, updated_at) DESC
+                  LIMIT -1 OFFSET ?`
+  const rounds = db.prepare(`DELETE FROM draw_rounds WHERE room_id IN (${stale})`).run(keep)
+  const rooms = db.prepare(`DELETE FROM game_rooms WHERE id IN (${stale})`).run(keep)
+  // 兜底：旧版本里"打完就退房"留下的孤儿存档（房间行已经没了）
+  db.prepare('DELETE FROM draw_rounds WHERE room_id NOT IN (SELECT id FROM game_rooms)').run()
+  return { rooms: Number(rooms.changes ?? 0), rounds: Number(rounds.changes ?? 0) }
+}
+
+/**
  * 历史对局列表。
  *
  * 权限取舍：**登录用户都能看**。这是社团内部的娱乐记录，不是私密内容；
  * 而"只能看自己参加过的"会让"我们上礼拜那局"这种最常见的问法问不出结果。
  */
 export function listDrawHistory(limit = 30): DrawHistoryItem[] {
+  pruneDrawHistory()
   const rows = getDb()
     .prepare(
       `SELECT r.id, r.title, r.result, r.finished_at,

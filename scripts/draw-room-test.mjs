@@ -139,6 +139,16 @@ function hurryPhaseEnds(roomId, msFromNow) {
   }
 }
 
+function countRows(sql) {
+  if (!DATA_DIR) return -1
+  const db = new DatabaseSync(join(DATA_DIR, 'app.sqlite'))
+  try {
+    return db.prepare(sql).get().n
+  } finally {
+    db.close()
+  }
+}
+
 async function currentWordOf(client, roomId) {
   const res = await client(`/api/games/draw/rooms/${roomId}`, 'GET')
   return res.body?.room
@@ -494,6 +504,26 @@ console.log('\n【历史对局存档】')
     assert(Array.isArray(first.results), '每个回合带结果')
   }
 
+  // ---- 打完就退：这一局不该从历史里消失 ----
+  //
+  // 真实用法是"打完 → 各自点返回大厅 → 关掉页面"，最后一个人退出会走到
+  // leaveDrawRoom 里"人走光了"那个分支。那里过去是无条件删 game_rooms 行，
+  // 而历史列表正是从这张表读的 —— 实测一退房，刚打完的那局就从历史里消失，
+  // 存档还躺在 draw_rounds 里成为孤儿。下面几条钉住的就是这个场景。
+  await alice(`/api/games/draw/rooms/${room.id}/leave`, 'POST', {})
+  await bob(`/api/games/draw/rooms/${room.id}/leave`, 'POST', {})
+  const lastLeave = await carol(`/api/games/draw/rooms/${room.id}/leave`, 'POST', {})
+  assert(lastLeave.status === 404, '最后一人退出：按"房间结束"约定返回 404', `${lastLeave.status}`)
+
+  const afterLeave = await alice('/api/games/draw/history', 'GET')
+  assert(
+    (afterLeave.body?.rooms ?? []).some((r) => r.roomId === room.id),
+    '⚠️ 全员退房后，这一局仍在历史里',
+  )
+  const afterDetail = await alice(`/api/games/draw/history/${room.id}`, 'GET')
+  assert(afterDetail.status === 200, '退房后历史详情仍打得开', `${afterDetail.status}`)
+  assert((afterDetail.body?.detail?.rounds ?? []).length >= 1, '退房后回合存档还在')
+
   // 上面那局画完被 clear 过（画笔用例的收尾），画布本来就空 —— 所以"存下了画"
   // 用一局干净的来验：真画一笔、真超时，再回头看存档里有没有那一笔。
   const archiveRoom = await alice('/api/games/draw/rooms', 'POST', { title: '存档验证局', rounds: 1 })
@@ -547,6 +577,61 @@ console.log('\n【历史对局存档】')
   const anon = makeClient()
   const anonRes = await anon('/api/games/draw/history', 'GET')
   assert(anonRes.status === 401, '未登录不能看历史')
+}
+
+console.log('\n【历史保留策略】')
+
+{
+  const FINISHED = `SELECT COUNT(*) AS n FROM game_rooms WHERE kind='draw' AND status='finished'`
+  const REAL_FINISHED = `SELECT COUNT(*) AS n FROM game_rooms WHERE kind='draw' AND status='finished' AND id NOT LIKE 'room_old_%'`
+  const FAKE_FINISHED = `SELECT COUNT(*) AS n FROM game_rooms WHERE kind='draw' AND status='finished' AND id LIKE 'room_old_%'`
+
+  // 造 205 局"90 天前"的完成局（每局一条存档），把总量顶过 200 这条线。
+  // 直接写库是刻意的：真打 205 局要几个小时，而这里要验的是"修剪"这件事，
+  // 不是"游戏怎么结束的"（那部分上面已经验过了）。
+  const base = Date.now() - 90 * 24 * 3600 * 1000
+  const db = new DatabaseSync(join(DATA_DIR, 'app.sqlite'))
+  const insRoom = db.prepare(
+    `INSERT INTO game_rooms (id, kind, title, status, created_by, board, turn, moves, result,
+                             created_at, updated_at, finished_at, state)
+     VALUES (?, 'draw', ?, 'finished', ?, '', 'red', '[]', ?, ?, ?, ?, '{}')`,
+  )
+  const insRound = db.prepare(
+    `INSERT INTO draw_rounds (id, room_id, round_no, turn_no, drawer_id, drawer_name, word,
+                              strokes, results, started_at, ended_at)
+     VALUES (?, ?, 1, 1, ?, '画师甲', '猫', '[]', '[]', ?, ?)`,
+  )
+  for (let i = 0; i < 205; i++) {
+    const at = base + i * 1000
+    insRoom.run(`room_old_${i}`, `老局 ${i}`, aliceUser.id, JSON.stringify({ ranking: [] }), at, at, at)
+    insRound.run(`round_old_${i}`, `room_old_${i}`, aliceUser.id, at, at)
+  }
+  db.close()
+
+  const before = countRows(FINISHED)
+  assert(before > 200, '造出多于 200 局的局面', `${before} 局`)
+
+  // 打开历史列表 = 修剪（见 pruneDrawHistory 的注释：唯一的写入方就是这里）
+  const hist = await alice('/api/games/draw/history', 'GET')
+  assert(hist.status === 200, '打开历史成功（顺带修剪）')
+
+  const after = countRows(FINISHED)
+  const real = countRows(REAL_FINISHED)
+  const fakeKept = countRows(FAKE_FINISHED)
+  eq(after, 200, '历史只保留最近 200 局')
+  eq(fakeKept, 200 - real, '老局按时间从旧到新清，留最新的')
+  eq(countRows(`SELECT COUNT(*) AS n FROM game_rooms WHERE id = 'room_old_0'`), 0, '最老的那局被清掉')
+  eq(countRows(`SELECT COUNT(*) AS n FROM game_rooms WHERE id = 'room_old_204'`), 1, '最新的那局还在')
+  eq(
+    countRows(`SELECT COUNT(*) AS n FROM draw_rounds WHERE room_id LIKE 'room_old_%'`),
+    200 - real,
+    '存档跟着房间一起清',
+  )
+  eq(
+    countRows(`SELECT COUNT(*) AS n FROM draw_rounds WHERE room_id NOT IN (SELECT id FROM game_rooms)`),
+    0,
+    '库里的孤儿存档为 0',
+  )
 }
 
 console.log('\n【退房与解散】')
