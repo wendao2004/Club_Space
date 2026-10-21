@@ -715,6 +715,34 @@ function migrate(database: DatabaseSync): void {
         CREATE INDEX ix_draw_rounds_room ON draw_rounds(room_id, turn_no);
       `)
     },
+
+    // ---- v14: 留言板 ----
+    (d) => {
+      d.exec(`
+        -- 用户要一块"大家都能留言吐槽、主要用来收集 bug"的地方。
+        --
+        -- 为什么不复用聊天：聊天是**会话**结构（一对一会拉群），消息会被
+        -- 会话的成员边界切开 —— 而留言板要的是"谁都能看见同一个列表"。
+        -- 也不复用 ledger/notes：那些各有各的语义，硬塞会把两件事搅在一起。
+        --
+        -- 一行一条留言，不做楼层/回复树：留言板的用途是"收集"，不是讨论；
+        -- 管理员的"已处理"标记加一句说明就够了（resolution）。
+        CREATE TABLE board_posts (
+          id          TEXT PRIMARY KEY,
+          author_id   TEXT NOT NULL REFERENCES users(id),
+          -- bug / idea / complaint —— 主要是 bug，另外两类是顺手的
+          kind        TEXT NOT NULL DEFAULT 'bug',
+          body        TEXT NOT NULL,
+          -- 管理员标记"已解决"时填；不删留言，只标状态（留言本身就是工单）
+          resolved_at INTEGER,
+          resolved_by TEXT REFERENCES users(id),
+          resolution  TEXT,
+          created_at  INTEGER NOT NULL
+        );
+        CREATE INDEX ix_board_posts_created ON board_posts(created_at DESC);
+        CREATE INDEX ix_board_posts_open ON board_posts(created_at DESC) WHERE resolved_at IS NULL;
+      `)
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

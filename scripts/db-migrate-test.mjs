@@ -15,13 +15,26 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
+
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+/**
+ * 从 db.ts 的迁移数组里数出最新版本号。
+ *
+ * 这个数字以前是硬编码的（v12、v13…），每加一次迁移就要记得改这里，
+ * 忘了就是"测试挂了但代码没问题"—— 加迁移的人还得先去修测试才能看到
+ * 真正的结果。迁移注释已经写成 `// ---- vNN: 说明` 的固定格式，
+ * 直接按这个格式抓最大值即可，从此不用手工同步。
+ */
+const DB_SOURCE = readFileSync(join(ROOT, 'server/src/db.ts'), 'utf8')
+const MIGRATION_VERSIONS = [...DB_SOURCE.matchAll(/\/\/ ---- v(\d+):/g)].map((m) => Number(m[1]))
+const LATEST_VERSION = Math.max(...MIGRATION_VERSIONS)
 const DB_MODULE = pathToFileURL(join(ROOT, 'server', 'src', 'db.ts')).href
 
 let passed = 0
@@ -92,10 +105,10 @@ async function main() {
     const rows = db.prepare('SELECT version FROM schema_version').all()
     assert(rows.length === 1, 'schema_version 只有一行（并发写没有写出重复行）', `${rows.length} 行`)
 
-    // 13 = 你画我猜对局存档。这个数字每次加迁移都会变，跟着改就行 ——
-    // 它的作用不是"钉死版本号"，而是防止"迁移跑了一半就提交"。
+    // 版本号从 db.ts 的迁移注释里数出来（见文件头的 MIGRATION_VERSIONS）。
+    // 断言的作用不是"钉死版本号"，而是防止"迁移跑了一半就提交"。
     const version = rows[0]?.version
-    assert(version === 13, '版本号是当前最新（v13）', `version=${version}`)
+    assert(version === LATEST_VERSION, `版本号是当前最新（v${LATEST_VERSION}）`, `version=${version}`)
 
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -117,10 +130,16 @@ async function main() {
       triggers.join(', '),
     )
 
-    // v13 的内容同样要验：只改版本号断言的话，"迁移写漏了"会静默通过
+    // 内容层面的验证不能省：只比版本号的话，"迁移写漏了"会静默通过。
+    // 新增迁移时在这里补一条表/列存在性断言。
     assert(
       tables.includes('draw_rounds'),
       '你画我猜的存档表已建（v13 的内容真的执行了）',
+      tables.join(', '),
+    )
+    assert(
+      tables.includes('board_posts'),
+      '留言板表已建（v14 的内容真的执行了）',
       tables.join(', '),
     )
   } finally {
@@ -134,7 +153,7 @@ async function main() {
   const db2 = new DatabaseSync(join(dataDir, 'app.sqlite'))
   try {
     const v = db2.prepare('SELECT version FROM schema_version').get()?.version
-    assert(v === 13, '版本号没有被重复执行改坏', `version=${v}`)
+    assert(v === LATEST_VERSION, '版本号没有被重复执行改坏', `version=${v}（期望 ${LATEST_VERSION}）`)
   } finally {
     db2.close()
   }

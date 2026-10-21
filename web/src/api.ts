@@ -843,6 +843,31 @@ export const api = {
     /** 某一局的全部回合（每个回合都带那一张画）。 */
     historyDetail: (id: string) => request<{ detail: DrawHistoryDetail }>(`/api/games/draw/history/${id}`),
   },
+
+  // ---------------------------------------------------------------- 留言板
+
+  board: {
+    /** 留言列表（全站一份，倒序）。openOnly 只看未处理的。 */
+    posts: (options: { openOnly?: boolean; kind?: BoardKind; limit?: number } = {}) => {
+      const q = new URLSearchParams()
+      if (options.openOnly) q.set('open', '1')
+      if (options.kind) q.set('kind', options.kind)
+      if (options.limit) q.set('limit', String(options.limit))
+      const qs = q.toString()
+      return request<{ posts: BoardPost[] }>(`/api/board/posts${qs ? `?${qs}` : ''}`)
+    },
+
+    create: (kind: BoardKind, body: string) =>
+      request<{ post: BoardPost }>('/api/board/posts', { json: { kind, body } }),
+
+    /** 标记已解决 / 撤销（仅管理员）。resolution 是可选的处理说明。 */
+    resolve: (id: string, resolved: boolean, resolution?: string | null) =>
+      request<{ post: BoardPost }>(`/api/board/posts/${id}/resolve`, {
+        json: { resolved, resolution: resolution ?? null },
+      }),
+
+    remove: (id: string) => request<{ ok: true }>(`/api/board/posts/${id}`, { method: 'DELETE' }),
+  },
 }
 
 // ---------------------------------------------------------------- 分片上传
@@ -1712,6 +1737,25 @@ export interface DrawHistoryDetail {
   finishedAt: number
   ranking: Array<{ userId: string; name: string; score: number }>
   rounds: DrawHistoryRound[]
+}
+
+// ---------------------------------------------------------------- 留言板
+
+export type BoardKind = 'bug' | 'idea' | 'complaint'
+
+export interface BoardPost {
+  id: string
+  kind: BoardKind
+  body: string
+  authorId: string
+  authorName: string
+  resolvedAt: number | null
+  resolvedBy: string | null
+  resolvedByName: string | null
+  resolution: string | null
+  createdAt: number
+  /** 是不是我发的（前端据此显示「撤回」）。 */
+  mine: boolean
 }
 
 export interface DdzRoom {

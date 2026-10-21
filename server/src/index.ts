@@ -111,6 +111,14 @@ import {
 } from './games/rooms.ts'
 import { shutdownBotRunner } from './games/bot-runner.ts'
 import {
+  BOARD_KINDS,
+  createBoardPost,
+  deleteBoardPost,
+  listBoardPosts,
+  resolveBoardPost,
+  type BoardKind,
+} from './board.ts'
+import {
   bidLandlord,
   createDoudizhuRoom,
   doudizhuMembers,
@@ -4028,6 +4036,74 @@ app.post('/api/games/draw/rooms/:id/guess', async (req) => {
   // 猜对 / 阶段推进（全对进 reveal）都会改状态；纯闲聊只动内存，状态推送无害
   pushDrawRoom(id)
   return result
+})
+
+// ---------------------------------------------------------------- 留言板
+
+/**
+ * 留言板（全站一份，登录即可读写）。
+ *
+ * 变化时 broadcast 一条 `board` 事件，payload 只带原因与 id —— 客户端重拉
+ * 一次列表。留言板的数据量是几十条，做增量同步带来的复杂度远大于省下的
+ * 一次请求。
+ */
+const boardKindSchema = z.enum(['bug', 'idea', 'complaint'])
+
+app.get('/api/board/posts', async (req) => {
+  const user = requireUser(req)
+  const q = req.query as { open?: string; kind?: string; limit?: string }
+  const kind = q.kind && (BOARD_KINDS as readonly string[]).includes(q.kind) ? (q.kind as BoardKind) : undefined
+  return {
+    posts: listBoardPosts(user.id, {
+      openOnly: q.open === '1',
+      kind,
+      limit: Number.parseInt(q.limit ?? '100', 10) || 100,
+    }),
+  }
+})
+
+app.post('/api/board/posts', async (req) => {
+  const user = requireUser(req)
+  const body = req.body as { kind?: unknown; body?: unknown }
+  const post = createBoardPost({
+    authorId: user.id,
+    authorName: user.display_name,
+    kind: boardKindSchema.parse(body.kind ?? 'bug'),
+    body: typeof body.body === 'string' ? body.body : '',
+  })
+  audit({
+    actorId: user.id,
+    actorIp: actorIp(req),
+    category: 'system',
+    action: 'board-post',
+    target: post.id,
+    payload: { kind: post.kind, length: post.body.length },
+  })
+  broadcast({ type: 'board', data: { reason: 'created', postId: post.id } })
+  return { post }
+})
+
+app.post('/api/board/posts/:id/resolve', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  const body = req.body as { resolved?: unknown; resolution?: unknown }
+  const post = resolveBoardPost(
+    id,
+    user.id,
+    roleAtLeast(user.role, 'admin'),
+    body.resolved !== false,
+    typeof body.resolution === 'string' ? body.resolution : null,
+  )
+  broadcast({ type: 'board', data: { reason: 'resolved', postId: id } })
+  return { post }
+})
+
+app.delete('/api/board/posts/:id', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  deleteBoardPost(id, user.id, roleAtLeast(user.role, 'admin'))
+  broadcast({ type: 'board', data: { reason: 'deleted', postId: id } })
+  return { ok: true }
 })
 
 // ---------------------------------------------------------------- 待办

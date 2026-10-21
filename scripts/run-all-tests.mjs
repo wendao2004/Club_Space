@@ -176,6 +176,7 @@ const ONLINE_TESTS = [
     // 超时加速用例直接改测试库里的 phaseEndsAt
     passDataDir: true,
   },
+  { name: 'board-test', label: '留言板（发帖/处理标记/撤回/权限边界）' },
   {
     name: 'werewolf-route-test',
     label: '狼人杀路由（视角裁剪与接口契约）',

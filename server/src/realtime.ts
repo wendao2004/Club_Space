@@ -85,6 +85,14 @@ export type RealtimeEvent =
    * 渲染路径和状态渲染路径完全分开。
    */
   | { type: 'draw-stroke'; data: unknown }
+  /**
+   * 留言板有变化（新留言、被标记已解决、被撤回）。
+   *
+   * 用 broadcast 而不是定向推送：留言板本来就是**全站共用一份**、没有隐藏
+   * 信息。payload 只带原因与 id，正文让客户端自己重拉 —— 一条列表接口
+   * 就够，没必要为了省一次请求把增量同步的复杂度引进来。
+   */
+  | { type: 'board'; data: unknown }
 
 interface Connection {
   id: string

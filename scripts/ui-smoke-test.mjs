@@ -2350,6 +2350,73 @@ async function main() {
       await apiAs(sessionCookie, `/api/games/draw/rooms/${drawRoomId}/leave`, { method: 'POST', json: {} })
     }
 
+    // ---- 留言板：发一条、列表里能立刻看到 ----
+    console.log('\n【留言板】')
+
+    await evaluate(`document.querySelector('.taskbar__start').click()`)
+    await sleep(400)
+    const openedBoard = await evaluate(`
+      (() => {
+        const t = [...document.querySelectorAll('.start__tile')].find((x) => x.textContent.includes('留言板'))
+        if (!t) return false
+        t.click()
+        return true
+      })()
+    `)
+    assert(openedBoard === true, '从开始菜单打开了留言板')
+    await sleep(1800)
+
+    // 用原生 setter 触发 input —— Vue 的 v-model 靠 input 事件同步，
+    // 直接改 value 属性不会让 v-model 感知（这是合成输入的常见坑）。
+    // ⚠️ 填完要**等一拍**再点发送：v-model 的更新是异步的，立刻读按钮的
+    // disabled 会读到旧值（还是 disabled），点击就被吞掉。
+    const boardMarker = `UI冒烟留言-${Date.now().toString(36)}`
+    const boardFilled = await evaluate(`
+      (() => {
+        const ta = document.querySelector('.board-app .compose-input')
+        if (!ta) return false
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+        setter.call(ta, ${JSON.stringify(boardMarker)})
+        ta.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()
+    `)
+    assert(boardFilled === true, '在留言板的输入框里填了内容')
+    await sleep(300)
+    const boardSent = await evaluate(`
+      (() => {
+        const btn = [...document.querySelectorAll('.board-app .compose-foot button')].find((b) =>
+          b.textContent.includes('发送'),
+        )
+        if (!btn) return false
+        if (btn.disabled) return false
+        btn.click()
+        return true
+      })()
+    `)
+    assert(boardSent === true, '点了发送按钮', boardSent ? '' : '按钮仍不可用或不存在')
+    await sleep(1200)
+
+    const boardPosted = await evaluate(
+      `document.querySelector('.board-app')?.textContent?.includes(${JSON.stringify(boardMarker)}) ?? false`,
+    )
+    const boardText = await evaluate(
+      `document.querySelector('.board-app')?.textContent?.replace(/\\s+/g, ' ').slice(0, 240) ?? 'NO .board-app'`,
+    )
+    assert(boardPosted === true, '发出的留言出现在列表里', boardPosted ? '' : String(boardText))
+
+    // 收尾：关窗，别把留言板留给后面的用例
+    await evaluate(`
+      (() => {
+        const win = [...document.querySelectorAll('.window')].find(
+          (w) => w.querySelector('.window__title')?.textContent.includes('留言板'),
+        )
+        win?.querySelector('.window__ctl--close')?.click()
+        return true
+      })()
+    `)
+    await sleep(400)
+
     // ---- 更换壁纸（预设 + 文件空间图片）----
     console.log('\n【更换壁纸】')
 

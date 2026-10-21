@@ -173,7 +173,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
 直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
 
-全量 **36 个套件 / 2366 条断言**：
+全量 **37 个套件 / 2401 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|
@@ -190,6 +190,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 | `werewolf-route-test` | 59 | 9 个真实账号走 HTTP 全流程，逐个比对 view 有没有泄露 |
 | `draw-test` | 79 | 你画我猜引擎：计分/提示公式、阶段机、**视角裁剪逐视角断言**（词漏了游戏就死了） |
 | `draw-room-test` | 90 | 你画我猜 HTTP 层：画笔写入口校验、猜词计分、SSE 实时同步与载荷形状、回合轮转清屏、**对局存档（谁画了什么词、那张画）**、轮数上限；用真库改时间戳加速超时推进 |
+| `board-test` | 31 | 留言板：谁能发/谁能标记已处理/谁能删（权限边界是这模块的命脉）、类型筛选、撤回语义 |
 | `totp-test` | 36 | **RFC 6238 附录 B 的 6 条标准向量**全部匹配 |
 | `totp-ratelimit-test` | 13 | 两步登录限流按 IP / 按账号分桶，两个桶不互相污染 |
 | `admin-test` | 88 | 运维管控的权限门禁与参数白名单 |
@@ -212,12 +213,12 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 | `health-degraded-test` | 6 | 磁盘告急时必须 503（把底线设成 1 PiB，断言与机器实际余量无关） |
 | `cert-health-test` | 12 | 证书剩余天数进健康检查；快到期只 `degraded` 不 503；换证书后按 mtime 立刻生效 |
 | `db-migrate-test` | 12 | **4 个真子进程同时迁移一个空库**，只迁一次、没有 `duplicate column` |
-| `ui-smoke-test` | 323 | **在真实 Chrome 里开窗口、发消息、记一笔账、走一步棋、跟机器人下一盘、登记物品、引用与 @、画一笔看对面收到**；另数 `AudioContext` 的声源，确认开窗/试听真在发声、静音后一声不出；用假的 `Notification` 验后台提醒，用频率探针验「轮到你」那一声确实是它 |
+| `ui-smoke-test` | 327 | **在真实 Chrome 里开窗口、发消息、记一笔账、走一步棋、跟机器人下一盘、登记物品、引用与 @、画一笔看对面收到**；另数 `AudioContext` 的声源，确认开窗/试听真在发声、静音后一声不出；用假的 `Notification` 验后台提醒，用频率探针验「轮到你」那一声确实是它 |
 
 `ui-smoke-test` 用 DevTools 协议驱动系统里的 Chrome/Edge，
 验证界面**确实渲染出来了**（不是构建成功就算），并且**真的能操作**；
 每个操作都会再用 API 查一遍后端，确认状态确实被持久化 —— 不是前端乐观更新。
-（它需要一个真实的 Chrome，所以 CI 里跳过，其余 35 个套件都在 CI 里跑。）
+（它需要一个真实的 Chrome，所以 CI 里跳过，其余 36 个套件都在 CI 里跑。）
 
 依赖 `data/` 的测试需要干净数据库（首次运行才能自举创建管理员），
 `run-all-tests.mjs` 会自动处理：每个端到端测试前重启服务并清空 `data/`。
