@@ -694,6 +694,32 @@ function ensureResizeObserver(): void {
   resizeObserver.observe(canvasBox.value)
 }
 
+/**
+ * 画布是**随阶段出现的**：等人、结算这两个视图里没有 canvas，
+ * 一进入"选词"就连同 `.table` 一起新建一个。
+ *
+ * 新建的 canvas 一定是 300×150（HTML 的默认固有尺寸）—— 而这一刻
+ * 没有任何东西会去修正它：
+ *   · `afterEnterTable` 早就跑过了（那时画布还不存在，resizeCanvas 直接 return）；
+ *   · `ensureResizeObserver` 当时也建不起来（canvasBox 同样不存在）；
+ *   · `syncCanvasSize` 只挂在落笔上 —— **只有画家会落笔**。
+ *
+ * 于是"在房间里等着开局"的每个人（通常就是除画家外的所有人）整局都在用
+ * 一张 300×150 的画布：笔迹被按 0.3 倍分辨率画完，再被 CSS 拉回窗口大小，
+ * 结果笔画发虚、粗细方向都不对，细节糊成一片。画家自己的画布因为落笔时
+ * 被自愈修正了，看起来是正常的 —— 这正是"自己画着好好的，别人看是点点点"。
+ *
+ * 所以：canvas 元素一出现就立刻对齐尺寸，并把观察器补上。
+ */
+watch(canvasEl, (el) => {
+  if (!el) return
+  resizeRetries = 0
+  requestAnimationFrame(() => {
+    resizeCanvas()
+    ensureResizeObserver()
+  })
+})
+
 onMounted(() => {
   draw.connectRealtime()
   void draw.loadRooms()
@@ -704,10 +730,19 @@ onMounted(() => {
     void draw.openRoom(roomId).then(() => afterEnterTable())
   }
 
+  // 浏览器缩放 / 换屏幕会改 devicePixelRatio，而此时容器尺寸可能一点没变
+  // （ResizeObserver 不会触发），画布的像素密度就跟不上了。
+  window.addEventListener('resize', onWindowResize)
+
   tickTimer = window.setInterval(() => {
     nowTick.value = Date.now()
   }, 500)
 })
+
+function onWindowResize(): void {
+  resizeRetries = 0
+  resizeCanvas()
+}
 
 onBeforeUnmount(() => {
   offStroke()
@@ -716,6 +751,7 @@ onBeforeUnmount(() => {
     window.clearInterval(tickTimer)
     tickTimer = null
   }
+  window.removeEventListener('resize', onWindowResize)
   resizeObserver?.disconnect()
   resizeObserver = null
 })

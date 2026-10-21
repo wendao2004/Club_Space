@@ -259,6 +259,20 @@ console.log('\n【画笔】')
   })
   assert(points.status === 200, '画笔增量上报')
 
+  // 抬笔：前端发的是 `points: []`。
+  //
+  // 这曾经被判成"画笔点数不合法"回 400：抬笔不影响画面，客户端也不看回包，
+  // 所以从界面到测试都没露馅 —— 但每画一笔服务端就记一条假错误。
+  const finish = await alice(`/api/games/draw/rooms/${room.id}/strokes`, 'POST', {
+    op: 'end',
+    strokeId: 's1',
+    points: [],
+    color: '#ff0000',
+    width: 4,
+    tool: 'pen',
+  })
+  assert(finish.status === 200, '抬笔（end 不带点）被接受')
+
   // 校验：坐标越界 / 非法颜色 / 点数超限
   const badXY = await alice(`/api/games/draw/rooms/${room.id}/strokes`, 'POST', {
     op: 'points', strokeId: 's1', points: [{ x: 5000, y: 0 }], color: '#ff0000', width: 4, tool: 'pen',

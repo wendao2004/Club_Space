@@ -357,13 +357,21 @@ export function submitStroke(roomId: string, userId: string, op: DrawStrokeOp): 
     }
   }
   if (op.op !== 'clear' && op.op !== 'undo') {
-    if (!Array.isArray(op.points) || op.points.length === 0 || op.points.length > MAX_POINTS_PER_OP) {
-      throw new HttpError(400, '画笔点数不合法')
-    }
-    for (const p of op.points) {
-      if (typeof p.x !== 'number' || typeof p.y !== 'number') throw new HttpError(400, '坐标不合法')
-      if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) throw new HttpError(400, '坐标必须是数字')
-      if (p.x < 0 || p.x > 1000 || p.y < 0 || p.y > 1000) throw new HttpError(400, '坐标超出画布')
+    // 点数只有 begin / points 需要。
+    //
+    // `end` 是"抬笔"信号，前端发的是 `points: []` —— 之前这里一视同仁地要求
+    // "点数非空"，于是**每一笔抬笔都回一个 400**。客户端不看回包、抬笔也不需要
+    // 服务端做什么，所以从界面到测试都没露馅，只有日志里堆着一串假错误：
+    // 真出问题时，那堆 400 会把人往"网络/鉴权坏了"的方向带。
+    if (op.op !== 'end') {
+      if (!Array.isArray(op.points) || op.points.length === 0 || op.points.length > MAX_POINTS_PER_OP) {
+        throw new HttpError(400, '画笔点数不合法')
+      }
+      for (const p of op.points) {
+        if (typeof p.x !== 'number' || typeof p.y !== 'number') throw new HttpError(400, '坐标不合法')
+        if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) throw new HttpError(400, '坐标必须是数字')
+        if (p.x < 0 || p.x > 1000 || p.y < 0 || p.y > 1000) throw new HttpError(400, '坐标超出画布')
+      }
     }
     if (typeof op.color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(op.color)) {
       throw new HttpError(400, '颜色不合法')

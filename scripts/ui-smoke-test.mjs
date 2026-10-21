@@ -2237,6 +2237,36 @@ async function main() {
       assert(typeof picked === 'string' && picked.length > 0, '画家在界面上选了词', String(picked))
       await sleep(1500)
 
+      // 画布的像素尺寸必须跟容器对得上。
+      //
+      // 画桌（含 canvas）是**阶段变化时才渲染**的。新建的 canvas 是 HTML 默认的
+      // 300×150；如果没人去对齐，整张画就按 0.3 倍分辨率画完再被 CSS 拉回窗口
+      // 大小。画家落笔时会自愈修正自己那张，**别人那张则整局都是糊的** ——
+      // 用户报的"自己画着好好的，别人看是点点点"就是这个。
+      //
+      // 所以断言放在"还没落笔"的时刻：这时尺寸只能来自画布出现时的对齐，
+      // 而不是落笔自愈。
+      const canvasSize = JSON.parse(
+        await evaluate(`JSON.stringify((() => {
+          const c = document.querySelector('.board-canvas')
+          const box = c?.closest('.canvas-box')?.getBoundingClientRect()
+          return {
+            w: c?.width ?? 0,
+            h: c?.height ?? 0,
+            cssW: Math.round(box?.width ?? 0),
+            cssH: Math.round(box?.height ?? 0),
+            dpr: window.devicePixelRatio || 1,
+          }
+        })())`),
+      )
+      assert(
+        canvasSize.cssW > 200 &&
+          canvasSize.w >= Math.round(canvasSize.cssW * canvasSize.dpr * 0.9) &&
+          canvasSize.h >= Math.round(canvasSize.cssH * canvasSize.dpr * 0.9),
+        '画布像素尺寸跟容器对得上（不是 300×150 的默认值）',
+        `${canvasSize.w}×${canvasSize.h}，容器 ${canvasSize.cssW}×${canvasSize.cssH}，dpr ${canvasSize.dpr}`,
+      )
+
       // 画一笔：按住鼠标在画布上拖一段（走真实的 pointer 事件链）
       // 坐标按**容器**取（用户看到并点击的是 .canvas-box；canvas 只是它里面的
       // 绘制层）。这与 DrawApp 的 toLocal 用同一个权威来源。
