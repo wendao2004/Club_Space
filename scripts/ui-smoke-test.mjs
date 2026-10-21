@@ -3659,6 +3659,112 @@ async function main() {
     assert(!mob.hasTaskbar, '窄视口下不渲染任务栏（移动端没有悬浮任务栏）')
     assert(mob.hasMobileShell, '窄视口下渲染了移动端外壳', `根元素 .${mob.rootClass}`)
     assert(mob.hasMobileTabs >= 3, '移动外壳有底部 Tab 栏', `${mob.hasMobileTabs} 个：${mob.tabLabels.join('、')}`)
+
+    // ---- 窄屏下"点得开的应用"是不是真的能用 ----
+    //
+    // 外壳切过去不算数。你画我猜的画桌是三栏（170 / 1fr / 240），两栏固定宽度
+    // 合计 410px，而 iPhone 视口只有 390px —— 画布会被挤成 0 宽，用户看到的就是
+    // "点进去画不了"。这里量的是真实 DOM 尺寸，不是去 grep CSS 里有没有 @media。
+    console.log('\n【移动端：应用页面（窄视口）】')
+
+    const mRoom = await apiAs(sessionCookie, '/api/games/draw/rooms', {
+      method: 'POST',
+      json: { title: '手机测试画室', rounds: 1 },
+    })
+    const mRoomId = mRoom.body?.room?.id ?? null
+    assert(!!mRoomId, '手机上能建房间（接口层）')
+
+    if (mRoomId) {
+      // 让另一个人进来：最少 2 人才点得动"开始游戏"，而只有开局后才会出现画桌
+      // （等人视图里没有画布 —— 第一次写这条用例就是漏了这一点，量到 0 宽）
+      await apiAs(peerCookie, `/api/games/draw/rooms/${mRoomId}/join`, { method: 'POST', json: {} })
+
+      const openedDrawTile = await evaluate(`
+        (() => {
+          const tile = [...document.querySelectorAll('.apps__tile')].find((t) => t.textContent.includes('你画我猜'))
+          if (!tile) return false
+          tile.click()
+          return true
+        })()
+      `)
+      assert(openedDrawTile === true, '移动端宫格里有你画我猜')
+      await sleep(2500)
+
+      const enteredMobileRoom = await evaluate(`
+        (() => {
+          const card = [...document.querySelectorAll('.room-card')].find(
+            (c) => c.textContent.includes('手机测试画室'),
+          )
+          if (!card) return false
+          const btn = [...card.querySelectorAll('button')].find((b) => /进入|观看/.test(b.textContent))
+          ;(btn ?? card).click()
+          return true
+        })()
+      `)
+      assert(enteredMobileRoom === true, '移动端能进入房间')
+      await sleep(1200)
+
+      // 开局：开始之后才渲染画桌（三栏 → 窄屏单列），画布也才存在
+      const startedMobileGame = await evaluate(`
+        (() => {
+          const btn = [...document.querySelectorAll('.draw button')].find((b) =>
+            b.textContent.includes('开始游戏'),
+          )
+          if (!btn) return false
+          btn.click()
+          return true
+        })()
+      `)
+      assert(startedMobileGame === true, '移动端能开始游戏')
+      await sleep(2200)
+
+      const drawMetrics = await evaluate(`JSON.stringify({
+        canvasW: Math.round(document.querySelector('.board-canvas')?.getBoundingClientRect().width ?? 0),
+        hasTable: !!document.querySelector('.table'),
+        hasCanvas: !!document.querySelector('.board-canvas'),
+        text: (document.querySelector('.draw')?.textContent ?? 'NO .draw').trim().slice(0, 70),
+        scrollW: document.documentElement.scrollWidth,
+        viewW: window.innerWidth,
+      })`)
+      const dm = JSON.parse(drawMetrics ?? '{}')
+      assert(
+        (dm.canvasW ?? 0) > 200,
+        '窄屏下画布有可用宽度（不是被挤成 0）',
+        `${dm.canvasW}px，视口 ${dm.viewW}px；table=${dm.hasTable} canvas=${dm.hasCanvas} 文案「${dm.text}」`,
+      )
+      assert(
+        (dm.scrollW ?? 0) <= (dm.viewW ?? 0) + 1,
+        '窄屏下页面没有横向溢出',
+        `scrollWidth ${dm.scrollW} > 视口 ${dm.viewW}`,
+      )
+
+      // 留言板：纵向流，但输入区与类型标签也不能把页面撑宽
+      await cdp.send('Page.navigate', { url: `${BASE}/` }, sessionId)
+      await sleep(2500)
+      const openedBoardTile = await evaluate(`
+        (() => {
+          const tile = [...document.querySelectorAll('.apps__tile')].find((t) => t.textContent.includes('留言板'))
+          if (!tile) return false
+          tile.click()
+          return true
+        })()
+      `)
+      assert(openedBoardTile === true, '移动端宫格里有留言板')
+      await sleep(1400)
+
+      const boardMetrics = await evaluate(`JSON.stringify({
+        hasInput: !!document.querySelector('.compose-input'),
+        scrollW: document.documentElement.scrollWidth,
+        viewW: window.innerWidth,
+      })`)
+      const bm = JSON.parse(boardMetrics ?? '{}')
+      assert(bm.hasInput === true, '留言板在窄屏下有输入框')
+      assert(
+        (bm.scrollW ?? 0) <= (bm.viewW ?? 0) + 1,
+        '留言板在窄屏下没有横向溢出',
+        `scrollWidth ${bm.scrollW} > 视口 ${bm.viewW}`,
+      )
+    }
   } finally {
     // 关浏览器要按这个顺序来，每一步都挡着一种具体的失败：
     //   1. CDP Browser.close —— 让 Chrome 自己走正常退出流程，最快最干净

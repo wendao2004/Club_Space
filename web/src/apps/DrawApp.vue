@@ -1736,4 +1736,56 @@ function chatTextOf(msg: DrawChatMsg): string {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
+
+/* ---------------------------------------------------------------- 窄屏（手机） */
+
+/**
+ * 手机上放不下三栏：左边玩家 170px + 右边聊天 240px，两栏固定宽度合计 410px，
+ * 而 iPhone 的视口只有 390px —— 画布被挤成 0 宽，表现就是"点进去画不了"。
+ *
+ * 窄屏改成单列：**画布优先**（手机上唯一值得占满屏的东西），玩家横排一条
+ * 左右滑，聊天压到最下面、限高可滚动。历史详情同理（回合列表挪到上面）。
+ */
+@media (max-width: 760px) {
+  .table {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto auto;
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .board {
+    order: 1;
+  }
+
+  .players {
+    order: 2;
+    flex-direction: row;
+    gap: 6px;
+    padding: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .players .player {
+    flex: none;
+  }
+
+  .chat {
+    order: 3;
+    max-height: 26vh;
+    padding: 6px;
+  }
+
+  .history-detail {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .turn-list {
+    max-height: 26vh;
+  }
+}
 </style>

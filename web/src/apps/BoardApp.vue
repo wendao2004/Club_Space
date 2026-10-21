@@ -469,4 +469,26 @@ watch(
   padding: 3px 8px;
   align-self: flex-start;
 }
+
+/* ---------------------------------------------------------------- 窄屏（手机） */
+
+/* 留言板本身是纵向流，手机上不会"挤没"，只需要让顶部工具条与输入区
+   在 390px 宽下别横向溢出（类型标签 + 提交按钮一行放不下就换行）。 */
+@media (max-width: 520px) {
+  .bar {
+    padding: 0 8px;
+  }
+
+  .compose {
+    padding: 8px;
+  }
+
+  .kind-row {
+    flex-wrap: wrap;
+  }
+
+  .compose-hint {
+    margin-left: 0;
+  }
+}
 </style>
