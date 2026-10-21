@@ -537,6 +537,15 @@ export const api = {
     closeEvent: (id: string, closed: boolean) =>
       request<{ event: LedgerEvent }>(`/api/ledger/events/${id}/close`, { json: { closed } }),
 
+    /**
+     * 删除活动（仅管理员）。账目不删：归属它的账目退回日常账目，
+     * 响应里的 detachedEntries 是解绑笔数。
+     */
+    deleteEvent: (id: string) =>
+      request<{ ok: true; name: string; detachedEntries: number }>(`/api/ledger/events/${id}`, {
+        method: 'DELETE',
+      }),
+
     /** 按活动的完整汇总（收支合计 + 按分类 + 按人 + 逐笔明细）。 */
     eventSummary: (id: string) =>
       request<LedgerEventSummary>(`/api/ledger/events/${id}/summary`),

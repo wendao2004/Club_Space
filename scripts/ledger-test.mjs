@@ -1273,6 +1273,76 @@ async function main() {
   await member.api(`/api/ledger/entries/${todoA}`, { method: 'DELETE' })
   assert(true, '待办测试已收尾（审批/删除临时账目）')
 
+  // ---------------------------------------------------------------- 删除活动
+  //
+  // 用户报"记账功能不能删除活动"。删除权限只给管理员（活动是账目的归属维度，
+  // 建活动的人可以改，但不该有权抹掉别人已经记过账的活动），而**账目一条
+  // 都不能删**：归属它的账目退回"日常零散账目"。
+  console.log('\n【删除活动（仅管理员）】')
+  {
+    const delEv = await admin.api('/api/ledger/events', {
+      method: 'POST',
+      json: { name: '待删除的活动', kind: 'activity' },
+    })
+    const delId = delEv.body.event.id
+    const d1 = await admin.api('/api/ledger/entries', {
+      method: 'POST',
+      json: {
+        kind: 'expense',
+        amount: '30.00',
+        categoryId: expenseCat.id,
+        title: '待删活动支出',
+        occurredOn: daysAgo(1),
+        eventId: delId,
+      },
+    })
+    const d2 = await admin.api('/api/ledger/entries', {
+      method: 'POST',
+      json: {
+        kind: 'income',
+        amount: '10.00',
+        categoryId: incomeCat.id,
+        title: '待删活动收入',
+        occurredOn: daysAgo(1),
+        eventId: delId,
+      },
+    })
+    assert(d1.status === 200 && d2.status === 200, '准备了归属该活动的两笔账')
+
+    const byMember = await member.api(`/api/ledger/events/${delId}`, { method: 'DELETE' })
+    assert(byMember.status === 403, '普通成员不能删活动（403）', `状态 ${byMember.status}`)
+    // 连活动的创建者也不行 —— 权限是"管理员"，不是"创建者或管理员"
+    const memberOwnEv = await member.api('/api/ledger/events', {
+      method: 'POST',
+      json: { name: '成员自建待删活动', kind: 'activity' },
+    })
+    const ownDel = await member.api(`/api/ledger/events/${memberOwnEv.body.event.id}`, { method: 'DELETE' })
+    assert(ownDel.status === 403, '创建者自己也不能删（403）', `状态 ${ownDel.status}`)
+    await admin.api(`/api/ledger/events/${memberOwnEv.body.event.id}`, { method: 'DELETE' })
+
+    const del = await admin.api(`/api/ledger/events/${delId}`, { method: 'DELETE' })
+    assert(del.status === 200, '管理员能删活动')
+    assert(del.body.detachedEntries === 2, '返回解绑笔数', `${del.body.detachedEntries}`)
+
+    const gone = await admin.api(`/api/ledger/events/${delId}`)
+    assert(gone.status === 404, '活动真的没了')
+
+    // 账目一条都没少，只是不再归属活动
+    const kept = await admin.api('/api/ledger/entries?limit=200')
+    const keptIds = (kept.body.entries ?? []).map((e) => e.id)
+    assert(
+      keptIds.includes(d1.body.entry.id) && keptIds.includes(d2.body.entry.id),
+      '两笔账目都还在（删除活动不删账）',
+    )
+    const keptExpense = kept.body.entries.find((e) => e.id === d1.body.entry.id)
+    assert(keptExpense?.eventId === null, '账目不再归属活动（eventId 置空）', String(keptExpense?.eventId))
+    assert(keptExpense?.amount === '30.00', '金额原样保留', String(keptExpense?.amount))
+    assert(keptExpense?.status === 'approved', '状态原样保留', String(keptExpense?.status))
+
+    const again = await admin.api(`/api/ledger/events/${delId}`, { method: 'DELETE' })
+    assert(again.status === 404, '重复删除返回 404')
+  }
+
   // ---------------------------------------------------------------- 结果
   console.log(
     `\n\x1b[1m结果\x1b[0m  通过 \x1b[32m${passed}\x1b[0m  失败 \x1b[31m${failed}\x1b[0m\n`,

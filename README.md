@@ -173,7 +173,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
 直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
 
-全量 **36 个套件 / 2354 条断言**：
+全量 **36 个套件 / 2366 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|

@@ -683,6 +683,27 @@ watch(
   },
 )
 
+/**
+ * 删除当前活动（仅管理员）。
+ *
+ * 确认框必须把"账目不会消失"说在最前面：用户看到"删除活动"最怕的是
+ * 连账一起没了，而这个操作恰恰把账保留下来、只是解除归属。不讲清楚，
+ * 要么不敢按，要么按完去翻账发现"我的账跑哪了"。
+ */
+async function deleteCurrentEvent(): Promise<void> {
+  const ev = ledger.eventSummary?.event
+  if (!ev) return
+  const ok = window.confirm(
+    `确定删除活动「${ev.name}」吗？\n\n` +
+      `账目一条都不会删：归属它的账目（含待审、已驳回的）会退回「日常零散账目」，` +
+      `金额和状态原样保留，总账收支不变。\n\n` +
+      `活动本身以及它的封账状态会消失，这一步不可撤销。`,
+  )
+  if (!ok) return
+  const detached = await ledger.deleteEvent(ev.id)
+  if (detached !== null) view.value = 'events'
+}
+
 async function toggleEventClosed(): Promise<void> {
   const ev = ledger.eventSummary?.event
   if (!ev) return
@@ -1429,6 +1450,15 @@ onBeforeUnmount(() => {
                   @click="toggleEventClosed()"
                 >
                   {{ evS.event.status === 'closed' ? '解封' : '封账' }}
+                </button>
+                <button
+                  v-if="auth.isAdmin"
+                  class="wl-btn wl-btn--danger"
+                  :disabled="ledger.saving"
+                  title="只有管理员能删除活动；账目会保留并退回日常账目"
+                  @click="deleteCurrentEvent()"
+                >
+                  <Icon name="trash" :size="14" /><span>删除活动</span>
                 </button>
               </div>
               <p v-if="evS.event.status === 'closed'" class="wl-hint evnote">

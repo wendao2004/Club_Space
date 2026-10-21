@@ -306,6 +306,37 @@ export const useLedger = defineStore('ledger', {
       }
     },
 
+    /**
+     * 删除活动（仅管理员）。
+     *
+     * 账目一条都不会少：归属它的账目退回"日常零散账目"，总账收支不变。
+     * 提示里把"有多少笔账脱离了活动"说清楚 —— 悄悄摘掉几笔账比报错更让人困惑。
+     */
+    async deleteEvent(id: string): Promise<number | null> {
+      this.saving = true
+      this.error = null
+      try {
+        const result = await api.ledger.deleteEvent(id)
+        const detail =
+          result.detachedEntries > 0
+            ? `${result.detachedEntries} 笔账目已退回日常账目（金额不变）`
+            : '这个活动下没有账目'
+        useUi().notify('success', '活动已删除', `${result.name} · ${detail}`)
+        // 删的如果是正在看的那个活动，汇总要跟着清掉，否则界面停在一个不存在的活动上
+        if (this.eventSummary?.event.id === id) this.eventSummary = null
+        await this.loadEvents()
+        await this.loadEntries()
+        return result.detachedEntries
+      } catch (err) {
+        const message = describe(err)
+        this.error = message
+        useUi().notify('error', '删除活动失败', message)
+        return null
+      } finally {
+        this.saving = false
+      }
+    },
+
     /** 顺序刷新所有数据源，避免并发把后端打爆。 */
     async reload(): Promise<void> {
       await this.loadCategories()

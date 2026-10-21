@@ -1358,6 +1358,42 @@ export function closeEvent(id: string, userId: string, isAdmin: boolean, closed:
   return getEvent(id)!
 }
 
+/**
+ * 删除活动（**仅管理员**）。
+ *
+ * 为什么只给管理员：活动是账目的"归属维度"，删掉它等于把一批账目的上下文
+ * 抽走。建活动的人发现建错了可以改（改名/改日期/改类型），但不该有权把
+ * 一个别人已经往里记过账的活动抹掉 —— 那些账不是他一个人的。
+ *
+ * 删除时**绝不删账目**：财务记录不能因为"活动建错了"而消失。归属它的账目
+ * 退回"日常零散账目"（event_id 置 NULL），金额、状态、审批痕迹全部原样保留。
+ * 于是总账的收支一分不变，只是这些账不再挂在某个活动名下。
+ *
+ * 返回值带上被"解除归属"的笔数，界面据此告诉用户发生了什么 —— 静默地把
+ * 5 笔账从活动里摘出来，比直接报错更让人困惑。
+ */
+export function deleteEvent(
+  id: string,
+  userId: string,
+  isAdmin: boolean,
+): { name: string; detachedEntries: number } {
+  void userId
+  if (!isAdmin) throw new HttpError(403, '只有管理员能删除活动')
+  const current = getEvent(id)
+  if (!current) throw new HttpError(404, '活动不存在')
+
+  return transaction(() => {
+    const row = getDb()
+      .prepare('SELECT COUNT(*) AS n FROM ledger_entries WHERE event_id = ?')
+      .get(id) as { n: number }
+    // 先解绑再删行：ledger_entries.event_id 有 REFERENCES，
+    // 开着 foreign_keys 时直接删会撞约束。
+    getDb().prepare('UPDATE ledger_entries SET event_id = NULL WHERE event_id = ?').run(id)
+    getDb().prepare('DELETE FROM ledger_events WHERE id = ?').run(id)
+    return { name: current.name, detachedEntries: row.n }
+  })
+}
+
 export interface EventSummary {
   event: LedgerEventView
   incomeCents: number

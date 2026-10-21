@@ -163,6 +163,7 @@ import {
   createEvent,
   decideEntry,
   deleteEntry,
+  deleteEvent,
   eventSummary,
   exportCsv,
   exportEventCsv,
@@ -2433,6 +2434,28 @@ app.patch('/api/ledger/events/:id', async (req) => {
     payload: { name: event.name, kind: event.kind },
   })
   return { event }
+})
+
+/**
+ * 删除活动（仅管理员）。
+ *
+ * 账目**不会被删**：归属它的账目退回"日常零散账目"，总账收支不变。
+ * 响应里带 detachedEntries（解绑笔数），前端据此把"有多少笔账脱离了活动"
+ * 讲清楚 —— 悄悄摘掉几笔账比直接报错更让人困惑。
+ */
+app.delete('/api/ledger/events/:id', async (req) => {
+  const user = requireUser(req)
+  const { id } = req.params as { id: string }
+  const result = deleteEvent(id, user.id, roleAtLeast(user.role, 'admin'))
+  audit({
+    actorId: user.id,
+    actorIp: actorIp(req),
+    category: 'ledger',
+    action: 'ledger-delete-event',
+    target: id,
+    payload: { name: result.name, detachedEntries: result.detachedEntries },
+  })
+  return { ok: true, ...result }
 })
 
 app.post('/api/ledger/events/:id/close', async (req) => {
