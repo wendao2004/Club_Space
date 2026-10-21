@@ -93,6 +93,13 @@ export type RealtimeEvent =
    * 就够，没必要为了省一次请求把增量同步的复杂度引进来。
    */
   | { type: 'board'; data: unknown }
+  /**
+   * 投票有变化（新建、有人投票、关闭/重开、删除）。
+   *
+   * 与 board 同理：全站可见、没有隐藏信息，broadcast + 客户端重拉。
+   * 有人投票也广播 —— 结果是全透明的，"实时看到票数涨"就是这个功能的乐趣。
+   */
+  | { type: 'poll'; data: unknown }
 
 interface Connection {
   id: string

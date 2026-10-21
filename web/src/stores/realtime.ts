@@ -33,6 +33,7 @@ const KNOWN_EVENTS = [
   'game-draw',
   'draw-stroke',
   'board',
+  'poll',
 ] as const
 
 export type RealtimeEventName = (typeof KNOWN_EVENTS)[number]

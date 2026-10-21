@@ -112,6 +112,7 @@ import {
 import { shutdownBotRunner } from './games/bot-runner.ts'
 import { AuthError, actorIp, requireRole, requireUser } from './routes/auth-guard.ts'
 import { registerBoardRoutes } from './routes/board.ts'
+import { registerPollRoutes } from './routes/poll.ts'
 import { pushDrawRoom, pushDrawStroke, registerDrawRoutes } from './routes/draw.ts'
 import {
   bidLandlord,
@@ -3916,6 +3917,7 @@ registerDrawRoutes(app)
 
 // 路由在 routes/board.ts（拆分 index.ts 的第一步）。这里只登记，位置与搬家前一致。
 registerBoardRoutes(app)
+registerPollRoutes(app)
 
 // ---------------------------------------------------------------- 待办
 

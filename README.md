@@ -173,7 +173,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 单独跑某一项：`node scripts/run-all-tests.mjs --only chat-test`（会自己起服务端、用完清干净）；
 直接 `node scripts/xxx-test.mjs` 则需要后端已在 3000 端口跑着。
 
-全量 **39 个套件 / 2512 条断言**：
+全量 **40 个套件 / 2551 条断言**：
 
 | 测试 | 项数 | 验证内容 |
 |---|---|---|
@@ -191,6 +191,7 @@ node scripts/run-all-tests.mjs --only chat-test,games-test
 | `draw-test` | 85 | 你画我猜引擎：计分/提示公式、阶段机、**视角裁剪逐视角断言**（词漏了游戏就死了）、选词随机性（本局不重复/跨局避开/分布多样性） |
 | `draw-room-test` | 103 | 你画我猜 HTTP 层：画笔写入口校验、猜词计分、SSE 实时同步与载荷形状、回合轮转清屏、**对局存档（谁画了什么词、那张画）**、轮数上限；用真库改时间戳加速超时推进 |
 | `board-test` | 31 | 留言板：谁能发/谁能标记已处理/谁能删（权限边界是这模块的命脉）、类型筛选、撤回语义 |
+| `poll-test` | 39 | 投票：一人一票与改票语义（全量替换）、关闭/截止两个定稿态、谁能关谁能删、实名结果聚合 |
 | `file-range-test` | 42 | HTTP Range：206/416/后缀段/**逐字节比对**（拖进度条拿到的就是那一段）、多段与语法错误退回整份、下载续传、带 Range 不放宽鉴权 |
 | `totp-test` | 36 | **RFC 6238 附录 B 的 6 条标准向量**全部匹配 |
 | `totp-ratelimit-test` | 13 | 两步登录限流按 IP / 按账号分桶，两个桶不互相污染 |
@@ -343,7 +344,7 @@ Club_Space/
 │       ├── mobile/         # 移动端外壳（独立界面）
 │       ├── views/          # 登录页 / 安全上下文提示条
 │       └── styles/         # 设计令牌与基础样式
-├── scripts/                # 测试（39 个套件、2512 条断言，`pnpm test` 全跑）
+├── scripts/                # 测试（40 个套件、2551 条断言，`pnpm test` 全跑）
 ├── deploy/                 # 部署：compose / Caddyfile / 证书 / 引导页 / 备份 / 转换镜像
 └── docs/                   # 需求、部署、开发纪实、迭代记录（索引见 docs/README.md）
 ```

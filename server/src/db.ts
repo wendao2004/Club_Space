@@ -743,6 +743,47 @@ function migrate(database: DatabaseSync): void {
         CREATE INDEX ix_board_posts_open ON board_posts(created_at DESC) WHERE resolved_at IS NULL;
       `)
     },
+
+    // ---- v15: 投票 / 约时间 ----
+    (d) => {
+      d.exec(`
+        -- 社团排活动时间、决定团建去哪儿的刚需。参考 Rallly/Bitpoll 的交互
+        -- （网格投票、人人可见结果），自己实现 —— 那两个分别是 AGPL/GPL，
+        -- 代码不能搬，玩法本身没有许可问题。
+        --
+        -- 为什么不复用 board：留言板是"收集"（谁发了什么），投票是"决策"
+        -- （结果聚合 + 一人一票的约束），硬塞会把两种语义搅在一起。
+        CREATE TABLE polls (
+          id          TEXT PRIMARY KEY,
+          creator_id  TEXT NOT NULL REFERENCES users(id),
+          title       TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          -- 0 = 单选（改票 = 换一项），1 = 多选（改票 = 全量替换）
+          multi       INTEGER NOT NULL DEFAULT 0,
+          -- 选项存 JSON 字符串数组（下标即选项 id）。社团规模（2-20 个选项、
+          -- 几十人投票）用不着单独的选项表 —— 选项没有自己的生命周期，
+          -- 永远跟着投票走，拆表只增加一次 JOIN。
+          options     TEXT NOT NULL,
+          -- 到点不能再投（null = 不限时，由创建者手动关）
+          deadline_at INTEGER,
+          -- 手动关闭后结果定稿；重开 = 清掉这个字段
+          closed_at   INTEGER,
+          created_at  INTEGER NOT NULL
+        );
+        CREATE INDEX ix_polls_created ON polls(created_at DESC);
+
+        -- 一行 = 某人对某选项的一票。主键即业务约束：
+        --   单选（改票时先删旧票）+ 多选（同选项不会重复插）都靠它兜底。
+        CREATE TABLE poll_votes (
+          poll_id    TEXT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+          user_id    TEXT NOT NULL REFERENCES users(id),
+          option_idx INTEGER NOT NULL,
+          voted_at   INTEGER NOT NULL,
+          PRIMARY KEY (poll_id, user_id, option_idx)
+        );
+        CREATE INDEX ix_poll_votes_user ON poll_votes(user_id);
+      `)
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

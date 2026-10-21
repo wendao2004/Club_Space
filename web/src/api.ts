@@ -883,6 +883,40 @@ export const api = {
 
     remove: (id: string) => request<{ ok: true }>(`/api/board/posts/${id}`, { method: 'DELETE' }),
   },
+
+  // ---------------------------------------------------------------- 投票
+
+  polls: {
+    /** 投票列表（倒序）。openOnly 只看进行中的。 */
+    list: (options: { openOnly?: boolean; limit?: number } = {}) => {
+      const q = new URLSearchParams()
+      if (options.openOnly) q.set('open', '1')
+      if (options.limit) q.set('limit', String(options.limit))
+      const qs = q.toString()
+      return request<{ polls: Poll[] }>(`/api/polls${qs ? `?${qs}` : ''}`)
+    },
+
+    get: (id: string) => request<{ poll: Poll }>(`/api/polls/${id}`),
+
+    create: (input: {
+      title: string
+      description?: string
+      multi: boolean
+      options: string[]
+      /** 截止时长（毫秒）；null = 不限时。 */
+      deadlineInMs: number | null
+    }) => request<{ poll: Poll }>('/api/polls', { json: input }),
+
+    /** 全量替换语义：单选传一项，多选传勾选的全部下标。 */
+    vote: (id: string, options: number[]) =>
+      request<{ poll: Poll }>(`/api/polls/${id}/vote`, { json: { options } }),
+
+    /** 关闭（closed=true）/ 重开（closed=false）。仅创建者或管理员。 */
+    setClosed: (id: string, closed: boolean) =>
+      request<{ poll: Poll }>(`/api/polls/${id}/close`, { json: { closed } }),
+
+    remove: (id: string) => request<{ ok: true }>(`/api/polls/${id}`, { method: 'DELETE' }),
+  },
 }
 
 // ---------------------------------------------------------------- 分片上传
@@ -1771,6 +1805,35 @@ export interface BoardPost {
   createdAt: number
   /** 是不是我发的（前端据此显示「撤回」）。 */
   mine: boolean
+}
+
+// ---------------------------------------------------------------- 投票
+
+export interface PollOptionResult {
+  idx: number
+  text: string
+  count: number
+  /** 实名投票：选项下谁投的。 */
+  voters: Array<{ id: string; name: string }>
+}
+
+export interface Poll {
+  id: string
+  title: string
+  description: string
+  multi: boolean
+  options: PollOptionResult[]
+  /** 有多少人来投过（多选时票数会大于这个数）。 */
+  totalVoters: number
+  creatorId: string
+  creatorName: string
+  createdAt: number
+  deadlineAt: number | null
+  closedAt: number | null
+  /** 创建者或管理员（前端据此显示关闭/删除按钮）。 */
+  canManage: boolean
+  /** 我的票（选项下标）。 */
+  myVotes: number[]
 }
 
 export interface DdzRoom {
