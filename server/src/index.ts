@@ -110,15 +110,9 @@ import {
   type RoomView,
 } from './games/rooms.ts'
 import { shutdownBotRunner } from './games/bot-runner.ts'
-import {
-  BOARD_KINDS,
-  createBoardPost,
-  deleteBoardPost,
-  getBoardPost,
-  listBoardPosts,
-  resolveBoardPost,
-  type BoardKind,
-} from './board.ts'
+import { AuthError, actorIp, requireRole, requireUser } from './routes/auth-guard.ts'
+import { registerBoardRoutes } from './routes/board.ts'
+import { pushDrawRoom, pushDrawStroke, registerDrawRoutes } from './routes/draw.ts'
 import {
   bidLandlord,
   createDoudizhuRoom,
@@ -130,24 +124,7 @@ import {
   passTurn,
   playCards,
 } from './games/doudizhu-rooms.ts'
-import {
-  chooseDrawWord,
-  createDrawRoom,
-  disposeDrawRoom,
-  drawMembers,
-  getDrawCanvas,
-  getDrawHistoryDetail,
-  getDrawRoom,
-  guessDrawWord,
-  joinDrawRoom,
-  leaveDrawRoom,
-  listDrawHistory,
-  listDrawRooms,
-  processDrawTimeouts,
-  startDrawRoom,
-  submitStroke,
-  type DrawStrokeOp,
-} from './games/draw-rooms.ts'
+import { processDrawTimeouts } from './games/draw-rooms.ts'
 import {
   cleanupStaleWerewolfRooms,
   createWerewolfRoom,
@@ -310,27 +287,13 @@ await app.register(cookie)
 
 // ---------------------------------------------------------------- 鉴权辅助
 
-class AuthError extends Error {}
-
-function requireUser(req: FastifyRequest): User {
-  const user = currentUser(req)
-  if (!user) throw new AuthError('请先登录')
-  return user
-}
-
-function requireRole(req: FastifyRequest, role: Role): User {
-  const user = requireUser(req)
-  if (!roleAtLeast(user.role, role)) throw new AuthError('权限不足')
-  return user
-}
+// AuthError / requireUser / requireRole / actorIp 已搬到 routes/auth-guard.ts —
+// 拆路由时这些工具必须能被 routes/*.ts 直接引用（否则只能反向 import index.ts）。
+// 行为一行没改，import 的是同一个函数对象。
 
 function spaceOf(req: FastifyRequest): Space {
   const raw = (req.query as { space?: string } | undefined)?.space
   return raw === 'private' ? 'private' : 'shared'
-}
-
-function actorIp(req: FastifyRequest): string | null {
-  return req.ip ?? null
 }
 
 /** 会话成员 id 列表，供实时推送决定发给谁。 */
@@ -3891,262 +3854,14 @@ app.post(
 
 // ---------------------------------------------------------------- 你画我猜
 
-/**
- * 房间状态推送（按人裁剪）。
- *
- * 事件分两个：game-draw 是状态（词藏在这条里，必须逐人算视图）；
- * draw-stroke 是画笔（无视角差异，所有成员同一份 payload）。
- */
-function pushDrawRoom(roomId: string): void {
-  const memberIds = drawMembers(roomId)
-  if (memberIds.length === 0) return
-  const online = onlineUserIds()
-  for (const userId of memberIds) {
-    try {
-      pushTo([userId], { type: 'game-draw', data: { roomId, room: getDrawRoom(roomId, userId, online) } })
-    } catch {
-      // 房间可能刚好被删了（最后一人退房即解散），忽略
-    }
-  }
-}
-
-function pushDrawStroke(roomId: string, from: string, op: DrawStrokeOp): void {
-  const memberIds = drawMembers(roomId)
-  if (memberIds.length === 0) return
-  // 广播把 from **平铺**进 op（而不是包一层 { from, op }）。
-  //
-  // 这里踩过一次：最初发的是 { from, op }，而前端把整个 payload 当 op 用 ——
-  // `op.op` 永远是 undefined，begin/points/clear 所有分支都不匹配，别人的
-  // 笔迹被静默丢弃。症状是"画面不实时同步，关掉重开才看得到"（重开走的是
-  // /canvas 补发）。协议形状必须和前端类型（DrawStrokeBroadcast）一致，
-  // 否则是一个只在运行时暴露的静默失败。
-  pushTo(memberIds, { type: 'draw-stroke', data: { ...op, from } })
-}
-
-app.get('/api/games/draw/rooms', async (req) => {
-  const user = requireUser(req)
-  return { rooms: listDrawRooms(user.id, onlineUserIds()) }
-})
-
-app.post('/api/games/draw/rooms', async (req) => {
-  const user = requireUser(req)
-  const body = (req.body ?? {}) as { title?: unknown; rounds?: unknown }
-  const room = createDrawRoom({
-    title: typeof body.title === 'string' ? body.title : '',
-    creatorId: user.id,
-    creatorName: user.display_name,
-    rounds: typeof body.rounds === 'number' ? body.rounds : undefined,
-  })
-  // 建房不广播大厅刷新（与斗地主一致）：大厅打开时拉一次，加入/开始时各自推送
-  return { room }
-})
-
-app.get('/api/games/draw/rooms/:id', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  return { room: getDrawRoom(id, user.id, onlineUserIds()) }
-})
-
-app.post('/api/games/draw/rooms/:id/join', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  const room = joinDrawRoom(id, user.id, user.display_name, onlineUserIds())
-  pushDrawRoom(id)
-  return { room }
-})
-
-app.post('/api/games/draw/rooms/:id/leave', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  try {
-    const room = leaveDrawRoom(id, user.id, onlineUserIds())
-    pushDrawRoom(id)
-    return { room }
-  } catch (err) {
-    // 最后一人退房 = 房间解散（leaveDrawRoom 删行后 404）。把这件事告诉
-    // 留下的人之外没有别人（都走了），但 room 404 本身就是有效信号，照抛。
-    disposeDrawRoom(id)
-    throw err
-  }
-})
-
-app.post('/api/games/draw/rooms/:id/start', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  const room = startDrawRoom(id, user.id, onlineUserIds())
-  pushDrawRoom(id)
-  return { room }
-})
-
-app.post('/api/games/draw/rooms/:id/word', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  const body = (req.body ?? {}) as { word?: unknown }
-  if (typeof body.word !== 'string') throw new HttpError(400, '缺少 word')
-  const room = chooseDrawWord(id, user.id, body.word, onlineUserIds())
-  pushDrawRoom(id)
-  return { room }
-})
-
-/**
- * 画笔上报。
- *
- * 客户端攒批（约 80ms 一条）后 POST；服务端校验"是画家 + 字段合法"，
- * 追加进内存缓冲，然后把**同一份 payload** 广播给房间全员 ——
- * 画笔没有视角差异，答案藏在 state 里，不在笔迹里。
- */
-app.post('/api/games/draw/rooms/:id/strokes', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  const body = (req.body ?? {}) as Record<string, unknown>
-  const op = submitStroke(id, user.id, {
-    op: (body.op as DrawStrokeOp['op']) ?? 'points',
-    strokeId: String(body.strokeId ?? ''),
-    points: Array.isArray(body.points) ? (body.points as DrawStrokeOp['points']) : [],
-    color: typeof body.color === 'string' ? body.color : '#000000',
-    width: typeof body.width === 'number' ? body.width : 4,
-    tool: body.tool === 'eraser' ? 'eraser' : 'pen',
-  })
-  // clear（缓冲超限）时笔迹被重置，接收端要连画布一起清 —— op 原样带过去
-  pushDrawStroke(id, user.id, op)
-  return { ok: true }
-})
-
-/** 中途进来 / 刷新：补发当前画布。缓冲可能为空（服务端重启过），如实返回。 */
-app.get('/api/games/draw/rooms/:id/canvas', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  getDrawRoom(id, user.id, onlineUserIds()) // 顺带做成员校验
-  return { strokes: getDrawCanvas(id) }
-})
-
-/**
- * 历史对局。
- *
- * 登录用户都能看：这是社团内部的娱乐记录，不是私密内容；如果限定"只看自己
- * 参加过的"，"我们上礼拜那局"这种最常见的问法反而查不出来。
- */
-app.get('/api/games/draw/history', async (req) => {
-  requireUser(req)
-  const q = req.query as { limit?: string }
-  const limit = Math.min(Math.max(Number.parseInt(q.limit ?? '30', 10) || 30, 1), 100)
-  return { rooms: listDrawHistory(limit) }
-})
-
-app.get('/api/games/draw/history/:id', async (req) => {
-  requireUser(req)
-  const { id } = req.params as { id: string }
-  return { detail: getDrawHistoryDetail(id) }
-})
-
-app.post('/api/games/draw/rooms/:id/guess', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  const body = (req.body ?? {}) as { text?: unknown }
-  if (typeof body.text !== 'string') throw new HttpError(400, '缺少 text')
-  const result = guessDrawWord(id, user.id, user.display_name, body.text, onlineUserIds())
-  // 猜对 / 阶段推进（全对进 reveal）都会改状态；纯闲聊只动内存，状态推送无害
-  pushDrawRoom(id)
-  return result
-})
+// 路由与推送 helper 都在 routes/draw.ts。这里只登记；超时扫描（下面 2 秒 tick）
+// 仍留在 index.ts —— 它是全站定时器，不属于任何单个路由模块。
+registerDrawRoutes(app)
 
 // ---------------------------------------------------------------- 留言板
 
-/**
- * 留言板（全站一份，登录即可读写）。
- *
- * 变化时 broadcast 一条 `board` 事件，payload 只带原因与 id —— 客户端重拉
- * 一次列表。留言板的数据量是几十条，做增量同步带来的复杂度远大于省下的
- * 一次请求。
- */
-const boardKindSchema = z.enum(['bug', 'idea', 'complaint'])
-
-app.get('/api/board/posts', async (req) => {
-  const user = requireUser(req)
-  const q = req.query as { open?: string; kind?: string; limit?: string }
-  const kind = q.kind && (BOARD_KINDS as readonly string[]).includes(q.kind) ? (q.kind as BoardKind) : undefined
-  return {
-    posts: listBoardPosts(user.id, {
-      openOnly: q.open === '1',
-      kind,
-      limit: Number.parseInt(q.limit ?? '100', 10) || 100,
-    }),
-  }
-})
-
-app.post('/api/board/posts', async (req) => {
-  const user = requireUser(req)
-  const body = req.body as { kind?: unknown; body?: unknown }
-  const post = createBoardPost({
-    authorId: user.id,
-    authorName: user.display_name,
-    kind: boardKindSchema.parse(body.kind ?? 'bug'),
-    body: typeof body.body === 'string' ? body.body : '',
-  })
-  audit({
-    actorId: user.id,
-    actorIp: actorIp(req),
-    category: 'system',
-    action: 'board-post',
-    target: post.id,
-    payload: { kind: post.kind, length: post.body.length },
-  })
-  broadcast({ type: 'board', data: { reason: 'created', postId: post.id } })
-  return { post }
-})
-
-app.post('/api/board/posts/:id/resolve', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  const body = req.body as { resolved?: unknown; resolution?: unknown }
-  const post = resolveBoardPost(
-    id,
-    user.id,
-    roleAtLeast(user.role, 'admin'),
-    body.resolved !== false,
-    typeof body.resolution === 'string' ? body.resolution : null,
-  )
-  // 标记状态也是"官方的处理动作"，谁在什么时候把哪条标掉的要留痕 ——
-  // 与"删活动必须写审计"同一条原则（见 ledger-delete-event）。
-  audit({
-    actorId: user.id,
-    actorIp: actorIp(req),
-    category: 'system',
-    action: 'board-resolve',
-    target: id,
-    payload: {
-      kind: post.kind,
-      resolved: post.resolvedAt !== null,
-      noteLength: post.resolution?.length ?? 0,
-    },
-  })
-  broadcast({ type: 'board', data: { reason: 'resolved', postId: id } })
-  return { post }
-})
-
-app.delete('/api/board/posts/:id', async (req) => {
-  const user = requireUser(req)
-  const { id } = req.params as { id: string }
-  // 先读一遍：删完就查不到了，而审计里要留下"删的是谁的、什么类型、有没有被处理过"。
-  const before = getBoardPost(id, user.id)
-  deleteBoardPost(id, user.id, roleAtLeast(user.role, 'admin'))
-  // 留言板的定位是"收集 bug 的工单"，删除是破坏性操作 —— 必须留痕。
-  audit({
-    actorId: user.id,
-    actorIp: actorIp(req),
-    category: 'system',
-    action: 'board-delete',
-    target: id,
-    payload: {
-      kind: before.kind,
-      authorId: before.authorId,
-      wasResolved: before.resolvedAt !== null,
-      length: before.body.length,
-    },
-  })
-  broadcast({ type: 'board', data: { reason: 'deleted', postId: id } })
-  return { ok: true }
-})
+// 路由在 routes/board.ts（拆分 index.ts 的第一步）。这里只登记，位置与搬家前一致。
+registerBoardRoutes(app)
 
 // ---------------------------------------------------------------- 待办
 
@@ -4202,6 +3917,20 @@ if (existsSync(WEB_DIST)) {
 }
 
 // ---------------------------------------------------------------- 启动
+
+/**
+ * 路由快照（重构用，不是功能）。
+ *
+ * `WL_DUMP_ROUTES=1 node src/index.ts` 会把注册表打印出来然后退出。拆 index.ts
+ * 时用它做"只搬家、不改门牌号"的证据：重构前后各 dump 一份，`diff` 必须为空。
+ * 一旦某条路由在搬家时悄悄丢了或换了方法，这里立刻能看出来 —— 比"跑一遍测试"
+ * 可靠，因为测试只覆盖被写到的路径。
+ */
+if (process.env.WL_DUMP_ROUTES === '1') {
+  await app.ready()
+  console.log(app.printRoutes({ commonPrefix: false }))
+  process.exit(0)
+}
 
 startJobRunner()
 
