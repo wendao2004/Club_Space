@@ -453,6 +453,18 @@ async function testInstantUploadRefCount() {
   const overview = await api('/api/admin/overview')
   if (overview.status === 200) {
     ok('管理概览可访问（用于后续自检）')
+
+    // 存储明细：单文件不设上限是刻意的，那"谁用得最多、最大的几个文件是谁的"
+    // 就必须有接口能回答（界面上在「管理 → 概览 → 存储明细」）。
+    const storage = overview.body?.storage
+    assert(!!storage, '概览里带存储明细')
+    assert(Array.isArray(storage.topFiles), '存储明细带"最大的文件"列表')
+    assert(Array.isArray(storage.byOwner), '存储明细带按人汇总')
+    assert(typeof storage.freeBytes === 'number' && storage.freeBytes >= 0, '带磁盘剩余空间')
+    const sizes = (storage.topFiles ?? []).map((f) => f.size)
+    assert(sizes.every((s, i) => i === 0 || sizes[i - 1] >= s), '最大的文件按大小倒序')
+    const me = (storage.byOwner ?? []).find((r) => r.name && r.files > 0)
+    assert(!!me, '按人汇总里有传过文件的人')
   }
 
   // 清理

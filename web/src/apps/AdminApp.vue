@@ -75,6 +75,23 @@ const dedupNote = computed(() => {
   return `内容去重：${s.nodes} 个文件只占 ${s.blobs} 份存储`
 })
 
+const storage = computed(
+  () =>
+    overview.value?.storage ?? {
+      topFiles: [],
+      byOwner: [],
+      freeBytes: -1,
+      totalBytes: 0,
+      minFreeBytes: 0,
+    },
+)
+const logicalBytes = computed(() => storage.value.byOwner.reduce((sum, row) => sum + row.bytes, 0))
+const storageBadge = computed(() => {
+  const s = storage.value
+  if (s.freeBytes < 0) return 'wl-badge'
+  return s.freeBytes < s.minFreeBytes ? 'wl-badge--danger' : 'wl-badge--success'
+})
+
 function messageOf(err: unknown): string {
   if (err instanceof ApiError) return err.message
   if (err instanceof Error) return err.message
@@ -585,6 +602,53 @@ onMounted(() => {
             </div>
 
             <p v-if="dedupNote" class="admin__note">{{ dedupNote }}</p>
+
+            <div class="card wl-card">
+              <div class="card__head">
+                <h4 class="card__title">存储明细</h4>
+                <span
+                  class="wl-badge"
+                  :class="storageBadge"
+                >
+                  {{ storage.freeBytes < 0 ? '余量未知' : `剩余 ${formatBytes(storage.freeBytes)}` }}
+                </span>
+              </div>
+              <p class="card__meta">
+                磁盘 {{ formatBytes(storage.totalBytes) }}，底线保留 {{ formatBytes(storage.minFreeBytes) }}
+              </p>
+              <p class="card__meta">
+                物理占用 {{ formatBytes(stats.bytes) }}（内容去重后）；按文件算的逻辑大小
+                {{ formatBytes(logicalBytes) }} —— 两者之差就是去重省下的空间。
+              </p>
+
+              <table v-if="storage.byOwner.length" class="table">
+                <thead>
+                  <tr>
+                    <th>成员</th>
+                    <th>文件数</th>
+                    <th>逻辑大小</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in storage.byOwner" :key="row.userId">
+                    <td class="table__name">{{ row.name }}</td>
+                    <td class="table__muted">{{ row.files }}</td>
+                    <td class="table__muted">{{ formatBytes(row.bytes) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <template v-if="storage.topFiles.length">
+                <p class="card__meta">最大的文件（单文件不设上限，所以这里能看见"盘是怎么满的"）</p>
+                <ul class="storagelist">
+                  <li v-for="f in storage.topFiles" :key="f.id" class="storagelist__row">
+                    <span class="storagelist__name selectable" :title="f.name">{{ f.name }}</span>
+                    <span class="storagelist__meta">{{ f.ownerName }} · {{ formatBytes(f.size) }}</span>
+                  </li>
+                </ul>
+              </template>
+              <p v-else class="card__meta">还没有上传过文件。</p>
+            </div>
 
             <div class="card wl-card">
               <div class="card__head">
@@ -1146,6 +1210,44 @@ onMounted(() => {
   background: var(--accent-soft);
   color: var(--text-secondary);
   font-size: 12.5px;
+}
+
+/* ---------------------------------------------------------------- 存储明细 */
+
+.storagelist {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.storagelist__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.06));
+  font-size: 12.5px;
+}
+
+.storagelist__row:last-child {
+  border-bottom: 0;
+}
+
+.storagelist__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storagelist__meta {
+  flex: none;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------------------------------------------------------------- 统计卡片 */

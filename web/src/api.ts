@@ -290,6 +290,21 @@ export const api = {
         note: string | null
       }>
       audit: { records: number; chainOk: boolean; head: { seq: number; hash: string } }
+      /** 存储明细：逻辑大小按文件聚合，物理占用看 stats.bytes。 */
+      storage: {
+        topFiles: Array<{
+          id: string
+          name: string
+          size: number
+          ownerId: string
+          ownerName: string
+          createdAt: number
+        }>
+        byOwner: Array<{ userId: string; name: string; files: number; bytes: number }>
+        freeBytes: number
+        totalBytes: number
+        minFreeBytes: number
+      }
       canManage: boolean
     }>('/api/admin/overview'),
 

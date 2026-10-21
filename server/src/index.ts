@@ -256,6 +256,7 @@ import {
   isEditableMime,
   replaceNodeContent,
   storageStats,
+  storageBreakdown,
   type Space,
 } from './files.ts'
 import {
@@ -1428,6 +1429,7 @@ app.get('/api/jobs', async (req) => {
 app.get('/api/admin/overview', async (req) => {
   const user = requireRole(req, 'admin')
   const stats = storageStats()
+  const disk = await probeDisk()
   const users = getDb()
     .prepare('SELECT id, username, display_name, role, status, created_at, last_login_at FROM users ORDER BY created_at')
     .all() as Array<Record<string, unknown>>
@@ -1443,6 +1445,15 @@ app.get('/api/admin/overview', async (req) => {
     invites,
     audit: { records: chain.total, chainOk: chain.ok, head: chainHead() },
     canManage: roleAtLeast(user.role, 'admin'),
+    // 存储明细：谁用得最多、最大的几个文件是谁的。
+    // 单文件不设上限是刻意的（见 assertDiskSpace），那"盘是怎么满的"就必须有
+    // 界面能回答 —— 否则只能 SSH 上去 du。
+    storage: {
+      ...storageBreakdown(),
+      freeBytes: disk.freeBytes,
+      totalBytes: disk.totalBytes,
+      minFreeBytes: disk.minFreeBytes,
+    },
     // 存储一致性自检。
     // 这个函数原本写了却从没被调用（等于装了报警器没接电源）——
     // 现在管理员打开管理页就能看到：引用计数有没有对不上的、有没有内容丢了。

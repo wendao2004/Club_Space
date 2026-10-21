@@ -959,6 +959,68 @@ export function storageStats(): { blobs: number; bytes: number; nodes: number } 
   return { blobs: blob.n, bytes: blob.b, nodes: node.n }
 }
 
+export interface StorageTopFile {
+  id: string
+  name: string
+  size: number
+  ownerId: string
+  ownerName: string
+  createdAt: number
+}
+
+export interface StorageByOwner {
+  userId: string
+  name: string
+  files: number
+  /** 逻辑大小（同一个内容被两个节点引用时会各算一次，物理占用看 blobs 那份）。 */
+  bytes: number
+}
+
+/**
+ * 存储明细：谁用得最多、最大的是哪几个文件。
+ *
+ * 为什么需要这个：单文件不设上限（见 assertDiskSpace 的说明，那是刻意的），
+ * 于是"盘是怎么满的"就没有任何界面能回答了 —— 昨天线上出现一个 14.84GB 的
+ * 单文件，只能靠 SSH 上去 du 才知道。这里只做**只读展示**，不加配额、不拦上传。
+ *
+ * ⚠️ 两套口径别混：
+ *   - blobs 的 bytes 是**物理占用**（内容去重后实际落盘的字节数）；
+ *   - 这里按节点 SUM(size) 是**逻辑大小**（同一份内容被 3 个文件引用就算 3 次）。
+ *     前者回答"盘还剩多少"，后者回答"谁的文件夹大"。
+ */
+export function storageBreakdown(): { topFiles: StorageTopFile[]; byOwner: StorageByOwner[] } {
+  const topFiles = getDb()
+    .prepare(
+      `SELECT n.id, n.name, n.size, n.owner_id AS ownerId, u.display_name AS ownerName, n.created_at AS createdAt
+         FROM nodes n JOIN users u ON u.id = n.owner_id
+        WHERE n.kind = 'file' AND n.deleted_at IS NULL
+        ORDER BY n.size DESC, n.created_at ASC
+        LIMIT 10`,
+    )
+    .all() as unknown as StorageTopFile[]
+
+  const byOwner = getDb()
+    .prepare(
+      `SELECT n.owner_id AS userId, u.display_name AS name,
+              COUNT(*) AS files, COALESCE(SUM(n.size), 0) AS bytes
+         FROM nodes n JOIN users u ON u.id = n.owner_id
+        WHERE n.kind = 'file' AND n.deleted_at IS NULL
+        GROUP BY n.owner_id
+        ORDER BY bytes DESC`,
+    )
+    .all() as unknown as StorageByOwner[]
+
+  return { topFiles, byOwner }
+}
+
+/**
+ * 超过这个大小的上传会留一条审计。
+ *
+ * 不是限制，是"留个脚印"：一个人传了 14GB 之后，管理员该能在审计里看见
+ * 这件事发生过，而不是某天发现盘满了去猜。
+ */
+export const LARGE_UPLOAD_BYTES = 1024 ** 3
+
 /**
  * 一致性自检：引用计数与实际引用是否对得上。
  *
