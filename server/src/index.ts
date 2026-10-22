@@ -114,6 +114,7 @@ import { AuthError, actorIp, requireRole, requireUser } from './routes/auth-guar
 import { registerBoardRoutes } from './routes/board.ts'
 import { registerPollRoutes } from './routes/poll.ts'
 import { musicPurgeDeleted, registerMusicRoutes } from './routes/music.ts'
+import { isRoomTrack } from './music.ts'
 import { registerTypingRoutes } from './routes/typing.ts'
 import { registerWhiteboardRoutes } from './routes/whiteboard.ts'
 import { pushDrawRoom, pushDrawStroke, registerDrawRoutes } from './routes/draw.ts'
@@ -1222,6 +1223,42 @@ app.get('/api/files/:id/preview', async (req, reply) => {
     .header('content-security-policy', "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox")
 
   // 音视频的 seek / PDF 的按页加载都靠这个（见 applyByteRange 的注释）
+  const range = applyByteRange(req, reply, node)
+  if (range === null) return reply
+  if (range === 'whole') {
+    reply.header('content-length', String(node.size))
+    return reply.send(openNodeStream(node))
+  }
+  return reply.send(openNodeStream(node, range))
+})
+
+/**
+ * 听歌房的音频流。
+ *
+ * 与 /preview 的区别只有鉴权：**只要这首歌在厅里（队列中或正在播）就能听**，
+ * 不再要求 `canRead`。因为：
+ *   - 排歌只校验"排歌人自己能读"，私人目录的歌也能排进来；
+ *   - 若播放仍走 preview，除上传者外所有人 403，浏览器 <audio> 又是
+ *     静默失败 —— 用户看到的就是"只有上传者那台电脑有声音"。
+ * 撤下队列后这个通道立刻失效，等于"离开厅就不再共享"。
+ */
+app.get('/api/music/stream/:nodeId', async (req, reply) => {
+  const user = requireUser(req)
+  const { nodeId } = req.params as { nodeId: string }
+  const node = getNode(nodeId)
+  if (!node || node.kind !== 'file' || node.deleted_at !== null) throw new HttpError(404, '这首歌不在了')
+  if (!node.mime?.startsWith('audio/')) throw new HttpError(400, '不是音频文件')
+  // 厅里没有这首歌 → 回落到普通读权限（上传者自己仍可以预览）
+  if (!isRoomTrack(nodeId) && !canRead(node, user.id, roleAtLeast(user.role, 'admin'))) {
+    throw new HttpError(403, '这首歌已经不在听歌房里了')
+  }
+
+  reply
+    .header('content-type', node.mime)
+    .header('content-disposition', `inline; filename*=UTF-8''${encodeURIComponent(node.name)}`)
+    .header('x-content-type-options', 'nosniff')
+    .header('accept-ranges', 'bytes')
+
   const range = applyByteRange(req, reply, node)
   if (range === null) return reply
   if (range === 'whole') {

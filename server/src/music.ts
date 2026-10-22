@@ -190,6 +190,21 @@ export function resumeRoom(): MusicRoomView {
   return musicRoomView()
 }
 
+/**
+ * 这首歌是不是"厅里的歌"（在队列里或正在播）。
+ *
+ * 用作 /api/music/stream 的鉴权：排进听歌房 = 主动把它分享给全厅，
+ * 所以不再要求 `canRead` —— 否则把私人目录的歌排进来时，除上传者外的
+ * 所有人都拿不到音频流（浏览器 <audio> 静默失败，表现为"别人没声音"）。
+ */
+export function isRoomTrack(nodeId: string): boolean {
+  const db = getDb()
+  const inQueue = db.prepare('SELECT 1 FROM music_queue WHERE node_id = ? LIMIT 1').get(nodeId)
+  if (inQueue) return true
+  const playing = db.prepare('SELECT 1 FROM music_state WHERE id = 1 AND node_id = ?').get(nodeId)
+  return Boolean(playing)
+}
+
 /** 把歌加进队列。必须是 audio 节点、且加歌人能读到（他人私有的直接拒）。 */
 export function enqueueTrack(nodeId: string, userId: string, isAdmin: boolean): MusicRoomView {
   const node = getNode(nodeId)

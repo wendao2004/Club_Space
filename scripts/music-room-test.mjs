@@ -37,8 +37,8 @@ function eq(actual, expected, name) {
 
 function makeClient() {
   let cookie = ''
-  const request = async function request(path, method = 'GET', body, rawBody) {
-    const headers = {}
+  const request = async function request(path, method = 'GET', body, rawBody, extraHeaders = null) {
+    const headers = { ...(extraHeaders ?? {}) }
     if (body !== undefined || rawBody !== undefined) headers['content-type'] = 'application/json'
     if (rawBody !== undefined) headers['content-type'] = 'application/octet-stream'
     if (cookie) headers.cookie = cookie
@@ -56,7 +56,7 @@ function makeClient() {
     } catch {
       json = text
     }
-    return { status: res.status, body: json }
+    return { status: res.status, body: json, headers: res.headers }
   }
   return request
 }
@@ -292,6 +292,40 @@ assert(
   `暂停 ${pausedAt}ms → 继续 ${resumed.positionMs}ms`,
 )
 
+
+console.log('\n【私人空间的歌：排进厅后别人也能听】')
+
+// 用户真实场景：歌在自己私人目录 → 只有自己能 preview，别人 403，
+// 浏览器 <audio> 静默失败 = "只有上传者那台电脑有声音"。
+// 修法：听歌房有独立的流通道 /api/music/stream，只认"歌在不在厅里"。
+// 复用前面那首「小爱的私藏.wav」（在 alice 的私人目录里）
+
+// 小波读不到小爱的私人文件 —— 这就是"只有上传者那台电脑有声音"的根因
+res = await bob(`/api/files/${privateSong}/preview`)
+eq(res.status, 403, '别人的私人文件走 preview 读不到（复现根因）')
+
+// 小爱把它排进厅里（排歌只校验排歌人自己能读）
+res = await alice('/api/music/queue', 'POST', { nodeId: privateSong })
+eq(res.status, 200, '私人空间的歌可以排进听歌房')
+
+// 现在小波也能听了 —— 走的是厅内流通道
+res = await bob(`/api/music/stream/${privateSong}`)
+eq(res.status, 200, '排进厅后别人能拿到音频流（听歌房流通道）')
+assert(String(res.headers?.get?.('accept-ranges') ?? '') !== '', '流接口声明了 accept-ranges（可 seek）')
+
+// Range 请求：音频 seek 依赖它
+const ranged = await bob(`/api/music/stream/${privateSong}`, 'GET', undefined, undefined, { range: 'bytes=0-99' })
+eq(ranged.status, 206, '支持 Range 请求（206）')
+
+// 撤下队列 → 流立即失效（"离开厅就不再共享"）
+const queueNow = (await alice('/api/music/room')).body
+const target = queueNow.queue.find((q) => q.nodeId === privateSong) ?? null
+if (target) await alice(`/api/music/queue/${target.id}`, 'DELETE')
+if ((await alice('/api/music/room')).body.nowPlaying?.nodeId === privateSong) {
+  await alice('/api/music/skip', 'POST', {})
+}
+res = await bob(`/api/music/stream/${privateSong}`)
+eq(res.status, 403, '撤下后流通道关闭（不再是厅里的歌）')
 
 // ---------------------------------------------------------------- 汇总
 

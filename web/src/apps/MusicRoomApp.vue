@@ -172,8 +172,28 @@ async function skip(): Promise<void> {
   await music.skip()
 }
 
+/**
+ * 走听歌房自己的流通道（/api/music/stream）。
+ *
+ * 不能用 preview：preview 要求 canRead，而排歌只校验"排歌人自己能读"——
+ * 私人目录里的歌，除上传者外所有人 403，<audio> 静默失败，表现就是
+ * "只有上传者那台电脑有声音"。厅内流通道只认"这首歌在不在厅里"。
+ */
 function trackUrl(nodeId: string): string {
-  return api.previewUrl(nodeId)
+  return `/api/music/stream/${encodeURIComponent(nodeId)}`
+}
+
+/** <audio> 加载失败——之前是静默的，用户只感到"没声音"。 */
+const audioError = ref<string | null>(null)
+
+function onAudioError(): void {
+  const el = audioEl.value
+  const code = el?.error?.code
+  audioError.value =
+    code === 4
+      ? '这首歌的格式浏览器放不了（试试 mp3 / m4a / wav）'
+      : '音频加载失败 —— 可能已被移出听歌房，或者文件被删了'
+  player.blocked = false
 }
 
 onMounted(() => {
@@ -264,7 +284,12 @@ watch(
           preload="auto"
           @loadedmetadata="onLoadedMetadata"
           @ended="onEnded"
+          @error="onAudioError"
+          @playing="audioError = null"
         />
+        <p v-if="audioError" class="now-warn">
+          <Icon name="alert" :size="13" />{{ audioError }}
+        </p>
       </template>
       <template v-else>
         <div class="now-idle">
@@ -302,6 +327,9 @@ watch(
           <button class="wl-icon-btn" @click="picking = false"><Icon name="close" :size="15" /></button>
         </header>
         <div class="picker-list">
+          <p class="picker-note">
+            排进听歌房 = 这首歌会共享给全厅收听（私人目录里的也行，撤下就不再共享）
+          </p>
           <p v-if="music.tracks.length === 0" class="empty">文件区里还没有你能访问的音频文件</p>
           <button v-for="t in music.tracks" :key="t.id" class="pick" @click="enqueue(t.id)">
             <Icon name="audio" :size="14" />
@@ -355,6 +383,18 @@ watch(
 
 .now--idle {
   padding: var(--space-4);
+}
+
+.now-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger, #c0392b) 10%, transparent);
+  color: var(--danger, #c0392b);
+  font-size: 12px;
 }
 
 .now-icon--paused {
@@ -505,6 +545,13 @@ watch(
   padding: var(--space-3);
   border-bottom: 1px solid var(--line-hair);
   font-size: 13px;
+}
+
+.picker-note {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-3);
 }
 
 .picker-list {
