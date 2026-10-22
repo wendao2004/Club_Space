@@ -946,6 +946,12 @@ export const api = {
     /** 暂停/继续是**同一个厅的共享状态**（谁都能按，跟切歌一个级别）。 */
     pause: () => request<MusicRoomView>('/api/music/pause', { json: {} }),
     resume: () => request<MusicRoomView>('/api/music/resume', { json: {} }),
+
+    /** 加入/离开厅：打开窗口不等于在厅里，得显式加入。 */
+    join: () => request<MusicRoomView>('/api/music/join', { json: {} }),
+    leave: () => request<MusicRoomView>('/api/music/leave', { json: {} }),
+    /** 心跳续期（90 秒不续就算离开了）。 */
+    heartbeat: () => request<{ ok: true }>('/api/music/heartbeat', { json: {} }),
   },
 
   // ---------------------------------------------------------------- 打字练习
@@ -1899,9 +1905,19 @@ export interface MusicNowPlaying {
   pausedByName: string | null
 }
 
+export interface MusicMember {
+  id: string
+  name: string
+  joinedAt: number
+}
+
 export interface MusicRoomView {
   nowPlaying: MusicNowPlaying | null
   queue: MusicQueueItem[]
+  /** 在场成员（90 秒内有心跳的）。 */
+  members: MusicMember[]
+  /** 自己是否在厅里（决定显示加入按钮还是播放器）。 */
+  inRoom: boolean
 }
 
 // ---------------------------------------------------------------- 打字练习

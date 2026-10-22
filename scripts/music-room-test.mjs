@@ -146,6 +146,12 @@ async function makeMember(username, display) {
 const alice = await makeMember(`musicalice${SUFFIX}`, '小爱')
 const bob = await makeMember(`musicbob${SUFFIX}`, '小波')
 
+// 新版规则：打开窗口 ≠ 在厅里，写操作（排歌/切歌/暂停/上报播完）要求先加入。
+// 这些用例都围绕"在厅里"的行为，先让三个人都加入。
+await creator('/api/music/join', 'POST', {})
+await alice('/api/music/join', 'POST', {})
+await bob('/api/music/join', 'POST', {})
+
 // 共享区两首歌 + 一个非音频 + 小爱私有区一首
 const songA = await uploadFile(creator, '晴天.wav', wavBytes())
 const songB = await uploadFile(creator, '夜曲.wav', wavBytes())
@@ -155,6 +161,49 @@ const privateSong = await uploadFile(alice, '小爱的私藏.wav', wavBytes(), '
 const tracksOf = async (client) => (await client('/api/music/tracks')).body.tracks.map((t) => t.name)
 
 // ---------------------------------------------------------------- 曲目列表
+
+console.log('\n【加入与离开】')
+
+{
+  const carol = await makeMember(`musiccarol${SUFFIX}`, '小卡')
+  let res = null
+
+  // 没加入就排歌 → 403（"打开窗口就在厅里"的老行为不再成立）
+  res = await carol('/api/music/queue', 'POST', { nodeId: songA })
+  eq(res.status, 403, '未加入不能排歌（403）')
+  res = await carol('/api/music/skip', 'POST', {})
+  eq(res.status, 403, '未加入不能切歌（403）')
+
+  // 未加入也能看厅里在放什么（只读）
+  res = await carol('/api/music/room')
+  eq(res.status, 200, '未加入也能看厅里的状态')
+  eq(res.body.inRoom, false, 'inRoom=false')
+  assert(res.body.members.length >= 3, '能看到在场成员', `${res.body.members.length} 人`)
+
+  // 加入之后就行了
+  res = await carol('/api/music/join', 'POST', {})
+  eq(res.status, 200, '加入听歌房')
+  eq(res.body.inRoom, true, 'inRoom=true')
+  assert(
+    res.body.members.some((m) => m.name === '小卡'),
+    '成员列表里出现自己',
+  )
+  res = await carol('/api/music/queue', 'POST', { nodeId: songA })
+  eq(res.status, 200, '加入后可以排歌')
+  res = await carol('/api/music/skip', 'POST', {})
+  eq(res.status, 200, '加入后可以切歌')
+
+  // 离开 → 不在列表、写操作又被拒
+  res = await carol('/api/music/leave', 'POST', {})
+  eq(res.status, 200, '离开听歌房')
+  eq(res.body.inRoom, false, '离开后 inRoom=false')
+  assert(
+    !res.body.members.some((m) => m.name === '小卡'),
+    '离开后不在成员列表里',
+  )
+  res = await carol('/api/music/queue', 'POST', { nodeId: songA })
+  eq(res.status, 403, '离开后不能排歌')
+}
 
 console.log('\n【可排播曲目】')
 

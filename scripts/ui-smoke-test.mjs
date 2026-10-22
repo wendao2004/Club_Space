@@ -4153,6 +4153,65 @@ async function main() {
     await sleep(1500)
     const reentered = await evaluate(`String(document.querySelector('.typing-app .p-word')?.textContent?.trim() ?? '')`)
     assert(reentered.length > 0, '练完的章节重进仍有内容（归零重练，不是空白页）', reentered.slice(0, 20))
+
+    // ---- 听歌房：打开窗口 ≠ 在厅里，要显式加入 ----
+    //
+    // 用户提的：不加入就等于默认全员在厅里，不合理。加入前不渲染 <audio>
+    // （不跟着同步播放）、排歌按钮禁用；加入后才参与同步。
+    console.log('\n【听歌房 · 加入】')
+    await evaluate(`(() => {
+      const icons = [...document.querySelectorAll('.desktop-icons .icon')]
+      icons.find((i) => i.textContent.includes('听歌房'))?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+      return true
+    })()`)
+    await sleep(4000)
+
+    const beforeJoin = JSON.parse(
+      await evaluate(`JSON.stringify({
+        joinPanel: !!document.querySelector('.music-app .join-panel'),
+        audio: document.querySelectorAll('.music-app audio').length,
+        joinBtn: [...document.querySelectorAll('.music-app button')].some((b) => b.textContent.includes('加入听歌房')),
+        pickDisabled: (() => {
+          const b = [...document.querySelectorAll('.music-app button')].find((x) => x.textContent.includes('排首歌'))
+          return b ? b.disabled : null
+        })(),
+      })`),
+    )
+    assert(beforeJoin.joinPanel, '未加入时显示"你还没加入听歌房"面板')
+    assert(beforeJoin.joinBtn, '面板里有「加入听歌房」按钮')
+    assert(beforeJoin.audio === 0, '未加入不渲染 <audio>（不跟着同步播放）', `${beforeJoin.audio} 个`)
+    assert(beforeJoin.pickDisabled === true, '未加入时「排首歌」禁用')
+
+    await evaluate(`(() => {
+      [...document.querySelectorAll('.music-app button')].find((b) => b.textContent.includes('加入听歌房'))?.click()
+      return true
+    })()`)
+    await sleep(1500)
+
+    const afterJoin = JSON.parse(
+      await evaluate(`JSON.stringify({
+        joinPanel: !!document.querySelector('.music-app .join-panel'),
+        leaveBtn: [...document.querySelectorAll('.music-app button')].some((b) => b.textContent.trim() === '离开'),
+        memberChip: document.querySelector('.music-app .member-chip')?.textContent?.replace(/\s+/g, '') ?? null,
+      })`),
+    )
+    assert(!afterJoin.joinPanel, '加入后面板消失')
+    assert(afterJoin.leaveBtn, '加入后出现「离开」按钮')
+    assert(
+      (afterJoin.memberChip ?? '').includes('人在厅'),
+      '顶栏显示在场人数',
+      String(afterJoin.memberChip),
+    )
+
+    await evaluate(`(() => {
+      [...document.querySelectorAll('.music-app button')].find((b) => b.textContent.trim() === '离开')?.click()
+      return true
+    })()`)
+    await sleep(1500)
+    assert(
+      (await evaluate(`String(!!document.querySelector('.music-app .join-panel'))`)) === 'true',
+      '离开后回到"未加入"面板',
+    )
     await evaluate(`window.prompt = window.__origPrompt; true`)
 
     // ---- 控制台错误 ----

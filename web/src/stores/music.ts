@@ -94,6 +94,34 @@ export const useMusic = defineStore('music', {
       }
     },
 
+    /** 加入听歌房（打开窗口不等于在厅里）。 */
+    async join(): Promise<void> {
+      try {
+        this.room = await api.music.join()
+        this.error = null
+      } catch (err) {
+        this.error = messageOf(err, '加入失败')
+      }
+    },
+
+    async leave(): Promise<void> {
+      try {
+        this.room = await api.music.leave()
+        this.error = null
+      } catch (err) {
+        this.error = messageOf(err, '离开失败')
+      }
+    },
+
+    /** 心跳：不发广播，纯续期。 */
+    async heartbeat(): Promise<void> {
+      try {
+        await api.music.heartbeat()
+      } catch {
+        // 心跳失败不打扰用户，下一轮再试
+      }
+    },
+
     /** 暂停/继续（厅级状态，影响所有人）。 */
     async pause(): Promise<void> {
       try {

@@ -42,10 +42,67 @@ export interface MusicNowPlaying {
   playedToken: number
 }
 
+export interface MusicMember {
+  id: string
+  name: string
+  /** 什么时候加入的（毫秒）。 */
+  joinedAt: number
+}
+
 export interface MusicRoomView {
   nowPlaying: MusicNowPlaying | null
   queue: MusicQueueItem[]
+  /** 在场成员（90 秒内有心跳的）。 */
+  members: MusicMember[]
+  /** 看这个响应的人自己是否在厅里。 */
+  inRoom: boolean
 }
+
+/** 超过这么久没心跳就算离开（前端每 40s 一次，容忍一次丢包）。 */
+const MEMBER_TTL_MS = 90_000
+
+/** 这个人现在在不在厅里（90 秒内有心跳）。 */
+export function isMember(userId: string): boolean {
+  if (!userId) return false
+  const row = getDb()
+    .prepare('SELECT last_seen FROM music_members WHERE user_id = ?')
+    .get(userId) as { last_seen: number } | undefined
+  return Boolean(row && row.last_seen >= now() - MEMBER_TTL_MS)
+}
+
+/** 加入（幂等）。已经在了就只续心跳。 */
+export function joinRoom(userId: string): MusicRoomView {
+  const db = getDb()
+  const ts = now()
+  db.prepare(
+    `INSERT INTO music_members (user_id, joined_at, last_seen) VALUES (?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET last_seen = excluded.last_seen`,
+  ).run(userId, ts, ts)
+  return musicRoomView(userId)
+}
+
+/** 心跳：不发广播（40 秒一次，广播会把 SSE 刷满）。 */
+export function touchMember(userId: string): void {
+  getDb().prepare('UPDATE music_members SET last_seen = ? WHERE user_id = ?').run(now(), userId)
+}
+
+/** 离开。 */
+export function leaveRoom(userId: string): MusicRoomView {
+  getDb().prepare('DELETE FROM music_members WHERE user_id = ?').run(userId)
+  return musicRoomView(userId)
+}
+
+/**
+ * 需要在厅里才能做的动作（排歌/切歌/暂停/上报播完）。
+ *
+ * 不做这个校验的话，"打开窗口就在厅里"的老行为会残留 —— 用户明确要求
+ * 加入才是成员。
+ */
+export function requireMember(userId: string): void {
+  if (!isMember(userId)) throw new HttpError(403, '先加入听歌房再操作')
+}
+
+
 
 const MAX_QUEUE = 50
 
@@ -76,7 +133,7 @@ const QUEUE_SELECT = `
     JOIN users u ON u.id = q.added_by
 `
 
-export function musicRoomView(): MusicRoomView {
+export function musicRoomView(viewerId = ''): MusicRoomView {
   const state = getDb().prepare('SELECT * FROM music_state WHERE id = 1').get() as
     | {
         node_id: string
@@ -127,7 +184,18 @@ export function musicRoomView(): MusicRoomView {
   const queue = (getDb().prepare(`${QUEUE_SELECT} ORDER BY q.added_at ASC`).all() as unknown as RawQueueRow[]).map(
     rawToQueueItem,
   )
-  return { nowPlaying, queue }
+  const members = (
+    getDb()
+      .prepare(
+        `SELECT m.user_id, m.joined_at, u.display_name
+           FROM music_members m JOIN users u ON u.id = m.user_id
+          WHERE m.last_seen >= ?
+          ORDER BY m.joined_at ASC`,
+      )
+      .all(now() - MEMBER_TTL_MS) as unknown as Array<{ user_id: string; joined_at: number; display_name: string }>
+  ).map((r) => ({ id: r.user_id, name: r.display_name, joinedAt: r.joined_at }))
+
+  return { nowPlaying, queue, members, inRoom: isMember(viewerId) }
 }
 
 function startNext(): void {
@@ -161,6 +229,7 @@ function startNext(): void {
  * 记下当前进度到 paused_position_ms，started_at 就不再被依赖。
  */
 export function pauseRoom(userId: string): MusicRoomView {
+  requireMember(userId)
   const db = getDb()
   const state = db.prepare('SELECT * FROM music_state WHERE id = 1').get() as
     | { started_at: number; paused_at: number | null }
@@ -207,6 +276,7 @@ export function isRoomTrack(nodeId: string): boolean {
 
 /** 把歌加进队列。必须是 audio 节点、且加歌人能读到（他人私有的直接拒）。 */
 export function enqueueTrack(nodeId: string, userId: string, isAdmin: boolean): MusicRoomView {
+  requireMember(userId)
   const node = getNode(nodeId)
   if (!node || node.kind !== 'file' || node.deleted_at !== null) {
     throw new HttpError(404, '这个文件不存在')
@@ -236,12 +306,13 @@ export function enqueueTrack(nodeId: string, userId: string, isAdmin: boolean): 
  * 的社交契约，不是权限漏洞（谁都有遥控器的客厅才是客厅）。
  */
 export function skipTrack(userId: string): MusicRoomView {
+  requireMember(userId)
   const db = getDb()
   if (!db.prepare('SELECT id FROM music_state WHERE id = 1').get()) {
     throw new HttpError(400, '现在没有在放歌')
   }
   startNext()
-  return musicRoomView()
+  return musicRoomView(userId)
 }
 
 /**
@@ -267,6 +338,7 @@ export function removeQueued(itemId: string, userId: string, isAdmin = false): M
  * 生效，其余因 token 已变而被拒）。
  */
 export function reportEnded(userId: string, playedToken: number): { advanced: boolean } {
+  requireMember(userId)
   const state = getDb().prepare('SELECT played_token FROM music_state WHERE id = 1').get() as
     | { played_token: number }
     | undefined

@@ -888,6 +888,22 @@ function migrate(database: DatabaseSync): void {
         ALTER TABLE music_state ADD COLUMN paused_by TEXT;
       `)
     },
+
+    // ---- v20: 听歌房的"在场成员" ----
+    (d) => {
+      d.exec(`
+        -- 之前是"打开窗口就算在厅里"：谁都能被同步播放、都能切歌。
+        -- 用户要的是显式加入 —— 自己在不在厅里应该是个明确状态。
+        -- last_seen 做心跳（前端每 40s 续期），90s 没动静就算离开了
+        -- （关窗口没发 leave 的僵尸靠这个清）。
+        CREATE TABLE music_members (
+          user_id   TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          joined_at INTEGER NOT NULL,
+          last_seen INTEGER NOT NULL
+        );
+        CREATE INDEX ix_music_members_seen ON music_members(last_seen DESC);
+      `)
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

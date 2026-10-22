@@ -38,6 +38,30 @@ const syncOffsetMs = ref(0)
 
 const nowPlaying = computed(() => music.room?.nowPlaying ?? null)
 const queue = computed(() => music.room?.queue ?? [])
+/** 在不在厅里：打开窗口**不等于**加入，得自己点。 */
+const inRoom = computed(() => music.room?.inRoom ?? false)
+const members = computed(() => music.room?.members ?? [])
+
+/** 加入/离开。加入之后才开始同步播放与心跳。 */
+async function joinRoom(): Promise<void> {
+  await music.join()
+}
+
+async function leaveRoomAction(): Promise<void> {
+  const el = audioEl.value
+  if (el) el.pause()
+  await music.leave()
+}
+
+/** 心跳：90 秒不续就算离开（关窗口后靠 TTL 清僵尸）。 */
+const heartbeatTimer = window.setInterval(() => {
+  if (inRoom.value) void music.heartbeat()
+}, 40_000)
+onBeforeUnmount(() => {
+  window.clearInterval(heartbeatTimer)
+  // 关窗口 = 离开厅（异步发出去就行，不等结果）
+  if (inRoom.value) void music.leave()
+})
 
 /** 当前进度（秒）：读服务端权威进度，再加本地这一秒的推进。 */
 const progressSec = computed(() => {
@@ -217,14 +241,38 @@ watch(
       <button class="wl-icon-btn" :disabled="music.loading" title="刷新" @click="music.load()">
         <Icon name="refresh" :size="16" :class="{ spin: music.loading }" />
       </button>
-      <button class="wl-btn wl-btn--primary" @click="openPicker">
+      <span v-if="members.length > 0" class="member-chip" :title="`在厅里：${members.map((m) => m.name).join('、')}`">
+        <Icon name="users" :size="12" />{{ members.length }} 人在厅
+      </span>
+      <button
+        v-if="inRoom"
+        class="wl-btn wl-btn--sm"
+        title="离开听歌房（不再跟着同步播放）"
+        @click="leaveRoomAction"
+      >
+        离开
+      </button>
+      <button class="wl-btn wl-btn--primary" :disabled="!inRoom" :title="inRoom ? '' : '先加入听歌房'" @click="openPicker">
         <Icon name="plus" :size="14" />排首歌
       </button>
     </header>
 
     <!-- 正在播 -->
     <section class="now" :class="{ 'now--idle': !nowPlaying }">
-      <template v-if="nowPlaying">
+      <!-- 没加入：只旁听信息，不参与同步播放（否则等于默认全员在厅里） -->
+      <div v-if="!inRoom" class="join-panel">
+        <Icon name="audio" :size="30" class="join-icon" />
+        <p class="join-title">你还没加入听歌房</p>
+        <p class="join-sub">
+          <template v-if="nowPlaying">正在放「{{ nowPlaying.name }}」·</template>
+          <template v-else>厅里现在没在放歌 ·</template>
+          {{ members.length }} 人在厅里
+        </p>
+        <button class="wl-btn wl-btn--primary" @click="joinRoom">加入听歌房</button>
+        <p class="join-note">加入后你的设备会和大家同步播放 —— 每台电脑都是一只音箱</p>
+      </div>
+
+      <template v-else-if="nowPlaying">
         <div class="now-info">
           <Icon name="audio" :size="26" class="now-icon" :class="{ 'now-icon--paused': nowPlaying.paused }" />
           <div class="now-text">
@@ -375,6 +423,48 @@ watch(
 
 .now--idle {
   padding: var(--space-4);
+}
+
+.join-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-4);
+  text-align: center;
+}
+
+.join-icon {
+  color: var(--text-3);
+}
+
+.join-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.join-sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.join-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--surface-2);
 }
 
 .sync-chip {

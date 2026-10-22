@@ -13,9 +13,13 @@ import {
   pauseRoom,
   purgeDeletedNode,
   removeQueued,
+  joinRoom,
+  leaveRoom,
   reportEnded,
+  requireMember,
   resumeRoom,
   skipTrack,
+  touchMember,
 } from '../music.ts'
 import { broadcast } from '../realtime.ts'
 import { roleAtLeast } from '../auth.ts'
@@ -46,15 +50,40 @@ export function registerMusicRoutes(app: FastifyInstance): void {
   })
 
   app.post('/api/music/resume', async (req) => {
-    requireUser(req)
+    const user = requireUser(req)
+    requireMember(user.id)
     const view = resumeRoom()
     broadcast({ type: 'music', data: {} })
     return view
   })
 
   app.get('/api/music/room', async (req) => {
-    requireUser(req)
-    return musicRoomView()
+    const user = requireUser(req)
+    // 带上"我在不在厅里"和在场成员 —— 前端据此决定是显示加入按钮还是播放器
+    return musicRoomView(user.id)
+  })
+
+  /** 加入听歌房（幂等）。 */
+  app.post('/api/music/join', async (req) => {
+    const user = requireUser(req)
+    const view = joinRoom(user.id)
+    broadcast({ type: 'music', data: {} })
+    return view
+  })
+
+  /** 心跳：不进广播（40 秒一次会把 SSE 刷满）。 */
+  app.post('/api/music/heartbeat', async (req) => {
+    const user = requireUser(req)
+    touchMember(user.id)
+    return { ok: true }
+  })
+
+  /** 离开听歌房。 */
+  app.post('/api/music/leave', async (req) => {
+    const user = requireUser(req)
+    const view = leaveRoom(user.id)
+    broadcast({ type: 'music', data: {} })
+    return view
   })
 
   /** 可排播的音频：文件系统里用户读得到的 audio 文件（社团规模全量扫足够快）。 */
