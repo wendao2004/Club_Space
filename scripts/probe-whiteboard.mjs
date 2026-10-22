@@ -208,6 +208,30 @@ await sleep(3000)
 console.log('切回后元素数（应 1）：', await elementCount())
 await evaluate(`window.prompt = window.__p2; true`)
 
+// ---- 关窗 → 重开 → 只点一次，内容必须出来（用户报的"要点两次"）----
+await evaluate(`(() => {
+  const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.wb-app'))
+  const btns = win ? [...win.querySelectorAll('.window__ctl')] : []
+  btns[btns.length - 1]?.click()
+  return !!win
+})()`)
+await sleep(1500)
+console.log('关窗后 hasWbApp：', await evaluate(`String(!!document.querySelector('.wb-app'))`))
+
+await evaluate(`(() => {
+  const icons = [...document.querySelectorAll('.desktop-icons .icon')]
+  icons.find((i) => i.textContent.includes('白板'))?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+  return true
+})()`)
+await sleep(4000)
+await evaluate(`(() => {
+  const row = [...document.querySelectorAll('.wb-app .brow')].find((r) => r.textContent.includes('线上探针白板'))
+  row?.click()
+  return !!row
+})()`)
+await sleep(3000)
+console.log('重开后第一次点击元素数（应 1）：', await elementCount())
+
 console.log('\n错误与失败请求（最多 15 条）：')
 for (const e of errors.slice(0, 15)) console.log('  •', e)
 if (errors.length === 0) console.log('  （无）')
