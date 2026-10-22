@@ -69,7 +69,7 @@ export function registerMusicRoutes(app: FastifyInstance): void {
   app.delete('/api/music/queue/:itemId', async (req) => {
     const user = requireUser(req)
     const { itemId } = req.params as { itemId: string }
-    const view = removeQueued(itemId, user.id)
+    const view = removeQueued(itemId, user.id, roleAtLeast(user.role, 'admin'))
     notify('removed')
     return view
   })

@@ -210,6 +210,29 @@ res = await creator(`/api/polls/${expired.id}/close`, 'POST', { closed: false })
 eq(res.status, 200, '未过截止时可重开')
 void expired
 
+// ---------------------------------------------------------------- 过期（改库造数据）
+
+console.log('\n【截止后的行为】')
+
+// 截止时间靠"等"测不了，直接改库把 deadline 拨到过去（脚本与服务共用一个
+// 数据目录，这是测试库，随便改）
+let expireTarget = (await creator('/api/polls', 'POST', {
+  title: '马上就要截止的投票',
+  options: ['a', 'b'],
+  deadlineInMs: 60_000,
+})).body.poll
+{
+  const { DatabaseSync } = await import('node:sqlite')
+  const path = process.env.WL_TEST_DB ?? '.test-data-3100/app.sqlite'
+  const db = new DatabaseSync(path)
+  db.prepare('UPDATE polls SET deadline_at = ? WHERE id = ?').run(Date.now() - 1000, expireTarget.id)
+  db.close()
+}
+res = await bob(`/api/polls/${expireTarget.id}/vote`, 'POST', { options: [0] })
+assert(res.status === 400, '截止后不能投票（400）', `status=${res.status}`)
+res = await bob('/api/polls?open=1')
+eq(res.body.polls.some((p) => p.id === expireTarget.id), false, '截止的不出现在"进行中"筛选里')
+
 // ---------------------------------------------------------------- 多选
 
 console.log('\n【多选】')

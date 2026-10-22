@@ -5,7 +5,7 @@
   （服务端广播 poll 事件）。创建表单折叠在顶部，不用时收起来。
 -->
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import type { Poll } from '@/api'
 import { usePoll } from '@/stores/poll'
@@ -92,20 +92,40 @@ async function toggleOption(p: Poll, idx: number): Promise<void> {
   if (!ok && poll.error) ui.notify('error', '投票失败', poll.error)
 }
 
+/**
+ * 每 30 秒推一下"现在"。
+ *
+ * 截止是**时间驱动**的状态：用户开着窗口不动，到点之后卡片应该自己变成
+ * "已截止"、投票按钮变灰。之前所有判断都直接用 Date.now()，Vue 不知道
+ * 时间过了，界面一直是"进行中"，直到用户点一下才刷新（点了还会报错
+ * "已经截止"）—— 自相矛盾的体验。
+ */
+const now = ref(Date.now())
+const tick = window.setInterval(() => {
+  now.value = Date.now()
+}, 30_000)
+onBeforeUnmount(() => window.clearInterval(tick))
+
 function isClosed(p: Poll): boolean {
-  return p.closedAt !== null || (p.deadlineAt !== null && Date.now() >= p.deadlineAt)
+  // 读一下 now.value 建立响应式依赖，时间推进后模板会重算
+  return p.closedAt !== null || (p.deadlineAt !== null && now.value >= p.deadlineAt)
 }
 
 function statusOf(p: Poll): { label: string; tone: 'ok' | 'warning' | 'muted' } {
   if (p.closedAt !== null) return { label: '已关闭', tone: 'muted' }
-  if (p.deadlineAt !== null && Date.now() >= p.deadlineAt) return { label: '已截止', tone: 'muted' }
+  if (p.deadlineAt !== null && now.value >= p.deadlineAt) return { label: '已截止', tone: 'muted' }
   return { label: '进行中', tone: 'ok' }
 }
+
+/** 进行中的个数（响应式版，替换 store 里那个用 Date.now() 的 getter）。 */
+const openCount = computed(
+  () => poll.polls.filter((p) => p.closedAt === null && (p.deadlineAt === null || now.value < p.deadlineAt)).length,
+)
 
 /** 截止时间的人话表达。 */
 function deadlineText(p: Poll): string {
   if (p.deadlineAt === null) return ''
-  const diff = p.deadlineAt - Date.now()
+  const diff = p.deadlineAt - now.value
   if (diff <= 0) return `截止于 ${fullTime(p.deadlineAt)}`
   const min = Math.floor(diff / 60_000)
   if (min < 60) return `${min} 分钟后截止`
@@ -159,7 +179,7 @@ watch(
   <div class="poll-app">
     <header class="bar">
       <div class="bar-title"><Icon name="vote" :size="18" />投票</div>
-      <span v-if="poll.openCount > 0" class="wl-badge wl-badge--ok">{{ poll.openCount }} 个进行中</span>
+      <span v-if="openCount > 0" class="wl-badge wl-badge--ok">{{ openCount }} 个进行中</span>
       <div class="spacer" />
       <button class="wl-icon-btn" :disabled="poll.loading" title="刷新" @click="poll.load()">
         <Icon name="refresh" :size="16" :class="{ spin: poll.loading }" />

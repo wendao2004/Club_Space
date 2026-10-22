@@ -72,7 +72,16 @@ const isWrongWord = computed(() => {
 async function startPractice(dict: TypingDict, chapter: number): Promise<void> {
   currentDict.value = dict
   currentChapter.value = chapter
-  pos.value = Math.min(positionOf(dict.id, chapter), dict.chapters[chapter]?.words.length ?? 0)
+  const len = dict.chapters[chapter]?.words.length ?? 0
+  const saved = positionOf(dict.id, chapter)
+  /**
+   * 练完的章节再点进来要**从头重练**。
+   *
+   * 之前直接 `Math.min(saved, len)`：练完后 saved == len，pos 指到数组外，
+   * `word` 为 null —— 模板里 `v-else-if="word"` 不成立，整页只剩顶栏
+   * （用户看到"点进去一片空白"）。归零重练才是符合直觉的行为。
+   */
+  pos.value = saved >= len ? 0 : saved
   typed.value = ''
   wordHadError.value = false
   stats.value = { words: 0, errors: 0, startAt: Date.now() }
@@ -135,10 +144,28 @@ function focusInput(): void {
   requestAnimationFrame(() => inputEl.value?.focus())
 }
 
+/**
+ * 输入法组词期间（composition）不校验。
+ *
+ * 中文用户把输入法留在中文状态打英文时，input 事件会在组词中间态触发，
+ * value 是拼音串/半成品 —— 逐字符比对会立刻判错并清空，等于打不出来。
+ * compositionend 后再统一校验一次。
+ */
+const composing = ref(false)
+
+function onCompositionStart(): void {
+  composing.value = true
+}
+
+function onCompositionEnd(): void {
+  composing.value = false
+  onInput()
+}
+
 function onInput(): void {
   const el = inputEl.value
   const w = word.value
-  if (!el || !w) return
+  if (!el || !w || composing.value) return
   const value = el.value
   const target = w.w
 
@@ -323,6 +350,8 @@ function removeWrong(wordStr: string): void {
           autocapitalize="off"
           spellcheck="false"
           @input="onInput"
+          @compositionstart="onCompositionStart"
+          @compositionend="onCompositionEnd"
         />
         <div class="p-hint">
           Enter / Tab 跳过 · Ctrl+V 切默写（看中文打英文/SQL）·

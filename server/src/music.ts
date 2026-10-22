@@ -166,13 +166,19 @@ export function skipTrack(userId: string): MusicRoomView {
   return musicRoomView()
 }
 
-/** 把自己加的歌从队列里撤下来（只能撤自己的）。 */
-export function removeQueued(itemId: string, userId: string): MusicRoomView {
+/**
+ * 把歌从队列里撤下来。
+ *
+ * 自己的随便撤；管理员可以撤任何人的 —— 否则队列被塞满时（50 首上限）
+ * 除了"切歌"没有别的出路，而切歌只在当前曲目上有效，队列深处的东西
+ * 谁都动不了。
+ */
+export function removeQueued(itemId: string, userId: string, isAdmin = false): MusicRoomView {
   const row = getDb().prepare('SELECT added_by FROM music_queue WHERE id = ?').get(itemId) as
     | { added_by: string }
     | undefined
   if (!row) throw new HttpError(404, '队列里没有这首歌')
-  if (row.added_by !== userId) throw new HttpError(403, '只能撤下自己排的歌')
+  if (row.added_by !== userId && !isAdmin) throw new HttpError(403, '只能撤下自己排的歌')
   getDb().prepare('DELETE FROM music_queue WHERE id = ?').run(itemId)
   return musicRoomView()
 }

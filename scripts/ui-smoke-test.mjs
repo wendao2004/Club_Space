@@ -3975,13 +3975,86 @@ async function main() {
       return !!row
     })()`)
     assert(reopenedRow, '重开窗口后列表里有原来的白板')
-    await sleep(3000)
+
+    // 补灌最晚在 1200ms 后发生，但重开 + 懒加载 chunk 的耗时随机器波动，
+    // 固定 sleep 在负载高时会误报 —— 轮询等结果，最多 6 秒
+    let reopenCount = -1
+    for (let i = 0; i < 30; i++) {
+      reopenCount = await elementCount()
+      if (reopenCount === 1) break
+      await sleep(200)
+    }
     assert(
-      (await elementCount()) === 1,
+      reopenCount === 1,
       '重开后只点一次就显示记录（不需要点第二次）',
-      `元素 ${await elementCount()}`,
+      `元素 ${reopenCount}`,
     )
 
+
+    // ---- 白板：保存后立刻再画一笔，不能被"自己的广播"覆盖 ----
+    //
+    // 服务端保存后会广播 saved；如果不区分 actor，自己也会收到 → 本地干净
+    // 分支重新 GET + loadScene → 把刚画的那一笔洗掉（实测可丢笔画）。
+    await sleep(1500)
+    await evaluate(`(() => {
+      const hook = window.__wlWhiteboard
+      if (!hook?.updateScene) return 'no-hook'
+      hook.updateScene([
+        {
+          id: 'smoke-rect-1', type: 'rectangle', x: 120, y: 120, width: 180, height: 120,
+          angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+          strokeWidth: 2, strokeStyle: 'solid', roughness: 1, opacity: 100, groupIds: [],
+          frameId: null, roundness: { type: 3 }, seed: 4242, version: 1, versionNonce: 1,
+          isDeleted: false, boundElements: null, updated: Date.now(), link: null, locked: false,
+        },
+        {
+          id: 'smoke-rect-2', type: 'ellipse', x: 340, y: 300, width: 90, height: 90,
+          angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+          strokeWidth: 2, strokeStyle: 'solid', roughness: 1, opacity: 100, groupIds: [],
+          frameId: null, roundness: null, seed: 4243, version: 1, versionNonce: 1,
+          isDeleted: false, boundElements: null, updated: Date.now(), link: null, locked: false,
+        },
+      ])
+      return 'ok'
+    })()`)
+    await sleep(800)
+    // 保存 → 立刻再画一笔（模拟"存完接着画"）
+    await evaluate(`(() => { document.querySelector('.wb-app .canvas-bar .wl-btn--primary')?.click(); return true })()`)
+    await sleep(300)
+    // 直接用 updateScene 追加第三笔（等价于用户又画了一笔）
+    await evaluate(`(() => {
+      const hook = window.__wlWhiteboard
+      hook.updateScene([
+        {
+          id: 'smoke-rect-1', type: 'rectangle', x: 120, y: 120, width: 180, height: 120,
+          angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+          strokeWidth: 2, strokeStyle: 'solid', roughness: 1, opacity: 100, groupIds: [],
+          frameId: null, roundness: { type: 3 }, seed: 4242, version: 1, versionNonce: 1,
+          isDeleted: false, boundElements: null, updated: Date.now(), link: null, locked: false,
+        },
+        {
+          id: 'smoke-rect-2', type: 'ellipse', x: 340, y: 300, width: 90, height: 90,
+          angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+          strokeWidth: 2, strokeStyle: 'solid', roughness: 1, opacity: 100, groupIds: [],
+          frameId: null, roundness: null, seed: 4243, version: 1, versionNonce: 1,
+          isDeleted: false, boundElements: null, updated: Date.now(), link: null, locked: false,
+        },
+        {
+          id: 'smoke-rect-3', type: 'diamond', x: 500, y: 200, width: 80, height: 80,
+          angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+          strokeWidth: 2, strokeStyle: 'solid', roughness: 1, opacity: 100, groupIds: [],
+          frameId: null, roundness: null, seed: 4244, version: 1, versionNonce: 1,
+          isDeleted: false, boundElements: null, updated: Date.now(), link: null, locked: false,
+        },
+      ])
+      return 'ok'
+    })()`)
+    await sleep(2000)
+    assert(
+      (await elementCount()) === 3,
+      '保存后继续画的东西没被自己的保存广播洗掉',
+      `元素 ${await elementCount()}`,
+    )
     // ---- 打字背单词：默写模式必须"隐藏英文、显示中文" ----
     //
     // 曾经的实现正好反了：默写时隐藏音标与释义、英文照样显示 —— 等于没默写。
@@ -4035,6 +4108,51 @@ async function main() {
       blindWord.slice(0, 20),
     )
     assert(blindMeaning === normalMeaning, '默写模式中文释义照常显示', blindMeaning)
+
+    // ---- 打字：练完一整章后重进，不能是空白页 ----
+    //
+    // bug 复现路径：练完一章（position == 词数）→ 回列表 → 再点同一章。
+    // 原来 pos 直接取 min(saved, len)，指向数组外，word 为 null，
+    // 模板 v-else-if="word" 不成立 —— 整页只剩顶栏。
+    await evaluate(`(() => {
+      const back = [...document.querySelectorAll('.typing-app .wl-btn')].find((b) => b.textContent.includes('返回'))
+      back?.click()
+      return !!back
+    })()`)
+    await sleep(800)
+    // 进 MySQL 第 1 章（8 条，跳过最快）
+    await evaluate(`(() => {
+      const card = [...document.querySelectorAll('.typing-app .dict-card')].find((c) => c.textContent.includes('MySQL'))
+      card?.querySelector('.chapter')?.click()
+      return !!card
+    })()`)
+    await sleep(1500)
+
+    // Tab 跳过全部 8 条 → 结算弹窗
+    for (let i = 0; i < 8; i++) {
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 }, sessionId)
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 }, sessionId)
+      await sleep(150)
+    }
+    const finishedShown = await evaluate(`String(!!document.querySelector('.typing-app .result'))`)
+    assert(finishedShown === 'true', '跳完所有词后弹出章节结算')
+
+    await evaluate(`(() => {
+      const btn = [...document.querySelectorAll('.typing-app .result-actions .wl-btn')].find((b) => b.textContent.includes('回列表'))
+      btn?.click()
+      return !!btn
+    })()`)
+    await sleep(800)
+
+    // 再点同一章：必须有内容（不能空白）
+    await evaluate(`(() => {
+      const card = [...document.querySelectorAll('.typing-app .dict-card')].find((c) => c.textContent.includes('MySQL'))
+      card?.querySelector('.chapter')?.click()
+      return !!card
+    })()`)
+    await sleep(1500)
+    const reentered = await evaluate(`String(document.querySelector('.typing-app .p-word')?.textContent?.trim() ?? '')`)
+    assert(reentered.length > 0, '练完的章节重进仍有内容（归零重练，不是空白页）', reentered.slice(0, 20))
     await evaluate(`window.prompt = window.__origPrompt; true`)
 
     // ---- 控制台错误 ----

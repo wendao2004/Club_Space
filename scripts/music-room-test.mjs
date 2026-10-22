@@ -186,10 +186,19 @@ eq(view.queue.length, 1, '第二首排在队列里')
 eq(view.queue[0].name, '夜曲.wav', '队列项正确')
 
 const queuedId = view.queue[0].id
+res = await alice(`/api/music/queue/${queuedId}`, 'DELETE')
+assert(res.status === 403, '普通成员不能撤别人排的歌（403）', `status=${res.status}`)
 res = await bob(`/api/music/queue/${queuedId}`, 'DELETE')
 eq(res.status, 200, '排歌人能撤下自己的歌')
 view = res.body
 eq(view.queue.length, 0, '撤下后队列清空')
+
+// 管理员能撤别人的歌 —— 队列塞满时的唯一解卡手段
+await bob('/api/music/queue', 'POST', { nodeId: songB })
+const bobQueued = (await bob('/api/music/room')).body.queue[0].id
+res = await creator(`/api/music/queue/${bobQueued}`, 'DELETE')
+eq(res.status, 200, '管理员能撤别人排的歌')
+eq(res.body.queue.length, 0, '撤下后队列清空')
 
 // 再排一首用于后面的切歌流程
 await bob('/api/music/queue', 'POST', { nodeId: songB })

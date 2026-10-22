@@ -177,7 +177,15 @@ const WHITEBOARD = 'whiteboard' satisfies RealtimeEventName
 let offRealtime: Array<() => void> = []
 const rt = useRealtime()
 
-async function onRemoteSaved(boardId: string, by: string): Promise<void> {
+async function onRemoteSaved(boardId: string, by: string, actorId?: string): Promise<void> {
+  /**
+   * 自己保存触发的广播直接忽略。
+   *
+   * 不忽略的话：保存（dirty=false）→ 收到自己的广播 → 本地干净分支会
+   * 重新 GET 并 loadScene —— 如果用户保存后立刻动了一笔，那一笔会被
+   * 服务端返回的旧场景覆盖掉（实测可丢笔画）。
+   */
+  if (actorId && actorId === auth.user?.id) return
   if (current.value?.id !== boardId) {
     // 别的白板变了：只刷新墙
     await loadList()
@@ -204,8 +212,10 @@ onMounted(() => {
   rt.connect()
   offRealtime = [
     rt.on(WHITEBOARD, (payload) => {
-      const data = (payload as { data?: { reason?: string; boardId?: string; by?: string } }).data ?? {}
-      if (data.reason === 'saved' && data.boardId) void onRemoteSaved(data.boardId, data.by ?? '有人')
+      const data = (payload as { data?: { reason?: string; boardId?: string; by?: string; actorId?: string } }).data ?? {}
+      if (data.reason === 'saved' && data.boardId) {
+        void onRemoteSaved(data.boardId, data.by ?? '有人', data.actorId)
+      }
       else void loadList()
     }),
     rt.onResync(() => void loadList()),

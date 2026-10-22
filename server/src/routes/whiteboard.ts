@@ -57,7 +57,8 @@ export function registerWhiteboardRoutes(app: FastifyInstance): void {
       roleAtLeast(user.role, 'admin'),
       typeof body.data === 'string' ? body.data : '',
     )
-    broadcast({ type: 'whiteboard', data: { reason: 'saved', boardId: id, by: user.display_name } })
+    // actorId 让客户端能认出"这是我自己刚保存的"，不必回灌自己的画布
+    broadcast({ type: 'whiteboard', data: { reason: 'saved', boardId: id, by: user.display_name, actorId: user.id } })
     return { board: { ...board, data: undefined } }
   })
 
