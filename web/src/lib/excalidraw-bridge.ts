@@ -68,6 +68,13 @@ export function mountExcalidraw(
     createElement(ExcalidrawAny, {
       // 主题跟随 CSS：不传 theme，用默认亮色（画布内容自成一体的视觉）
       gridModeEnabled: false,
+      /**
+       * 界面语言：简体中文。语言包是带内容哈希的 js 模块，Excalidraw 在
+       * 首次渲染后按需动态 import（`${EXCALIDRAW_ASSET_PATH}locales/zh-CN-*.js`）
+       * —— 所以构建时拷贝的 locales/ 目录既是字体以外的另一份必需品，
+       * 也是 CSP 下"必须同源"的原因（外网 CDN 的 js 会被 script-src 拦）。
+       */
+      langCode: 'zh-CN',
       // 关掉"嵌入库"按钮 —— 它会开一个指向 excalidraw.com 的 iframe，
       // 内网够不到，CSP 的 frame-src 'self' 也会拦
       UIOptions: {

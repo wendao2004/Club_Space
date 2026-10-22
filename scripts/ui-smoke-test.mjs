@@ -3857,6 +3857,9 @@ async function main() {
         })(),
         toolbarButtons: document.querySelectorAll('.wb-app .canvas .excalidraw button').length,
         dirtyBadge: !!document.querySelector('.wb-app .wl-badge--warning'),
+        cjkTitles: [...document.querySelectorAll('.wb-app .canvas .excalidraw button[title]')]
+          .map((b) => b.getAttribute('title') ?? '')
+          .filter((t) => /[\u4e00-\u9fa5]/.test(t)).length,
         canvasCssPosition: (() => {
           const el = document.querySelector('.wb-app .canvas .excalidraw')
           return el ? getComputedStyle(el).position : null
@@ -3876,6 +3879,13 @@ async function main() {
       String(wbState.canvasCssPosition),
     )
     assert(!wbState.dirtyBadge, '刚打开的白板不显示「未保存」')
+    // 汉化：Excalidraw 的语言包是带哈希的 js，按需从同源 locales/ 动态 import，
+    // 拉不到就会静默回落英文 —— 用"工具按钮 title 里有没有中文"来盯住它
+    assert(
+      wbState.cjkTitles >= 3,
+      'Excalidraw 界面已汉化（工具栏提示是中文）',
+      `${wbState.cjkTitles} 个中文 title`,
+    )
     await evaluate(`window.prompt = window.__origPrompt; true`)
 
     // ---- 控制台错误 ----

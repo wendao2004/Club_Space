@@ -148,6 +148,12 @@ console.log('新建后：', await evaluate(`JSON.stringify({
   tools: document.querySelectorAll('.wb-app .canvas .excalidraw button').length,
 })`))
 
+console.log('中文检查：', await evaluate(`JSON.stringify({
+  menuTitles: [...document.querySelectorAll('.wb-app .canvas .excalidraw button[title]')].slice(0, 6).map(b => b.getAttribute('title')),
+  cjkText: ((document.querySelector('.wb-app .canvas .excalidraw')?.textContent ?? '').match(/[\\u4e00-\\u9fa5]{2,10}/g) ?? []).slice(0, 8),
+  localeRequested: true,
+})`))
+
 console.log('\n错误与失败请求（最多 15 条）：')
 for (const e of errors.slice(0, 15)) console.log('  •', e)
 if (errors.length === 0) console.log('  （无）')
