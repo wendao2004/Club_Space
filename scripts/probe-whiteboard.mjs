@@ -120,6 +120,10 @@ await cdp.send('Log.enable', {}, sessionId)
 await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId)
 await cdp.send('Network.setCookie', { name: cookie.split('=')[0], value: cookie.split('=').slice(1).join('='), url: BASE }, sessionId)
 await cdp.send('Page.navigate', { url: `${BASE}/` }, sessionId)
+await sleep(2500)
+// 清掉恢复的窗口布局：否则可能恢复出多个白板窗口，脚本点到别的实例上
+await cdp.send('Runtime.evaluate', { expression: `localStorage.removeItem('wl.desktop.layout')` }, sessionId)
+await cdp.send('Page.navigate', { url: `${BASE}/` }, sessionId)
 await sleep(5000)
 
 const evaluate = async (expr) => {
@@ -165,6 +169,44 @@ console.log('中文检查：', await evaluate(`JSON.stringify({
   cjkText: ((document.querySelector('.wb-app .canvas .excalidraw')?.textContent ?? '').match(/[\\u4e00-\\u9fa5]{2,10}/g) ?? []).slice(0, 8),
   localeRequested: true,
 })`))
+
+// ---- 保存流程：注入矩形 → 保存 → 新建另一块 → 切回，内容必须还在 ----
+const injectRect = async (id) =>
+  evaluate(`(() => {
+    const hook = window.__wlWhiteboard
+    if (!hook?.updateScene) return 'no-hook'
+    hook.updateScene([{
+      id: '${id}', type: 'rectangle', x: 120, y: 120, width: 180, height: 120,
+      angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+      strokeWidth: 2, strokeStyle: 'solid', roughness: 1, opacity: 100, groupIds: [],
+      frameId: null, roundness: { type: 3 }, seed: 777, version: 1, versionNonce: 1,
+      isDeleted: false, boundElements: null, updated: Date.now(), link: null, locked: false,
+    }])
+    return 'injected'
+  })()`)
+const elementCount = async () => Number(await evaluate(`String(window.__wlWhiteboard?.elementCount?.() ?? -1)`))
+
+console.log('注入矩形：', await injectRect('live-rect-1'))
+await sleep(1200)
+console.log('注入后元素数：', await elementCount())
+await evaluate(`(() => { document.querySelector('.wb-app .canvas-bar .wl-btn--primary')?.click(); return true })()`)
+await sleep(2500)
+const dirtyAfterSave = await evaluate(`String(!!document.querySelector('.wb-app .wl-badge--warning'))`)
+console.log('保存后未保存标记：', dirtyAfterSave)
+
+await evaluate(`window.__p2 = window.prompt; window.prompt = () => '线上流程第二块'; true`)
+await evaluate(`(() => { const b = [...document.querySelectorAll('.wb-app .side-head .wl-icon-btn')].pop(); b?.click(); return !!b })()`)
+await sleep(3500)
+console.log('新建第二块后元素数（应 0）：', await elementCount())
+
+await evaluate(`(() => {
+  const row = [...document.querySelectorAll('.wb-app .brow')].find(r => r.textContent.includes('线上探针白板'))
+  row?.click()
+  return !!row
+})()`)
+await sleep(3000)
+console.log('切回后元素数（应 1）：', await elementCount())
+await evaluate(`window.prompt = window.__p2; true`)
 
 console.log('\n错误与失败请求（最多 15 条）：')
 for (const e of errors.slice(0, 15)) console.log('  •', e)
