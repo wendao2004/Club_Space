@@ -3981,6 +3981,60 @@ async function main() {
       '重开后只点一次就显示记录（不需要点第二次）',
       `元素 ${await elementCount()}`,
     )
+
+    // ---- 打字背单词：默写模式必须"隐藏英文、显示中文" ----
+    //
+    // 曾经的实现正好反了：默写时隐藏音标与释义、英文照样显示 —— 等于没默写。
+    // 而且模板里那个三元表达式两边一样（`blind || i >= typed.length ? c : c`），
+    // 连字符都没换过，是死代码。
+    console.log('\n【打字背单词 · 默写模式】')
+    await evaluate(`(() => {
+      const icons = [...document.querySelectorAll('.desktop-icons .icon')]
+      icons.find((i) => i.textContent.includes('打字背单词'))?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+      return true
+    })()`)
+    await sleep(3500)
+    await evaluate(`(() => {
+      document.querySelector('.typing-app .chapter')?.click()
+      return !!document.querySelector('.typing-app .chapter')
+    })()`)
+    await sleep(2000)
+
+    const normalWord = (
+      await evaluate(`String(document.querySelector('.typing-app .p-word')?.textContent ?? '')`)
+    ).replace(/\s+/g, '')
+    const normalMeaning = (
+      await evaluate(`String(document.querySelector('.typing-app .p-meaning')?.textContent ?? '')`)
+    ).trim()
+    assert(normalWord.length > 0, '对照模式显示英文', normalWord)
+    assert(normalMeaning.length > 0, '对照模式显示中文', normalMeaning)
+
+    // Ctrl+V 切默写
+    await cdp.send(
+      'Input.dispatchKeyEvent',
+      { type: 'keyDown', key: 'v', code: 'KeyV', modifiers: 2, windowsVirtualKeyCode: 86 },
+      sessionId,
+    )
+    await cdp.send(
+      'Input.dispatchKeyEvent',
+      { type: 'keyUp', key: 'v', code: 'KeyV', modifiers: 2, windowsVirtualKeyCode: 86 },
+      sessionId,
+    )
+    await sleep(600)
+
+    const blindWord = (
+      await evaluate(`String(document.querySelector('.typing-app .p-word')?.textContent ?? '')`)
+    ).replace(/\s+/g, '')
+    const blindMeaning = (
+      await evaluate(`String(document.querySelector('.typing-app .p-meaning')?.textContent ?? '')`)
+    ).trim()
+    assert(blindWord.includes('·'), '默写模式用占位点隐藏英文', blindWord.slice(0, 20))
+    assert(
+      blindWord.replace(/·/g, '') === '',
+      '默写模式一个英文字符都不显示',
+      blindWord.slice(0, 20),
+    )
+    assert(blindMeaning === normalMeaning, '默写模式中文释义照常显示', blindMeaning)
     await evaluate(`window.prompt = window.__origPrompt; true`)
 
     // ---- 控制台错误 ----

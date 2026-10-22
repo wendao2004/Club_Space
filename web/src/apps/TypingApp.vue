@@ -238,7 +238,7 @@ function removeWrong(wordStr: string): void {
       <div class="bar-title"><Icon name="text" :size="18" />打字背单词</div>
       <div class="spacer" />
       <button v-if="mode === 'practice'" class="wl-btn wl-btn--sm" @click="blind = !blind">
-        {{ blind ? '默写中 (Ctrl+V 切换)' : '释义显示中 (Ctrl+V 切换)' }}
+        {{ blind ? '默写中：看中文打 （Ctrl+V 切换）' : '对照模式：显示英文（Ctrl+V 切默写）' }}
       </button>
       <button class="wl-icon-btn" :disabled="loading" title="刷新" @click="loadAll()">
         <Icon name="refresh" :size="16" :class="{ spin: loading }" />
@@ -303,26 +303,29 @@ function removeWrong(wordStr: string): void {
 
       <div class="p-stage">
         <div class="p-phonetic" :class="{ 'p-phonetic--hidden': blind }">{{ word.ipa || '　' }}</div>
-        <div class="p-word">
+        <div class="p-word" :class="{ 'p-word--long': wordChars.length > 28 }">
           <span
             v-for="(c, i) in wordChars"
             :key="i"
             class="p-char"
-            :class="{ 'p-char--done': i < typed.length }"
-          >{{ blind || i >= typed.length ? c : c }}</span>
+            :class="{
+              'p-char--done': i < typed.length,
+              'p-char--blank': blind && i >= typed.length,
+            }"
+          >{{ blind && i >= typed.length ? '·' : c }}</span>
         </div>
-        <div class="p-meaning" :class="{ 'p-meaning--hidden': blind }">{{ word.t }}</div>
+        <div class="p-meaning">{{ word.t }}</div>
         <input
           ref="inputEl"
           class="p-input"
-          :placeholder="`输入 ${word.w} 后回车继续 · 错了整词重打`"
+          :placeholder="`输入 ${word.w.length > 24 ? '上面的语句' : word.w} 后回车继续 · 错了整句重打`"
           autocomplete="off"
           autocapitalize="off"
           spellcheck="false"
           @input="onInput"
         />
         <div class="p-hint">
-          Enter / Tab 跳过 · Ctrl+V 切默写 ·
+          Enter / Tab 跳过 · Ctrl+V 切默写（看中文打英文/SQL）·
           <Icon v-if="isWrongWord" name="alert" :size="12" class="p-hint-wrong" /> 这个词在你的错题本里
         </div>
       </div>
@@ -541,9 +544,10 @@ function removeWrong(wordStr: string): void {
 
 .p-word {
   display: flex;
-  gap: 4px;
+  gap: 2px;
   flex-wrap: wrap;
   justify-content: center;
+  max-width: 92%;
 }
 
 .p-char {
@@ -552,19 +556,34 @@ function removeWrong(wordStr: string): void {
   font-family: monospace;
   color: var(--text-3);
   min-width: 0.6em;
+  /* 空格也是字符（SQL 语句里有），别让它被折叠没 */
+  white-space: pre;
+}
+
+/* SQL 语句这类长内容：字号收到能一行放下两三行折行的程度 */
+.p-word--long {
+  gap: 0;
+}
+
+.p-word--long .p-char {
+  font-size: 19px;
+  min-width: 0.55em;
+  line-height: 1.7;
 }
 
 .p-char--done {
   color: var(--accent);
 }
 
+/* 默写模式里还没打到的字符：用点占位，保留长度提示但不泄露拼写 */
+.p-char--blank {
+  color: var(--line-strong, var(--text-3));
+  opacity: 0.5;
+}
+
 .p-meaning {
   font-size: 15px;
   color: var(--text-2);
-}
-
-.p-meaning--hidden {
-  visibility: hidden;
 }
 
 .p-input {

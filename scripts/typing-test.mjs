@@ -107,24 +107,50 @@ console.log('\n【词库数据完整性】')
 const { TYPING_DICTS } = await import('../web/src/lib/dicts/index.ts')
 
 {
-  eq(TYPING_DICTS.length, 4, '四套词库')
+  eq(TYPING_DICTS.length, 5, '五套词库')
   const seen = new Map()
   let words = 0
   for (const d of TYPING_DICTS) {
     assert(d.chapters.length >= 3, `${d.name}：至少 3 章`, `${d.chapters.length} 章`)
     for (const ch of d.chapters) {
-      assert(ch.words.length >= 10, `${d.name} ${ch.title}：每章至少 10 词`, `${ch.words.length} 词`)
+      // SQL 语句一条抵好几词，每章 8 条就是不错的练习量
+      const minPerChapter = d.id === 'mysql' ? 8 : 10
+      assert(
+        ch.words.length >= minPerChapter,
+        `${d.name} ${ch.title}：每章至少 ${minPerChapter} 条`,
+        `${ch.words.length} 条`,
+      )
       for (const w of ch.words) {
         words++
         const key = `${d.id}:${w.w}`
         assert(!seen.has(key), `${d.id} 词库无重复：${w.w}`)
         seen.set(key, true)
-        assert(w.w.length >= 2 && w.w.length <= 30 && /^[A-Za-z]+$/.test(w.w), `${w.w}：纯字母且长度合理`)
+        // 单词类词库要求纯字母；SQL 语句词库允许空格/引号/括号等
+        if (d.id === 'mysql') {
+          assert(/^(INSERT|REPLACE)\b/.test(w.w), `${w.w}：以 INSERT/REPLACE 开头`)
+          assert(w.w.endsWith(';'), `${w.w}：以分号结尾`)
+          assert(!/\n/.test(w.w), `${w.w}：单行`)
+        } else {
+          assert(/^[A-Za-z]+$/.test(w.w), `${w.w}：纯字母`)
+        }
+        assert(w.w.length >= 2 && w.w.length <= 200, `${w.w}：长度合理`)
         assert(!!w.t?.trim(), `${w.w}：有释义`)
       }
     }
   }
   ok(`词库总量 ${words} 词`)
+
+  // MySQL 语句词库：覆盖关键语法点，且都是合法起始写法
+  const mysql = TYPING_DICTS.find((d) => d.id === 'mysql')
+  assert(!!mysql, '有 MySQL 插入语句词库')
+  const sqls = mysql.chapters.flatMap((c) => c.words.map((w) => w.w))
+  assert(sqls.length >= 24, 'MySQL 语句至少 24 条', `${sqls.length} 条`)
+  assert(sqls.some((q) => q.includes('ON DUPLICATE KEY UPDATE')), '覆盖 ON DUPLICATE KEY UPDATE')
+  assert(sqls.some((q) => q.startsWith('INSERT IGNORE')), '覆盖 INSERT IGNORE')
+  assert(sqls.some((q) => q.includes('INSERT INTO') && q.includes('SELECT')), '覆盖 INSERT ... SELECT')
+  assert(sqls.some((q) => q.includes('NOW()')), '覆盖 NOW()')
+  assert(sqls.some((q) => q.includes('NULL')), '覆盖 NULL')
+  assert(sqls.some((q) => q.split('\n').length === 1 && q.includes('),')), '覆盖多行 VALUES')
 }
 
 // ---------------------------------------------------------------- 进度

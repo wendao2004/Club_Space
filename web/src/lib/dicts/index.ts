@@ -7,11 +7,13 @@
  *
  * 玩法参考 qwerty-learner（GPL-3，代码一个字没搬，见 docs/迭代记录）。
  * coder 词库是代码标识符（不是英文单词），音标留空，界面自行隐藏；
- * 每章 15 词，与生成词库的每章 20 词并存没有问题 —— 章是独立的。
+ * mysql 词库存的是完整 INSERT 语句（默写模式就是"看中文写 SQL"）。
+ * 每章词数不一致没有问题 —— 章是独立的。
  */
 import { genCet4 } from './gen-cet4.ts'
 import { genCet6 } from './gen-cet6.ts'
 import { genKaoyan } from './gen-ky.ts'
+import { mysqlDict } from './mysql.ts'
 import type { TypingDict } from './types.ts'
 
 export type { TypingChapter, TypingDict, TypingWord } from './types'
@@ -103,4 +105,4 @@ const coder: TypingDict = {
   ],
 }
 
-export const TYPING_DICTS: TypingDict[] = [genCet4, genCet6, genKaoyan, coder]
+export const TYPING_DICTS: TypingDict[] = [genCet4, genCet6, genKaoyan, coder, mysqlDict]
