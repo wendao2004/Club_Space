@@ -47,11 +47,22 @@ export interface ExcalidrawBridge {
   destroy(): void
 }
 
-export function mountExcalidraw(
-  el: HTMLElement,
-  onReady?: () => void,
-  onChange?: () => void,
-): ExcalidrawBridge {
+export interface MountOptions {
+  /**
+   * 挂载就绪后立刻载入的场景 JSON。
+   *
+   * 为什么放在 options 里而不是让调用方在 onReady 里 loadScene：首次挂载时
+   * `mountExcalidraw` 的返回值还没赋给调用方的 bridge 变量，onReady 里
+   * 拿不到实例 —— 之前就是这样丢的场景（画布挂上了但空白，用户得点第二次
+   * 列表行才出来）。载入场景是 bridge 自己的职责，别让调用方玩时序。
+   */
+  initialScene?: string
+  onReady?: () => void
+  onChange?: () => void
+}
+
+export function mountExcalidraw(el: HTMLElement, options: MountOptions = {}): ExcalidrawBridge {
+  const { initialScene, onReady, onChange } = options
   const root: Root = createRoot(el)
   let api: ExcalidrawApi | null = null
   /**
@@ -70,6 +81,20 @@ export function mountExcalidraw(
     quietUntil = Date.now() + ms
   }
   quietFor(1200)
+
+  /** 载入场景（内部用，挂载与切板共用）。 */
+  function loadScene(data: string): void {
+    const parsed = JSON.parse(data) as { elements?: unknown[] }
+    suppressChange = true
+    quietFor(600)
+    api?.updateScene({ elements: parsed.elements ?? [] })
+    // updateScene 是同步的，但它的 onChange 回调可能在同一轮或下一帧派发
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        suppressChange = false
+      })
+    })
+  }
 
   // 用宽化的组件类型绕开 Excalidraw 内部 props 的窄类型 —— 我们只传三个
   // 回调，真正的类型约束靠上面的最小接口与运行时行为
@@ -105,6 +130,23 @@ export function mountExcalidraw(
           elementIds: (): string[] => (instance.getSceneElements() ?? []).map((e) => (e as { id?: string }).id ?? '?'),
           updateScene: (elements: unknown[]): void => instance.updateScene({ elements }),
         }
+        // 先载入场景再通知：onReady 的调用方可能立刻读 elementCount
+        if (initialScene !== undefined) {
+          loadScene(initialScene)
+          /**
+           * 补灌：Excalidraw 的初始化是异步的（字体、语言包、初始 state），
+           * 首次 updateScene 在早期可能被直接丢掉 —— 实测"窗口重开后第一次
+           * 点白板画布空白，再点一次才有内容"就是这个。这里在稍后检查一次：
+           * 只有场景仍为空才补（用户已经开始画的不会被覆盖）。
+           */
+          const fillIfEmpty = (): void => {
+            if ((api?.getSceneElements() ?? []).length === 0) loadScene(initialScene)
+          }
+          window.setTimeout(fillIfEmpty, 350)
+          window.setTimeout(fillIfEmpty, 1200)
+          // 载入窗口内用户不可能已经开始画，重置静默窗让"打开即脏"不再出现
+          quietFor(1600)
+        }
         onReady?.()
       },
       onChange: () => {
@@ -119,18 +161,7 @@ export function mountExcalidraw(
       if (!api) throw new Error('Excalidraw 尚未就绪')
       return api
     },
-    loadScene(data: string): void {
-      const parsed = JSON.parse(data) as { elements?: unknown[] }
-      suppressChange = true
-      quietFor(600)
-      api?.updateScene({ elements: parsed.elements ?? [] })
-      // updateScene 是同步的，但它的 onChange 回调可能在同一轮或下一帧派发
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          suppressChange = false
-        })
-      })
-    },
+    loadScene,
     exportScene(): string {
       const elements = api?.getSceneElements() ?? []
       const viewBackgroundColor = api?.getAppState()?.viewBackgroundColor ?? '#ffffff'

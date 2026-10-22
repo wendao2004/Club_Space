@@ -6,7 +6,7 @@
   改动就自动载入，有改动则提示（不覆盖正在画的东西）。
 -->
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { api, type WhiteboardDetail, type WhiteboardMeta } from '@/api'
 import { mountExcalidraw, type ExcalidrawBridge } from '@/lib/excalidraw-bridge'
@@ -64,17 +64,24 @@ async function openBoard(id: string): Promise<void> {
     current.value = board
     dirty.value = false
     remoteAhead.value = false
-    // 画布容器随 current 挂出，等一拍再 mount / 重新载入
-    requestAnimationFrame(() => {
-      if (bridge) {
-        // 已经挂过 React root：只换场景。之前这里直接 return，导致"切到
-        // 另一块白板后画布还是上一块的内容"——用户以为保存失败
-        bridge.loadScene(board.data)
-        dirty.value = false
-      } else {
-        mountCanvas(board.data)
-      }
-    })
+    if (bridge) {
+      // 已经挂过 React root：只换场景。之前这里直接 return，导致"切到
+      // 另一块白板后画布还是上一块的内容"——用户以为保存失败
+      bridge.loadScene(board.data)
+      dirty.value = false
+      return
+    }
+    /**
+     * 首次挂载：必须等 DOM 真的渲染出画布容器。
+     *
+     * 曾经用 requestAnimationFrame，实测**不一定够**：窗口刚重新打开时
+     * 组件才挂载，rAF 时 `canvasEl` 可能还是 null，mountCanvas 直接 return，
+     * 整块画布根本没挂 —— 用户看到空白，再点一次列表行才出来（"要点两次
+     * 才显示记录"）。改用 nextTick（Vue 渲染 flush 之后）+ watch 兑底。
+     */
+    pendingData = board.data
+    await nextTick()
+    mountCanvas(pendingData)
   } catch (err) {
     ui.notify('error', '白板', err instanceof Error ? err.message : '加载失败')
   }
@@ -95,6 +102,20 @@ async function removeBoard(b: WhiteboardMeta): Promise<void> {
 
 const canvasEl = ref<HTMLDivElement | null>(null)
 let bridge: ExcalidrawBridge | null = null
+/** 等待画布容器出现时要载入的场景（nextTick 后仍可能是 null，见 watch）。 */
+let pendingData: string | undefined
+
+/**
+ * 画布容器一出现就挂载。
+ *
+ * 这是"点一次就出来"的兑底：openBoard 里 nextTick 后如果容器还没渲染，
+ * 这里会在 ref 被赋值的瞬间补上，而不是等用户再点一次。
+ */
+watch(canvasEl, (el) => {
+  if (el && !bridge && pendingData !== undefined) {
+    mountCanvas(pendingData)
+  }
+})
 
 /**
  * 挂载 React 画布。
@@ -104,25 +125,24 @@ let bridge: ExcalidrawBridge | null = null
  */
 function mountCanvas(dataToLoad?: string): void {
   if (!canvasEl.value || bridge) return
+  pendingData = undefined
   const initialData = dataToLoad ?? current.value?.data
-  bridge = mountExcalidraw(
-    canvasEl.value,
-    () => {
-      // 就绪后把服务端场景灌进去
-      if (bridge && initialData !== undefined) {
-        bridge.loadScene(initialData)
-        dirty.value = false
-      }
+  bridge = mountExcalidraw(canvasEl.value, {
+    // 场景由 bridge 在就绪时自己载入 —— 调用方在 onReady 里拿不到 bridge
+    initialScene: initialData,
+    onReady: () => {
+      dirty.value = false
     },
-    () => {
+    onChange: () => {
       dirty.value = true
     },
-  )
+  })
 }
 
 function closeCanvas(): void {
   bridge?.destroy()
   bridge = null
+  pendingData = undefined
   current.value = null
   dirty.value = false
 }

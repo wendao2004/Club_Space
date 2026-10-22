@@ -3943,6 +3943,44 @@ async function main() {
     await sleep(3000)
     assert((await elementCount()) === 1, '切回后保存过的内容还在（保存真的生效）')
     await evaluate(`window.prompt = window.__origPrompt2; true`)
+
+    // ---- 关窗 → 重开 → **只点一次**列表行，内容必须出来 ----
+    //
+    // 用户原话："无法加载记录，需要点击两次画板才会显示记录"。
+    // 根因：Excalidraw 初始化是异步的（字体/语言包/初始 state），首次
+    // updateScene 在早期会被丢掉；画布挂上了但场景是空的，再点一次才载入。
+    // bridge 现在会在 350ms / 1200ms 后检查"场景仍为空"并补灌。
+    await evaluate(`(() => {
+      const win = [...document.querySelectorAll('.window')].find((w) => w.querySelector('.wb-app'))
+      const btns = win ? [...win.querySelectorAll('.window__ctl')] : []
+      btns[btns.length - 1]?.click()
+      return !!win
+    })()`)
+    await sleep(1500)
+    assert(
+      (await evaluate(`String(!!document.querySelector('.wb-app'))`)) === 'false',
+      '白板窗口已关闭',
+    )
+
+    await evaluate(`(() => {
+      const icons = [...document.querySelectorAll('.desktop-icons .icon')]
+      icons.find((i) => i.textContent.includes('白板'))?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+      return true
+    })()`)
+    await sleep(4000)
+
+    const reopenedRow = await evaluate(`(() => {
+      const row = [...document.querySelectorAll('.wb-app .brow')].find((r) => r.textContent.includes('smoke 白板'))
+      row?.click()
+      return !!row
+    })()`)
+    assert(reopenedRow, '重开窗口后列表里有原来的白板')
+    await sleep(3000)
+    assert(
+      (await elementCount()) === 1,
+      '重开后只点一次就显示记录（不需要点第二次）',
+      `元素 ${await elementCount()}`,
+    )
     await evaluate(`window.prompt = window.__origPrompt; true`)
 
     // ---- 控制台错误 ----
