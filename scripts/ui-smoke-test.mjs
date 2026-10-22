@@ -3821,6 +3821,63 @@ async function main() {
     // 还原，别把静音留在测试浏览器的偏好里
     await evaluate(`localStorage.setItem('wl.sfx.muted', '0'); true`)
 
+    // ---- 白板：Excalidraw 必须真的渲染出画布 ----
+    //
+    // 曾经踩过的坑：组件进来了但**忘了引它的 index.css**，DOM 全在、断言全绿，
+    // 但界面上工具栏消失、欢迎页内容按文档流堆成一列、canvas 根本没有 ——
+    // 用户一眼就是"白板用不了"。所以这里断言的是"画布真的画出来了"：
+    // <canvas> 存在且尺寸像样、工具栏按钮齐、初始不该显示"未保存"。
+    console.log('\n【白板（Excalidraw）】')
+    const desktopHasWhiteboard = await evaluate(`
+      (() => {
+        const icons = [...document.querySelectorAll('.desktop-icons .icon')]
+        const wb = icons.find(i => i.textContent.includes('白板'))
+        wb?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+        return !!wb
+      })()
+    `)
+    assert(desktopHasWhiteboard, '桌面上有「白板」图标')
+    await sleep(4500)
+
+    await evaluate(`window.__origPrompt = window.prompt; window.prompt = () => 'smoke 白板'; true`)
+    await evaluate(`
+      (() => {
+        const btn = [...document.querySelectorAll('.wb-app .side-head .wl-icon-btn')].pop()
+        btn?.click()
+        return !!btn
+      })()
+    `)
+    await sleep(4500)
+
+    const wbState = JSON.parse(
+      await evaluate(`JSON.stringify({
+        canvas: (() => {
+          const c = document.querySelector('.wb-app .canvas canvas')
+          return c ? { w: c.clientWidth, h: c.clientHeight } : null
+        })(),
+        toolbarButtons: document.querySelectorAll('.wb-app .canvas .excalidraw button').length,
+        dirtyBadge: !!document.querySelector('.wb-app .wl-badge--warning'),
+        canvasCssPosition: (() => {
+          const el = document.querySelector('.wb-app .canvas .excalidraw')
+          return el ? getComputedStyle(el).position : null
+        })(),
+      })`),
+    )
+    assert(wbState.canvas !== null, 'Excalidraw 画出了 <canvas>')
+    assert(
+      (wbState.canvas?.w ?? 0) > 300 && (wbState.canvas?.h ?? 0) > 200,
+      '画布尺寸正常（不是 0×0 的隐形画布）',
+      `${wbState.canvas?.w}×${wbState.canvas?.h}`,
+    )
+    assert(wbState.toolbarButtons >= 5, '工具栏按钮齐全（样式没加载时按钮会散成一列）', `${wbState.toolbarButtons} 个`)
+    assert(
+      wbState.canvasCssPosition === 'relative',
+      'Excalidraw 样式已生效（容器 position 不是 static）',
+      String(wbState.canvasCssPosition),
+    )
+    assert(!wbState.dirtyBadge, '刚打开的白板不显示「未保存」')
+    await evaluate(`window.prompt = window.__origPrompt; true`)
+
     // ---- 控制台错误 ----
     console.log('\n【运行时错误检查】')
     const realConsole = cdp.consoleErrors.filter(

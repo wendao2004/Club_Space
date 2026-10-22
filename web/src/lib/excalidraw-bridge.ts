@@ -11,6 +11,10 @@
  */
 import { createElement, type ComponentType } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+// ⚠️ Excalidraw 的样式是**单独一份 css**（包 exports 里的 ./index.css），
+// 不引入就是裸 DOM：工具栏消失、欢迎页内容按文档流堆成一列、canvas 不可用
+// —— 线上那条“白板用不了”的截图就是这个。必须与组件一起进来。
+import '@excalidraw/excalidraw/index.css'
 import { Excalidraw } from '@excalidraw/excalidraw'
 
 /**
@@ -50,6 +54,11 @@ export function mountExcalidraw(
 ): ExcalidrawBridge {
   const root: Root = createRoot(el)
   let api: ExcalidrawApi | null = null
+  /**
+   * 程序化改场景（loadScene / 初始化灌数据）也会触发 onChange ——
+   * 那不是“用户改了”，不标记未保存。用这个标志把两边分开。
+   */
+  let suppressChange = false
 
   // 用宽化的组件类型绕开 Excalidraw 内部 props 的窄类型 —— 我们只传三个
   // 回调，真正的类型约束靠上面的最小接口与运行时行为
@@ -70,7 +79,10 @@ export function mountExcalidraw(
         api = instance
         onReady?.()
       },
-      onChange: () => onChange?.(),
+      onChange: () => {
+        if (suppressChange) return
+        onChange?.()
+      },
     }),
   )
 
@@ -81,7 +93,12 @@ export function mountExcalidraw(
     },
     loadScene(data: string): void {
       const parsed = JSON.parse(data) as { elements?: unknown[] }
+      suppressChange = true
       api?.updateScene({ elements: parsed.elements ?? [] })
+      // updateScene 是同步的，但它的 onChange 回调可能在同一轮或下一帧派发
+      requestAnimationFrame(() => {
+        suppressChange = false
+      })
     },
     exportScene(): string {
       const elements = api?.getSceneElements() ?? []
