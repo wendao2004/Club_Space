@@ -873,6 +873,21 @@ function migrate(database: DatabaseSync): void {
         CREATE INDEX ix_whiteboards_updated ON whiteboards(updated_at DESC);
       `)
     },
+
+    // ---- v19: 听歌房的同步播放（暂停/继续 + 服务端权威进度） ----
+    (d) => {
+      d.exec(`
+        -- 之前只有 started_at（起播时刻），客户端各自用本地时钟去减 ——
+        -- 两台机器时钟差几秒，"同步播放"就是各听各的。加暂停态后，服务端
+        -- 成为唯一的进度权威：
+        --   播放中 = now - started_at
+        --   暂停中 = paused_position_ms（固定值，不再随时间涨）
+        -- 恢复时把 started_at 往回拨 paused_position_ms，进度就接上了。
+        ALTER TABLE music_state ADD COLUMN paused_position_ms INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE music_state ADD COLUMN paused_at INTEGER;
+        ALTER TABLE music_state ADD COLUMN paused_by TEXT;
+      `)
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

@@ -33,6 +33,11 @@ export interface MusicNowPlaying {
   startedBy: string
   startedByName: string
   startedAt: number
+  /** 暂停状态：true 时 positionMs 是固定进度，startedAt 不再增长。 */
+  paused: boolean
+  /** 当前进度（毫秒，服务端权威，客户端直接用，不许自己加减时钟）。 */
+  positionMs: number
+  pausedByName: string | null
   /** 客户端上报 ended 时必须带上的令牌（每次换曲自增）。 */
   playedToken: number
 }
@@ -73,7 +78,15 @@ const QUEUE_SELECT = `
 
 export function musicRoomView(): MusicRoomView {
   const state = getDb().prepare('SELECT * FROM music_state WHERE id = 1').get() as
-    | { node_id: string; started_by: string; started_at: number; played_token: number }
+    | {
+        node_id: string
+        started_by: string
+        started_at: number
+        played_token: number
+        paused_position_ms: number
+        paused_at: number | null
+        paused_by: string | null
+      }
     | undefined
   const nameOf = (nodeId: string, userId: string): { name: string; userName: string } => {
     const row = getDb()
@@ -87,6 +100,16 @@ export function musicRoomView(): MusicRoomView {
   const nowPlaying = state
     ? (() => {
         const { name, userName } = nameOf(state.node_id, state.started_by)
+        const paused = state.paused_at !== null
+        // 服务端算出当前进度，客户端只用这个数 + 自己测得的时钟偏移
+        const positionMs = paused
+          ? state.paused_position_ms
+          : Math.max(0, now() - state.started_at)
+        const pausedByRow = state.paused_by
+          ? (getDb().prepare('SELECT display_name FROM users WHERE id = ?').get(state.paused_by) as
+              | { display_name: string }
+              | undefined)
+          : undefined
         return {
           nodeId: state.node_id,
           name,
@@ -94,6 +117,9 @@ export function musicRoomView(): MusicRoomView {
           startedByName: userName,
           startedAt: state.started_at,
           playedToken: state.played_token,
+          paused,
+          positionMs,
+          pausedByName: pausedByRow?.display_name ?? null,
         }
       })()
     : null
@@ -117,14 +143,51 @@ function startNext(): void {
   if (head) {
     db.prepare('DELETE FROM music_queue WHERE id = ?').run(head.id)
     db.prepare(
-      `INSERT INTO music_state (id, node_id, started_by, started_at, played_token) VALUES (1, ?, ?, ?, ?)
+      `INSERT INTO music_state (id, node_id, started_by, started_at, played_token, paused_position_ms, paused_at, paused_by)
+       VALUES (1, ?, ?, ?, ?, 0, NULL, NULL)
        ON CONFLICT(id) DO UPDATE SET node_id = excluded.node_id, started_by = excluded.started_by,
-                                     started_at = excluded.started_at, played_token = excluded.played_token`,
+                                     started_at = excluded.started_at, played_token = excluded.played_token,
+                                     paused_position_ms = 0, paused_at = NULL, paused_by = NULL`,
     ).run(head.node_id, head.added_by, now(), token)
   } else {
     // 队列空了就停播（清空当前曲目），不自动循环 —— 循环播谁的歌是个偏好问题
     db.prepare('DELETE FROM music_state WHERE id = 1').run()
   }
+}
+
+/**
+ * 暂停（同一个厅，谁都能按 —— 跟切歌一个权限级别）。
+ *
+ * 记下当前进度到 paused_position_ms，started_at 就不再被依赖。
+ */
+export function pauseRoom(userId: string): MusicRoomView {
+  const db = getDb()
+  const state = db.prepare('SELECT * FROM music_state WHERE id = 1').get() as
+    | { started_at: number; paused_at: number | null }
+    | undefined
+  if (!state) throw new HttpError(400, '现在没有在放的歌')
+  if (state.paused_at !== null) return musicRoomView()
+  const position = Math.max(0, now() - state.started_at)
+  db.prepare('UPDATE music_state SET paused_at = ?, paused_position_ms = ?, paused_by = ? WHERE id = 1').run(
+    now(),
+    position,
+    userId,
+  )
+  return musicRoomView()
+}
+
+/** 继续：把 started_at 往回拨"已播时长"，进度就接上了。 */
+export function resumeRoom(): MusicRoomView {
+  const db = getDb()
+  const state = db.prepare('SELECT * FROM music_state WHERE id = 1').get() as
+    | { paused_at: number | null; paused_position_ms: number }
+    | undefined
+  if (!state) throw new HttpError(400, '现在没有在放的歌')
+  if (state.paused_at === null) return musicRoomView()
+  db.prepare('UPDATE music_state SET started_at = ?, paused_at = NULL, paused_by = NULL WHERE id = 1').run(
+    now() - state.paused_position_ms,
+  )
+  return musicRoomView()
 }
 
 /** 把歌加进队列。必须是 audio 节点、且加歌人能读到（他人私有的直接拒）。 */
@@ -193,6 +256,11 @@ export function reportEnded(userId: string, playedToken: number): { advanced: bo
     | { played_token: number }
     | undefined
   if (!state || state.played_token !== playedToken) return { advanced: false }
+  // 暂停状态下不上报切歌（否则"暂停"会被别人的 ended 事件推着走）
+  const pausedRow = getDb().prepare('SELECT paused_at FROM music_state WHERE id = 1').get() as
+    | { paused_at: number | null }
+    | undefined
+  if (pausedRow?.paused_at != null) return { advanced: false }
   startNext()
   return { advanced: true }
 }

@@ -10,9 +10,11 @@ import type { FastifyInstance } from 'fastify'
 import {
   enqueueTrack,
   musicRoomView,
+  pauseRoom,
   purgeDeletedNode,
   removeQueued,
   reportEnded,
+  resumeRoom,
   skipTrack,
 } from '../music.ts'
 import { broadcast } from '../realtime.ts'
@@ -27,6 +29,29 @@ function notify(reason: string): void {
 }
 
 export function registerMusicRoutes(app: FastifyInstance): void {
+  /**
+   * 服务端时间（毫秒）。
+   *
+   * 客户端**不能**拿自己的 Date.now() 去减服务端的 startedAt —— 两台机器
+   * 时钟差几秒，"同步播放"就变成各听各的。客户端拿这个接口采样几次算出
+   * 偏移量，之后所有进度推算都走"服务端时钟"。
+   */
+  app.get('/api/music/time', async () => ({ now: Date.now() }))
+
+  app.post('/api/music/pause', async (req) => {
+    const user = requireUser(req)
+    const view = pauseRoom(user.id)
+    broadcast({ type: 'music', data: {} })
+    return view
+  })
+
+  app.post('/api/music/resume', async (req) => {
+    requireUser(req)
+    const view = resumeRoom()
+    broadcast({ type: 'music', data: {} })
+    return view
+  })
+
   app.get('/api/music/room', async (req) => {
     requireUser(req)
     return musicRoomView()

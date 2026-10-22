@@ -936,6 +936,16 @@ export const api = {
     /** 播放器自然播完的上报。advanced=false 表示 token 已过期（别人先报了）。 */
     ended: (playedToken: number) =>
       request<{ advanced: boolean }>('/api/music/ended', { json: { playedToken } }),
+
+    /**
+     * 服务端时间（毫秒）。客户端采样几次算时钟偏移 ——
+     * 别拿自己的 Date.now() 去减 startedAt，两台机器时钟差几秒就错位。
+     */
+    time: () => request<{ now: number }>('/api/music/time'),
+
+    /** 暂停/继续是**同一个厅的共享状态**（谁都能按，跟切歌一个级别）。 */
+    pause: () => request<MusicRoomView>('/api/music/pause', { json: {} }),
+    resume: () => request<MusicRoomView>('/api/music/resume', { json: {} }),
   },
 
   // ---------------------------------------------------------------- 打字练习
@@ -1881,6 +1891,12 @@ export interface MusicNowPlaying {
   startedAt: number
   /** 上报 ended 时必须带上（每次换曲自增，防旧上报错切新曲）。 */
   playedToken: number
+  /** 是否暂停（同一个厅的共享状态，谁都能按）。 */
+  paused: boolean
+  /** 服务端权威进度（毫秒）。播放中 = now - startedAt，暂停中 = 固定值。 */
+  positionMs: number
+  /** 谁按的暂停（显示用）。 */
+  pausedByName: string | null
 }
 
 export interface MusicRoomView {

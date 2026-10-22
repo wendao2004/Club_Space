@@ -94,6 +94,25 @@ export const useMusic = defineStore('music', {
       }
     },
 
+    /** 暂停/继续（厅级状态，影响所有人）。 */
+    async pause(): Promise<void> {
+      try {
+        this.room = await api.music.pause()
+        this.error = null
+      } catch (err) {
+        this.error = messageOf(err, '暂停失败')
+      }
+    },
+
+    async resume(): Promise<void> {
+      try {
+        this.room = await api.music.resume()
+        this.error = null
+      } catch (err) {
+        this.error = messageOf(err, '继续播放失败')
+      }
+    },
+
     async skip(): Promise<void> {
       try {
         this.room = await api.music.skip()

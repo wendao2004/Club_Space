@@ -1,14 +1,18 @@
 <!--
-  听歌房（轻量版）。
+  听歌房：全站一个厅，共享队列与**共享播放进度**。
 
-  全站一个厅：共享队列，谁都能排歌、切歌。播放器是"各播各的"——
-  加载完 seek 到服务端记录的起播位置，误差就是各自的加载耗时。
+  同步靠 engine（web/src/lib/music-player.ts）：
+  - 服务端时间是唯一权威（客户端采样算时钟偏移，不用自己的 Date.now()）
+  - 每秒对一次进度，偏差 > 0.45s 才 seek（阈值小会不停抽搐）
+  - 暂停/继续是厅级状态，所有人一起停、一起续
+  - 可选"房间音效"：短混响 + 按座位分声像（听感效果，不是多路音源）
   播完由任意客户端上报切歌（playedToken 防止旧上报错切新曲）。
 -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { api } from '@/api'
+import { SyncedPlayer, measureClockOffset, seatPan } from '@/lib/music-player'
 import { useMusic } from '@/stores/music'
 import { useAuth } from '@/stores/auth'
 import { useUi } from '@/stores/ui'
@@ -25,31 +29,61 @@ const ui = useUi()
 const audioEl = ref<HTMLAudioElement | null>(null)
 /** 正在加载的曲目 id：换曲时用来触发 <audio> 重新拉流。 */
 const playingNodeId = ref<string | null>(null)
-const localPaused = ref(false)
-/** 本会话是否已经对这个 token 做过 seek 对齐（避免 loop 里反复 seek）。 */
-const syncedToken = ref(-1)
 
-const now = ref(Date.now())
-const tick = window.setInterval(() => {
-  now.value = Date.now()
-}, 1000)
-onBeforeUnmount(() => window.clearInterval(tick))
+const player = new SyncedPlayer()
+/** 浏览器拦了自动播放时要显示"点一下开始"。 */
+const blocked = ref(false)
+/** 空间音效开关（默认关 —— 有人就爱听原声）。 */
+const roomFx = ref(localStorage.getItem('wl.music.roomFx') === '1')
 
 const nowPlaying = computed(() => music.room?.nowPlaying ?? null)
 const queue = computed(() => music.room?.queue ?? [])
 
-/** 按服务端起播时间算的当前进度（秒）。 */
+/** 当前进度（秒）：读服务端权威进度，再加本地这一秒的推进。 */
 const progressSec = computed(() => {
   const np = nowPlaying.value
   if (!np) return 0
-  return Math.max(0, (now.value - np.startedAt) / 1000)
+  return Math.max(0, player.targetMs(np) / 1000)
 })
+
+const displayProgress = ref(0)
+const progressTimer = window.setInterval(() => {
+  displayProgress.value = progressSec.value
+  const np = nowPlaying.value
+  if (!np) return
+  if (player.enforce(np)) {
+    // 校正过一次就不用再提示别的
+  }
+  blocked.value = player.blocked
+}, 1000)
+onBeforeUnmount(() => window.clearInterval(progressTimer))
 
 function formatTime(sec: number): string {
   const s = Math.floor(sec)
   const m = Math.floor(s / 60)
   return `${m}:${String(s % 60).padStart(2, '0')}`
 }
+
+/** 时钟对齐：进房间时测一次，之后每 5 分钟重测（笔记本休眠会漂）。 */
+async function syncClock(): Promise<void> {
+  const offset = await measureClockOffset(async () => (await api.music.time()).now)
+  player.setClockOffset(offset)
+}
+const clockTimer = window.setInterval(() => void syncClock(), 5 * 60_000)
+onBeforeUnmount(() => window.clearInterval(clockTimer))
+
+watch(
+  audioEl,
+  (el) => {
+    if (!el) return
+    player.pan = seatPan(auth.user?.id ?? 'guest')
+    player.attach(el)
+    // 换曲/首次挂载后立刻对齐一次
+    const np = nowPlaying.value
+    if (np) player.enforce(np)
+  },
+  { immediate: true },
+)
 
 watch(
   nowPlaying,
@@ -60,11 +94,11 @@ watch(
     }
     if (np.nodeId !== playingNodeId.value) {
       playingNodeId.value = np.nodeId
-      syncedToken.value = -1
-      localPaused.value = false
-      // src 换了 <audio> 会自动重拉；seek 在 loadedmetadata 里做（此时才知道可播）
-    } else if (np.playedToken !== old?.playedToken) {
-      syncedToken.value = -1
+      return
+    }
+    if (np.playedToken !== old?.playedToken) {
+      // 同一首歌重播（极少见）：重新对齐
+      player.enforce(np)
     }
   },
   { immediate: true },
@@ -73,38 +107,43 @@ watch(
 function onLoadedMetadata(): void {
   const np = nowPlaying.value
   const el = audioEl.value
-  if (!np || !el || syncedToken.value === np.playedToken) return
-  syncedToken.value = np.playedToken
-  // 对齐到服务端起播位置 —— 这就是"轻量同步"的全部：误差 = 各自加载耗时
-  const target = Math.max(0, (Date.now() - np.startedAt) / 1000)
-  if (Number.isFinite(el.duration) && target < el.duration) {
-    el.currentTime = target
-    void el.play().catch(() => {
-      // 浏览器自动播放策略拦了（无用户手势）—— 显示播放按钮让用户点一下
-      localPaused.value = true
-    })
-  }
+  if (!np || !el) return
+  player.attach(el)
+  player.enforce(np)
 }
 
 async function onEnded(): Promise<void> {
   const np = nowPlaying.value
   if (!np) return
-  const advanced = await music.ended(np.playedToken)
-  if (!advanced) {
-    // 别的客户端先报了 —— store 会收到广播并换曲，这里不用动
-  }
+  // 暂停状态下的 ended 不会推进（服务端也会拒绝），这里提前挡掉
+  if (np.paused) return
+  await music.ended(np.playedToken)
 }
 
+/** 暂停/继续是**厅级操作**：影响所有人（按钮文案里写清楚）。 */
 async function togglePlay(): Promise<void> {
+  const np = nowPlaying.value
+  if (!np) return
+  if (np.paused) await music.resume()
+  else await music.pause()
+}
+
+/** 浏览器拦截后，用户点这里的按钮 = 给了手势，可以正常播放。 */
+async function unlockAudio(): Promise<void> {
+  const np = nowPlaying.value
   const el = audioEl.value
-  if (!el) return
-  if (el.paused) {
-    await el.play().catch(() => undefined)
-    localPaused.value = false
-  } else {
-    el.pause()
-    localPaused.value = true
-  }
+  if (!el || !np) return
+  el.currentTime = Math.min(player.targetMs(np) / 1000, el.duration || 0)
+  await el.play().catch(() => undefined)
+  player.blocked = false
+  blocked.value = false
+}
+
+function toggleRoomFx(): void {
+  roomFx.value = !roomFx.value
+  localStorage.setItem('wl.music.roomFx', roomFx.value ? '1' : '0')
+  player.setRoomFx(roomFx.value)
+  ui.notify('info', '听歌房', roomFx.value ? '房间音效已开：会有一点混响和左右声像' : '房间音效已关（原声）')
 }
 
 // ---------------------------------------------------------------- 队列操作
@@ -139,7 +178,13 @@ function trackUrl(nodeId: string): string {
 
 onMounted(() => {
   music.connectRealtime()
+  void syncClock()
   void music.load()
+  if (roomFx.value) player.setRoomFx(true)
+})
+
+onBeforeUnmount(() => {
+  player.dispose()
 })
 
 watch(
@@ -168,17 +213,43 @@ watch(
     <section class="now" :class="{ 'now--idle': !nowPlaying }">
       <template v-if="nowPlaying">
         <div class="now-info">
-          <Icon name="audio" :size="26" class="now-icon" />
+          <Icon name="audio" :size="26" class="now-icon" :class="{ 'now-icon--paused': nowPlaying.paused }" />
           <div class="now-text">
             <strong class="now-name">{{ nowPlaying.name }}</strong>
-            <span class="now-meta">{{ nowPlaying.startedByName }} 排的 · 已播 {{ formatTime(progressSec) }}</span>
+            <span class="now-meta">
+              {{ nowPlaying.startedByName }} 排的 ·
+              <template v-if="nowPlaying.paused">
+                已暂停（{{ nowPlaying.pausedByName ?? '有人' }} 按的）· 停在 {{ formatTime(displayProgress) }}
+              </template>
+              <template v-else>已播 {{ formatTime(displayProgress) }} · 全厅同步</template>
+            </span>
           </div>
           <div class="spacer" />
-          <button class="wl-icon-btn" :title="localPaused ? '播放' : '暂停（只影响自己）'" @click="togglePlay">
-            <Icon :name="localPaused ? 'chevron-right' : 'minus'" :size="16" />
+          <button
+            v-if="blocked"
+            class="wl-btn wl-btn--sm wl-btn--primary"
+            title="浏览器需要一次点击才允许放声音"
+            @click="unlockAudio"
+          >
+            点一下开始
+          </button>
+          <button
+            class="wl-icon-btn"
+            :title="nowPlaying.paused ? '继续播放（所有人）' : '暂停（所有人一起停）'"
+            @click="togglePlay"
+          >
+            <Icon :name="nowPlaying.paused ? 'chevron-right' : 'minus'" :size="16" />
           </button>
           <button class="wl-btn wl-btn--sm" title="所有人切到下一首" @click="skip">
             <Icon name="chevron-right" :size="14" />切歌
+          </button>
+          <button
+            class="wl-btn wl-btn--sm"
+            :class="{ 'wl-btn--primary': roomFx }"
+            :title="roomFx ? '关闭房间音效（原声）' : '开启房间音效：一点混响和左右声像'"
+            @click="toggleRoomFx"
+          >
+            <Icon name="audio" :size="13" />房间音效{{ roomFx ? ' 开' : '' }}
           </button>
         </div>
         <div class="now-progress">
@@ -284,6 +355,10 @@ watch(
 
 .now--idle {
   padding: var(--space-4);
+}
+
+.now-icon--paused {
+  opacity: 0.45;
 }
 
 .now-info {

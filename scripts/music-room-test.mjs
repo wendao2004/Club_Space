@@ -245,6 +245,54 @@ view = (await alice('/api/music/room')).body
 eq(view.nowPlaying?.name, '夜曲.wav', '自动跳到下一首（厅里不断声）')
 eq(view.queue.length, 0, '队列引用同步清理')
 
+console.log('\n【同步播放：时钟与暂停】')
+
+// 服务端时间接口：客户端靠它算时钟偏移（拿本地时钟减 startedAt 会各听各的）
+res = await alice('/api/music/time')
+assert(res.status === 200 && typeof res.body.now === 'number', '有时钟接口 /api/music/time')
+assert(Math.abs(res.body.now - Date.now()) < 5000, '服务端时间与本地差在 5 秒内', `${res.body.now - Date.now()}ms`)
+
+// 前面的状态机测试可能已经把队列跑空 —— 先确保有歌在放
+view = (await alice('/api/music/room')).body
+if (!view.nowPlaying) {
+  await alice('/api/music/queue', 'POST', { nodeId: songA })
+  view = (await alice('/api/music/room')).body
+}
+assert(!!view.nowPlaying, '当前有曲目')
+const beforePause = view.nowPlaying
+assert(typeof beforePause.positionMs === 'number' && beforePause.positionMs >= 0, 'nowPlaying 带服务端权威进度', `${beforePause.positionMs}ms`)
+assert(beforePause.paused === false, '默认是播放中')
+
+// 普通成员也能暂停（跟切歌一个权限级别）
+res = await alice('/api/music/pause', 'POST', {})
+eq(res.status, 200, '成员可以暂停（厅级操作）')
+const pausedView = res.body
+assert(pausedView.nowPlaying.paused === true, '暂停后状态为 paused')
+const pausedAt = pausedView.nowPlaying.positionMs
+assert(pausedAt > 0, '暂停时记下了进度', `${pausedAt}ms`)
+assert(pausedView.nowPlaying.pausedByName === '小爱', '记录是谁暂停的', String(pausedView.nowPlaying.pausedByName))
+
+// 暂停期间进度不再增长
+await new Promise((r) => setTimeout(r, 700))
+const stillPaused = (await alice('/api/music/room')).body.nowPlaying
+eq(stillPaused.positionMs, pausedAt, '暂停期间进度冻结')
+
+// 暂停时上报 ended 不能切歌（否则暂停会被别人的 ended 推着走）
+res = await bob('/api/music/ended', 'POST', { playedToken: stillPaused.playedToken })
+eq(res.body.advanced, false, '暂停时上报 ended 不推进队列')
+
+// 继续：started_at 往回拨，进度接上
+res = await bob('/api/music/resume', 'POST', {})
+eq(res.status, 200, '任何成员都能继续')
+const resumed = res.body.nowPlaying
+assert(resumed.paused === false, '继续后恢复播放')
+assert(
+  Math.abs(resumed.positionMs - pausedAt) < 1500,
+  '继续后进度从暂停点接上（不重头播）',
+  `暂停 ${pausedAt}ms → 继续 ${resumed.positionMs}ms`,
+)
+
+
 // ---------------------------------------------------------------- 汇总
 
 console.log(`\n\x1b[1m结果\x1b[0m  通过 \x1b[32m${passed}\x1b[0m  失败 \x1b[31m${failed}\x1b[0m\n`)
