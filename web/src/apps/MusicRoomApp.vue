@@ -12,7 +12,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { api } from '@/api'
-import { SyncedPlayer, measureClockOffset, seatPan } from '@/lib/music-player'
+import { SyncedPlayer, measureClockOffset } from '@/lib/music-player'
 import { useMusic } from '@/stores/music'
 import { useAuth } from '@/stores/auth'
 import { useUi } from '@/stores/ui'
@@ -33,8 +33,8 @@ const playingNodeId = ref<string | null>(null)
 const player = new SyncedPlayer()
 /** 浏览器拦了自动播放时要显示"点一下开始"。 */
 const blocked = ref(false)
-/** 空间音效开关（默认关 —— 有人就爱听原声）。 */
-const roomFx = ref(localStorage.getItem('wl.music.roomFx') === '1')
+/** 同步精度（毫秒）：给用户看"我们现在差多少"，也是空间声场的前提。 */
+const syncOffsetMs = ref(0)
 
 const nowPlaying = computed(() => music.room?.nowPlaying ?? null)
 const queue = computed(() => music.room?.queue ?? [])
@@ -51,11 +51,11 @@ const progressTimer = window.setInterval(() => {
   displayProgress.value = progressSec.value
   const np = nowPlaying.value
   if (!np) return
-  if (player.enforce(np)) {
-    // 校正过一次就不用再提示别的
-  }
+  // 500ms 一次：偏差 40ms 内不动、400ms 内用速率微调、再大才 seek
+  player.enforce(np)
   blocked.value = player.blocked
-}, 1000)
+  syncOffsetMs.value = Math.abs(player.lastOffsetMs)
+}, 500)
 onBeforeUnmount(() => window.clearInterval(progressTimer))
 
 function formatTime(sec: number): string {
@@ -76,7 +76,6 @@ watch(
   audioEl,
   (el) => {
     if (!el) return
-    player.pan = seatPan(auth.user?.id ?? 'guest')
     player.attach(el)
     // 换曲/首次挂载后立刻对齐一次
     const np = nowPlaying.value
@@ -139,12 +138,7 @@ async function unlockAudio(): Promise<void> {
   blocked.value = false
 }
 
-function toggleRoomFx(): void {
-  roomFx.value = !roomFx.value
-  localStorage.setItem('wl.music.roomFx', roomFx.value ? '1' : '0')
-  player.setRoomFx(roomFx.value)
-  ui.notify('info', '听歌房', roomFx.value ? '房间音效已开：会有一点混响和左右声像' : '房间音效已关（原声）')
-}
+
 
 // ---------------------------------------------------------------- 队列操作
 
@@ -200,7 +194,6 @@ onMounted(() => {
   music.connectRealtime()
   void syncClock()
   void music.load()
-  if (roomFx.value) player.setRoomFx(true)
 })
 
 onBeforeUnmount(() => {
@@ -241,7 +234,7 @@ watch(
               <template v-if="nowPlaying.paused">
                 已暂停（{{ nowPlaying.pausedByName ?? '有人' }} 按的）· 停在 {{ formatTime(displayProgress) }}
               </template>
-              <template v-else>已播 {{ formatTime(displayProgress) }} · 全厅同步</template>
+              <template v-else>已播 {{ formatTime(displayProgress) }} · 全厅同步播放（每台电脑都是一只音箱）</template>
             </span>
           </div>
           <div class="spacer" />
@@ -263,14 +256,13 @@ watch(
           <button class="wl-btn wl-btn--sm" title="所有人切到下一首" @click="skip">
             <Icon name="chevron-right" :size="14" />切歌
           </button>
-          <button
-            class="wl-btn wl-btn--sm"
-            :class="{ 'wl-btn--primary': roomFx }"
-            :title="roomFx ? '关闭房间音效（原声）' : '开启房间音效：一点混响和左右声像'"
-            @click="toggleRoomFx"
+          <span
+            class="sync-chip"
+            :class="{ 'sync-chip--loose': syncOffsetMs > 120 }"
+            :title="`本机与服务端播放进度的偏差：${syncOffsetMs}ms。全厅每台电脑都对准同一进度，多设备一起出声才像一个声场`"
           >
-            <Icon name="audio" :size="13" />房间音效{{ roomFx ? ' 开' : '' }}
-          </button>
+            <Icon name="check" :size="12" />同步 ±{{ syncOffsetMs }}ms
+          </span>
         </div>
         <div class="now-progress">
           <div class="now-progress-bar" :style="{ width: '100%' }">
@@ -383,6 +375,23 @@ watch(
 
 .now--idle {
   padding: var(--space-4);
+}
+
+.sync-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: monospace;
+  color: var(--text-3);
+  background: var(--surface-2);
+}
+
+.sync-chip--loose {
+  color: var(--warning, #b06d00);
+  background: color-mix(in srgb, var(--warning, #b06d00) 12%, transparent);
 }
 
 .now-warn {

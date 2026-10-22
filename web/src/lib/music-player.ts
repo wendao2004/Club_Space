@@ -1,19 +1,22 @@
 /**
  * 听歌房的同步播放引擎。
  *
- * 为什么需要它：之前是"各播各的" —— 客户端拿**自己的** `Date.now()` 去减
- * 服务端的 `startedAt`，两台机器时钟差几秒，听到的就是两首歌。真正的同步
- * 要解决三件事：
+ * 目标不是"能出声"，而是**多台电脑同时出声听起来像一个声场** ——
+ * 每台电脑都是一只音箱，靠的都是同一份时间基准：
  *
- * 1. **时钟对齐**：用 `/api/music/time` 采样几次，按 RTT 最小的一次估出
- *    "服务端时钟 - 本地时钟"的偏移。之后所有进度推算都走 `serverNow()`。
- * 2. **漂移校正**：浏览器缓冲、切后台、网络抖动都会让进度慢慢跑偏。每秒
- *    对一次目标位置，偏差超过 0.45 秒才 seek（阈值太小会不停抽搐）。
+ * 1. **时钟对齐**：`/api/music/time` 采样 5 次，取 RTT 最小的一次估
+ *    "服务端时钟 - 本地时钟"的偏移。绝不能拿本地 `Date.now()` 直接减
+ *    服务端的 `startedAt`（两台机器差几秒，就是两首歌）。
+ * 2. **三级校正**（人耳对"同时发声"的容忍度大约是 30-40ms）：
+ *    - 偏差 < 40ms：不动（听不出来，动了反而抖）
+ *    - 40ms ~ 400ms：**改 playbackRate 微调**追平（±4% 以内，音高变化
+ *      约 0.7 半音以内，几乎听不出；避免了频繁 seek 的"咔哒"感）
+ *    - > 400ms：直接 seek（宁可跳一下，也不能长期跑偏）
  * 3. **共享暂停**：暂停是厅级状态（服务端存 paused_position_ms），
  *    所有人一起停、一起续，续播时把 started_at 往回拨已播时长。
  *
- * 另外提供可选的"房间音效"：同一路音频过一个短混响 + 按座位分配的声像，
- * 听起来像坐在同一个房间里。注意这是**听感效果**，不是多路音源。
+ * 注意：不做任何"混响/声像"效果 —— 空间感来自多台设备在物理空间里的
+ * 位置差异，前提就是同步足够准。
  */
 
 /** 播放状态（服务端给的权威数据）。 */
@@ -25,16 +28,20 @@ export interface SyncSource {
   positionMs: number
 }
 
-/** 允许多大偏差（秒）才触发 seek。太小会因为缓冲抖动来回跳。 */
-const DRIFT_TOLERANCE_SEC = 0.45
+/** 小于这个偏差就不管（人耳分辨不了，频繁微调反而像抖）。 */
+const TOLERANCE_SEC = 0.04
+/** 超过这个偏差就不再微调，直接 seek。 */
+const HARD_SEEK_SEC = 0.4
+/** 微调时允许的最大倍速偏移（4% ≈ 0.7 半音，基本听不出）。 */
+const MAX_RATE_ADJUST = 0.04
 
 /**
- * 估算服务端时钟偏移（毫秒）。取三次采样里 RTT 最小的那次 ——
+ * 估算服务端时钟偏移（毫秒）。取五次采样里 RTT 最小的那次 ——
  * 网络越顺，`serverNow - (发送+接收)/2` 越准。
  */
 export async function measureClockOffset(fetchNow: () => Promise<number>): Promise<number> {
   let best = { rtt: Number.POSITIVE_INFINITY, offset: 0 }
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 5; i++) {
     const t0 = Date.now()
     try {
       const serverNow = await fetchNow()
@@ -48,45 +55,16 @@ export async function measureClockOffset(fetchNow: () => Promise<number>): Promi
   return Number.isFinite(best.rtt) ? best.offset : 0
 }
 
-/** 生成一段"房间"脉冲响应：指数衰减的噪声，越靠后越弱。 */
-function roomImpulse(ctx: AudioContext, seconds: number): AudioBuffer {
-  const rate = ctx.sampleRate
-  const len = Math.max(1, Math.floor(rate * seconds))
-  const buffer = ctx.createBuffer(2, len, rate)
-  for (let ch = 0; ch < 2; ch++) {
-    const data = buffer.getChannelData(ch)
-    for (let i = 0; i < len; i++) {
-      const decay = (1 - i / len) ** 2.6
-      data[i] = (Math.random() * 2 - 1) * decay * 0.6
-    }
-  }
-  return buffer
-}
-
-/** 稳定地把一个字符串映射到 [-1, 1] 的声像位置（同一个人每次都在同一侧）。 */
-export function seatPan(seed: string): number {
-  let hash = 0
-  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) | 0
-  const norm = ((hash >>> 0) % 1000) / 1000 // 0..1
-  return Number((norm * 1.4 - 0.7).toFixed(2)) // -0.7..0.7，贴边太假
-}
-
 export class SyncedPlayer {
   private el: HTMLAudioElement | null = null
   private clockOffset = 0
-  private fxOn = false
-  private ctx: AudioContext | null = null
-  private source: MediaElementAudioSourceNode | null = null
-  private nodes: AudioNode[] = []
-  /** 浏览器拦了自动播放（没有用户手势）时置位，界面据此显示"点一下开始"。 */
+  /** 最近一次测得的偏差（毫秒，正数=本地落后）。界面用它显示同步精度。 */
+  lastOffsetMs = 0
+  /** 浏览器拦了自动播放（没有用户手势）时置位。 */
   blocked = false
-  /** 空间音效的声像位置（由座位决定）。 */
-  pan = 0
 
   attach(el: HTMLAudioElement): void {
     this.el = el
-    // 换源之后（<audio> 用了 :key 重建）要重新接音频图
-    if (this.fxOn && el) this.rebuildFx()
   }
 
   setClockOffset(offset: number): void {
@@ -103,23 +81,27 @@ export class SyncedPlayer {
   }
 
   /**
-   * 把播放器拉到目标状态。每秒调一次（tick 里）。
-   * 返回 true 表示这次做过校正（界面可以用来显示"已对齐"）。
+   * 把播放器拉到目标状态。每 500ms 调一次。
+   * 返回 true 表示这次动过（seek 或改了速率）。
    */
   enforce(src: SyncSource): boolean {
     const el = this.el
     if (!el) return false
-    const target = this.targetMs(src) / 1000
     if (!Number.isFinite(el.duration) || el.duration <= 0) return false
 
+    const target = this.targetMs(src) / 1000
+
     if (src.paused) {
+      el.playbackRate = 1
       if (!el.paused) el.pause()
       if (Math.abs(el.currentTime - target) > 1) el.currentTime = Math.min(target, el.duration)
+      this.lastOffsetMs = 0
       return false
     }
 
     if (el.paused) {
       el.currentTime = Math.min(target, el.duration)
+      el.playbackRate = 1
       void el.play().then(
         () => {
           this.blocked = false
@@ -131,103 +113,36 @@ export class SyncedPlayer {
       return true
     }
 
-    if (Math.abs(el.currentTime - target) > DRIFT_TOLERANCE_SEC) {
+    // 播放中：算偏差（正数 = 本地落后于服务端）
+    const drift = target - el.currentTime
+    this.lastOffsetMs = Math.round(drift * 1000)
+
+    if (Math.abs(drift) <= TOLERANCE_SEC) {
+      if (el.playbackRate !== 1) el.playbackRate = 1
+      return false
+    }
+
+    if (Math.abs(drift) > HARD_SEEK_SEC) {
+      el.playbackRate = 1
       el.currentTime = Math.min(target, el.duration)
+      return true
+    }
+
+    // 中间地带：用速率微调慢慢追，听不出"跳"
+    const rate = 1 + Math.max(-MAX_RATE_ADJUST, Math.min(MAX_RATE_ADJUST, drift))
+    if (Math.abs(el.playbackRate - rate) > 0.002) {
+      el.playbackRate = rate
       return true
     }
     return false
   }
 
-  /** 换曲时调用：重置播放位置（进度由随后的 enforce 校正）。 */
-  resetTo(src: SyncSource): void {
-    const el = this.el
-    if (!el) return
-    this.blocked = false
-    el.currentTime = Math.min(this.targetMs(src) / 1000, Number.isFinite(el.duration) ? el.duration : 0)
-  }
-
-  /**
-   * 开关"房间音效"。
-   *
-   * 关了之后会把 <audio> 重新加载一次 —— MediaElementSource 一旦建出来就
-   * 无法撤销，想回到原生输出只能重载媒体元素（会短暂中断，可接受）。
-   */
-  setRoomFx(on: boolean): void {
-    if (on === this.fxOn) return
-    this.fxOn = on
-    if (on) this.rebuildFx()
-    else this.teardownFx()
-  }
-
-  private rebuildFx(): void {
-    const el = this.el
-    if (!el) return
-    this.teardownFx(false)
-    try {
-      const ctx = new AudioContext()
-      const source = ctx.createMediaElementSource(el)
-      const panner = ctx.createStereoPanner()
-      panner.pan.value = this.pan
-      const dry = ctx.createGain()
-      dry.gain.value = 0.85
-      const wet = ctx.createGain()
-      wet.gain.value = 0.22
-      const conv = ctx.createConvolver()
-      conv.buffer = roomImpulse(ctx, 0.7)
-
-      source.connect(panner)
-      panner.connect(dry)
-      dry.connect(ctx.destination)
-      panner.connect(conv)
-      conv.connect(wet)
-      wet.connect(ctx.destination)
-
-      this.ctx = ctx
-      this.source = source
-      this.nodes = [panner, dry, wet, conv]
-      void ctx.resume()
-    } catch {
-      // 某些浏览器在无手势时不让建 AudioContext —— 静默退回原生输出
-      this.fxOn = false
-      this.teardownFx()
-    }
-  }
-
-  /** 拆图。`reload` 为 true 时重载媒体元素以恢复原生输出。 */
-  private teardownFx(reload = true): void {
-    for (const node of this.nodes) {
-      try {
-        node.disconnect()
-      } catch {
-        /* 已断开 */
-      }
-    }
-    this.nodes = []
-    try {
-      this.source?.disconnect()
-    } catch {
-      /* 已断开 */
-    }
-    this.source = null
-    void this.ctx?.close().catch(() => undefined)
-    this.ctx = null
-    if (reload && this.el) {
-      const el = this.el
-      const at = el.currentTime
-      el.load()
-      el.addEventListener(
-        'loadedmetadata',
-        () => {
-          el.currentTime = at
-          void el.play().catch(() => undefined)
-        },
-        { once: true },
-      )
-    }
-  }
-
   dispose(): void {
-    this.teardownFx(false)
+    const el = this.el
+    if (el) {
+      el.playbackRate = 1
+      el.pause()
+    }
     this.el = null
   }
 }
