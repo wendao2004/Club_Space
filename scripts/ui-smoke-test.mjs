@@ -3886,6 +3886,63 @@ async function main() {
       'Excalidraw 界面已汉化（工具栏提示是中文）',
       `${wbState.cjkTitles} 个中文 title`,
     )
+
+    // ---- 白板：保存 → 切换白板 → 切回来，内容必须还在 ----
+    //
+    // 这条用例针对两个真实 bug：
+    //  1. 切换白板时 bridge 已存在就直接 return → 新白板根本没载入场景
+    //     （看到的是上一块白板的内容）
+    //  2. 保存成功后没把场景写回本地状态 → 切回来载入旧数据
+    // 用户看到的现象都是"白板保存不了 / 保存了又丢"。
+    const injectRect = async (id) =>
+      evaluate(`(() => {
+        const hook = window.__wlWhiteboard
+        if (!hook?.updateScene) return 'no-hook'
+        hook.updateScene([{
+          id: '${id}', type: 'rectangle', x: 120, y: 120, width: 180, height: 120,
+          angle: 0, strokeColor: '#1e1e1e', backgroundColor: 'transparent', fillStyle: 'solid',
+          strokeWidth: 2, strokeStyle: 'solid', roughness: 1, opacity: 100, groupIds: [],
+          frameId: null, roundness: { type: 3 }, seed: 4242, version: 1, versionNonce: 1,
+          isDeleted: false, boundElements: null, updated: Date.now(), link: null, locked: false,
+        }])
+        return 'injected'
+      })()`)
+    const elementCount = async () =>
+      Number(await evaluate(`String(window.__wlWhiteboard?.elementCount?.() ?? -1)`))
+
+    // 当前窗口里的白板已经是 smoke 白板：画一个矩形并保存
+    const injected = await injectRect('smoke-rect-1')
+    assert(injected === 'injected', '往画布里注入一个矩形（模拟用户画了一笔）')
+    await sleep(1200)
+    assert((await elementCount()) === 1, '画布场景里有 1 个元素')
+
+    const saveEnabled = await evaluate(
+      `String(!document.querySelector('.wb-app .canvas-bar .wl-btn--primary')?.disabled)`,
+    )
+    assert(saveEnabled === 'true', '有未保存改动时保存按钮可点')
+
+    await evaluate(`(() => { document.querySelector('.wb-app .canvas-bar .wl-btn--primary')?.click(); return true })()`)
+    await sleep(2500)
+    const dirtyAfterSave = await evaluate(`String(!!document.querySelector('.wb-app .wl-badge--warning'))`)
+    assert(dirtyAfterSave === 'false', '保存后「未保存」标记消失')
+
+    // 再建一块新白板（会自动切过去），必须是一块空板
+    await evaluate(`window.__origPrompt2 = window.prompt; window.prompt = () => 'smoke 第二块'; true`)
+    await evaluate(`(() => { const b = [...document.querySelectorAll('.wb-app .side-head .wl-icon-btn')].pop(); b?.click(); return !!b })()`)
+    await sleep(3500)
+    assert((await elementCount()) === 0, '新建并切到另一块白板后画布是空的（不串上一块的内容）')
+
+    // 切回第一块：保存过的矩形必须回来
+    const backToFirst = await evaluate(`(() => {
+      const rows = [...document.querySelectorAll('.wb-app .brow')]
+      const row = rows.find((r) => r.textContent.includes('smoke 白板'))
+      row?.click()
+      return !!row
+    })()`)
+    assert(backToFirst, '在列表里切回原来的白板')
+    await sleep(3000)
+    assert((await elementCount()) === 1, '切回后保存过的内容还在（保存真的生效）')
+    await evaluate(`window.prompt = window.__origPrompt2; true`)
     await evaluate(`window.prompt = window.__origPrompt; true`)
 
     // ---- 控制台错误 ----

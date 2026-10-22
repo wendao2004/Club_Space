@@ -64,8 +64,17 @@ async function openBoard(id: string): Promise<void> {
     current.value = board
     dirty.value = false
     remoteAhead.value = false
-    // 画布容器随 current 挂出，等一拍再 mount
-    requestAnimationFrame(() => mountCanvas())
+    // 画布容器随 current 挂出，等一拍再 mount / 重新载入
+    requestAnimationFrame(() => {
+      if (bridge) {
+        // 已经挂过 React root：只换场景。之前这里直接 return，导致"切到
+        // 另一块白板后画布还是上一块的内容"——用户以为保存失败
+        bridge.loadScene(board.data)
+        dirty.value = false
+      } else {
+        mountCanvas(board.data)
+      }
+    })
   } catch (err) {
     ui.notify('error', '白板', err instanceof Error ? err.message : '加载失败')
   }
@@ -87,20 +96,25 @@ async function removeBoard(b: WhiteboardMeta): Promise<void> {
 const canvasEl = ref<HTMLDivElement | null>(null)
 let bridge: ExcalidrawBridge | null = null
 
-function mountCanvas(): void {
+/**
+ * 挂载 React 画布。
+ *
+ * `dataToLoad` 要**显式传入**：onReady 回调可能在 switch 之后才跑，那时
+ * current 已经指向另一块白板了 —— 用参数捕获“要载入的那一份场景”。
+ */
+function mountCanvas(dataToLoad?: string): void {
   if (!canvasEl.value || bridge) return
+  const initialData = dataToLoad ?? current.value?.data
   bridge = mountExcalidraw(
     canvasEl.value,
     () => {
       // 就绪后把服务端场景灌进去
-      if (current.value && bridge) {
-        bridge.loadScene(current.value.data)
+      if (bridge && initialData !== undefined) {
+        bridge.loadScene(initialData)
         dirty.value = false
       }
     },
     () => {
-      // 用户动过画布就标记未保存（onChange 在程序化 updateScene 时也会触发，
-      // 但那时 dirty 已被置 false 之后才 mount，顺序上无碍）
       dirty.value = true
     },
   )
@@ -119,6 +133,13 @@ async function save(): Promise<void> {
   try {
     const data = bridge.exportScene()
     await api.whiteboards.save(current.value.id, data)
+    /**
+     * 关键：把刚保存的场景写回 current。
+     *
+     * 不写回的话，`current.data` 一直是"打开时的那一份"——切到别的白板
+     * 再切回来，载入的是旧场景，用户看到图"没了"，以为保存失败。
+     */
+    current.value = { ...current.value, data, updatedAt: Date.now() }
     dirty.value = false
     remoteAhead.value = false
     // 更新列表里的时间戳

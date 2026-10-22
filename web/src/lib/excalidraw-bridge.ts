@@ -55,10 +55,21 @@ export function mountExcalidraw(
   const root: Root = createRoot(el)
   let api: ExcalidrawApi | null = null
   /**
-   * 程序化改场景（loadScene / 初始化灌数据）也会触发 onChange ——
-   * 那不是“用户改了”，不标记未保存。用这个标志把两边分开。
+   * 初始化/程序化改场景会触发 onChange —— 那不是"用户改了"，不该标记
+   * 未保存（否则一打开就顶着个"未保存"，而且此时点保存会把空场景
+   * 覆盖回去）。
+   *
+   * 两层防护：suppressChange 标志盖住同步派发的回调；**时间窗**
+   * （quietUntil）盖住 Excalidraw 拖到微任务/下一帧才派发的那部分 ——
+   * 只靠 rAF 清除靠不住，实际就见过"打开即脏"。窗口内用户不可能
+   * 已经开始画画（打开→看见界面就不止 1 秒）。
    */
   let suppressChange = false
+  let quietUntil = 0
+  const quietFor = (ms: number): void => {
+    quietUntil = Date.now() + ms
+  }
+  quietFor(1200)
 
   // 用宽化的组件类型绕开 Excalidraw 内部 props 的窄类型 —— 我们只传三个
   // 回调，真正的类型约束靠上面的最小接口与运行时行为
@@ -84,10 +95,20 @@ export function mountExcalidraw(
       },
       excalidrawAPI: (instance: ExcalidrawApi) => {
         api = instance
+        /**
+         * 只读调试钩子：线上探针与自动化断言用它读"场景里到底有几个元素"，
+         * 否则 Excalidraw 全画在 canvas 上、DOM 里查不到任何形状 —— 出现过
+         * "保存成功但存的是空场景"这种只能靠它定位的问题。无敏感数据。
+         */
+        ;(window as unknown as { __wlWhiteboard?: unknown }).__wlWhiteboard = {
+          elementCount: (): number => (instance.getSceneElements() ?? []).length,
+          elementIds: (): string[] => (instance.getSceneElements() ?? []).map((e) => (e as { id?: string }).id ?? '?'),
+          updateScene: (elements: unknown[]): void => instance.updateScene({ elements }),
+        }
         onReady?.()
       },
       onChange: () => {
-        if (suppressChange) return
+        if (suppressChange || Date.now() < quietUntil) return
         onChange?.()
       },
     }),
@@ -101,10 +122,13 @@ export function mountExcalidraw(
     loadScene(data: string): void {
       const parsed = JSON.parse(data) as { elements?: unknown[] }
       suppressChange = true
+      quietFor(600)
       api?.updateScene({ elements: parsed.elements ?? [] })
       // updateScene 是同步的，但它的 onChange 回调可能在同一轮或下一帧派发
       requestAnimationFrame(() => {
-        suppressChange = false
+        requestAnimationFrame(() => {
+          suppressChange = false
+        })
       })
     },
     exportScene(): string {
