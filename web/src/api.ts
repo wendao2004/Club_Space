@@ -845,6 +845,18 @@ export const api = {
     /** 中途进来 / 刷新：补发当前画布。 */
     canvas: (id: string) => request<{ strokes: DrawStrokeInput[] }>(`/api/games/draw/rooms/${id}/canvas`),
 
+    /**
+     * 旁观者登记 / 续期。
+     *
+     * 玩家不需要它（服务端按 players 推），但非成员打开进行中的房间时，
+     * 不登记就收不到任何 game-draw / draw-stroke —— 画面会停在进入时的第一帧。
+     */
+    watch: (id: string) =>
+      request<{ ok: true; room: DrawRoom }>(`/api/games/draw/rooms/${id}/watch`, { json: {} }),
+
+    unwatch: (id: string) =>
+      request<{ ok: true }>(`/api/games/draw/rooms/${id}/unwatch`, { json: {} }),
+
     /** 猜词 / 房内闲聊。 */
     guess: (id: string, text: string) =>
       request<{ room: DrawRoom; correct: boolean; close: boolean; allGuessed: boolean }>(
@@ -1783,6 +1795,10 @@ export interface DrawChatMsg {
 
 /** 画笔操作。与 DrawApp 画布的单位约定：坐标是 0-1000 的相对值。 */
 export interface DrawStrokeInput {
+  /** 画笔广播里由服务端补上；上报时不需要带。 */
+  roomId?: string
+  /** 发起操作的设备/窗口标识（服务端原样回显，用于跳过本设备的回声）。 */
+  origin?: string
   op: 'begin' | 'points' | 'end' | 'clear' | 'undo'
   strokeId: string
   points: Array<{ x: number; y: number }>
@@ -1804,6 +1820,8 @@ export interface DrawGameView {
   drawerName: string
   round: number
   totalRounds: number
+  /** 回合序号（全房间单调递增）：drawing → drawing 跨回合的判据。 */
+  turnNo: number
   /** 只有画家 / 已猜对者 / reveal 后才有值；猜词者是 null。 */
   word: string | null
   masked: string | null

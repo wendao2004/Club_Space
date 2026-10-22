@@ -129,7 +129,7 @@ import {
   passTurn,
   playCards,
 } from './games/doudizhu-rooms.ts'
-import { processDrawTimeouts } from './games/draw-rooms.ts'
+import { processDrawTimeouts, sweepDrawWatchers } from './games/draw-rooms.ts'
 import {
   cleanupStaleWerewolfRooms,
   createWerewolfRoom,
@@ -4111,6 +4111,8 @@ setInterval(() => {
  */
 setInterval(() => {
   try {
+    // 顺带低频清理过期的旁观登记（函数内部 60 秒节流，不是每 tick 都扫）
+    sweepDrawWatchers(now())
     for (const event of processDrawTimeouts(now())) {
       // 回合轮转时缓冲已重置，发一条 clear 让所有人（含画家自己）清屏。
       // from 用 'system'：不是任何真实用户 id，客户端不会把它当自己的回声跳过。

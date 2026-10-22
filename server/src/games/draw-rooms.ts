@@ -53,6 +53,14 @@ export interface DrawStrokeOp {
   color: string
   width: number
   tool: 'pen' | 'eraser'
+  /**
+   * 发起这条 op 的**设备/窗口**标识（客户端生成，服务端原样回显）。
+   *
+   * 客户端只看 `from === 我` 无法区分"我这台设备"和"我这个账号的另一台设备"：
+   * 画家在手机和电脑上都开着同一局时，电脑会把自己的回声当成别人的笔迹，
+   * 或者把手机上的清屏忽略掉。有了 origin 就能精确跳过本设备的回声。
+   */
+  origin?: string
 }
 
 /** 单房间画布缓冲上限（按笔画数）。超出说明异常（或有人恶意刷），整体清空重开。 */
@@ -92,6 +100,84 @@ interface RoomVolatile {
  * 这里是第一个要搬去 Redis 的地方（届时 state 列反而不用动）。
  */
 const volatile = new Map<string, RoomVolatile>()
+
+/**
+ * 旁观者登记：roomId → (userId → 最后一次心跳)。
+ *
+ * 为什么需要它：`drawMembers` 只返回 `state.players`，而"观看"不是玩家身份 ——
+ * 非成员打开一个已经开始的房间（`onEnterRoom` 在 phase !== waiting 时只 GET、
+ * 不 join）时，他不在任何推送名单里。进入时 `pullCanvas` 拿到一帧快照，之后
+ * 收不到 game-draw / draw-stroke，画面就永远停在那第一帧。
+ *
+ * 放进程内存而不是 game_rooms.state：登记/续期是每 20 秒一次的高频动作，
+ * 写进 state 等于每次都整列 persist；而且进程重启后残留的 watcher 也没有意义。
+ */
+const watchers = new Map<string, Map<string, number>>()
+/**
+ * 90 秒没心跳就算不看了（前端 20 秒一次，容忍后台节流到 1 次/分钟）。
+ * 环境变量只给自动化测试用（TTL 用例等 2 秒就够了，不必真等 90 秒）。
+ */
+const WATCH_TTL_MS = (() => {
+  const raw = Number.parseInt(process.env.WL_DRAW_WATCH_TTL_MS ?? '', 10)
+  return Number.isFinite(raw) && raw >= 1_000 ? raw : 90_000
+})()
+
+export function watchDrawRoom(roomId: string, userId: string): void {
+  let room = watchers.get(roomId)
+  if (!room) {
+    room = new Map()
+    watchers.set(roomId, room)
+  }
+  const ts = now()
+  room.set(userId, ts)
+  for (const [id, at] of room) {
+    if (at < ts - WATCH_TTL_MS) room.delete(id)
+  }
+}
+
+export function unwatchDrawRoom(roomId: string, userId: string): void {
+  watchers.get(roomId)?.delete(userId)
+}
+
+/**
+ * 一条事件该推给谁：玩家 ∪ 未过期的观看者（去重）。
+ *
+ * **必须去重**：同一个人可能既是玩家又登记了观看；笔迹不是幂等状态，
+ * 重复投递会让 points 叠两遍、undo 多弹一笔。
+ */
+export function drawRecipients(roomId: string): string[] {
+  const ids = new Set(drawMembers(roomId))
+  const room = watchers.get(roomId)
+  if (room) {
+    const cutoff = now() - WATCH_TTL_MS
+    for (const [id, at] of room) {
+      if (at < cutoff) room.delete(id)
+      else ids.add(id)
+    }
+  }
+  return [...ids]
+}
+
+/** 上次清扫时间：2 秒 tick 每 60 秒真正扫一次就够了。 */
+let lastWatcherSweep = 0
+
+/**
+ * 清理过期的观看登记与空房间条目。
+ *
+ * 读取路径（drawRecipients）已经会过滤过期项，但空的内层 Map 会一直挂在
+ * 外层 —— 被删掉的房间每多一个就留一个空壳。这里低频扫一遍。
+ */
+export function sweepDrawWatchers(ts = now()): void {
+  if (ts - lastWatcherSweep < 60_000) return
+  lastWatcherSweep = ts
+  const cutoff = ts - WATCH_TTL_MS
+  for (const [roomId, room] of watchers) {
+    for (const [userId, at] of room) {
+      if (at < cutoff) room.delete(userId)
+    }
+    if (room.size === 0) watchers.delete(roomId)
+  }
+}
 
 function volatileOf(roomId: string): RoomVolatile {
   let v = volatile.get(roomId)
@@ -197,7 +283,10 @@ function toDrawView(row: DrawRow, viewerId: string, onlineIds: Set<string>): Dra
   const state = parseState(row.state)
   // 在线状态不进 state（那要每次上下线都覆盖写一整局状态），视图时动态算
   for (const p of state.players) p.online = onlineIds.has(p.userId)
-  const v = volatileOf(row.id)
+  // **不要用 volatileOf**：它会给每个被读到的房间创建空条目，而大厅列表
+// 一次读 50 个房间 —— 等于给一堆没人玩的房间挂上空 Map。读取用 get，
+// 真正需要写入时（submitStroke / getDrawCanvas / appendChat）才创建。
+  const v = volatile.get(row.id) ?? { strokes: [], chat: [] }
   return {
     id: row.id,
     kind: 'draw',
@@ -223,7 +312,12 @@ export function listDrawRooms(viewerId: string, onlineIds: Set<string>): DrawRoo
   const rows = getDb()
     .prepare(`${DRAW_SELECT} WHERE r.kind = 'draw' AND r.status IN ('waiting','playing') ORDER BY r.updated_at DESC LIMIT 50`)
     .all() as unknown as DrawRow[]
-  return rows.map((row) => toDrawView(row, viewerId, onlineIds))
+  return rows.map((row) => {
+    const view = toDrawView(row, viewerId, onlineIds)
+    // 大厅不展示聊天。不带 chat 既减小载荷，也收窄"任何登录用户在大厅
+    // 就能读到所有房间聊天"的暴露面（猜中的原文已经置空，但普通聊天仍在）。
+    return { ...view, chat: [] }
+  })
 }
 
 export function getDrawRoom(roomId: string, viewerId: string, onlineIds: Set<string>): DrawRoomView {
@@ -278,6 +372,12 @@ export function leaveDrawRoom(roomId: string, userId: string, onlineIds: Set<str
   const row = readRow(roomId)
   if (!row) throw new HttpError(404, '房间不存在')
   const state = parseState(row.state)
+  // 旁观者点"返回大厅"走的是同一个 /leave：他不是 players，不能让它
+  // persist、更不能走到"players 为空 → 删房间"的分支。只注销观看即可。
+  if (!state.players.some((p) => p.userId === userId)) {
+    unwatchDrawRoom(roomId, userId)
+    return getDrawRoom(roomId, userId, onlineIds)
+  }
   // 画家身份必须在过滤**之前**判：filter 之后下标会错位
   const wasDrawer =
     state.phase !== 'waiting' && state.phase !== 'finished' && state.players[state.drawerIndex]?.userId === userId
@@ -409,6 +509,8 @@ export function submitStroke(roomId: string, userId: string, op: DrawStrokeOp): 
     color: op.color,
     width: op.width,
     tool: op.tool,
+    // 原样回显给其他设备；它只是回声过滤用的不透明标识，不参与校验
+    origin: typeof op.origin === 'string' ? op.origin.slice(0, 64) : undefined,
   }
 
   const v = volatileOf(roomId)
@@ -483,6 +585,11 @@ export function guessDrawWord(
   const trimmed = text.trim()
   if (!trimmed) throw new HttpError(400, '先写点什么再发')
   if (trimmed.length > 60) throw new HttpError(400, '一句话最长 60 字')
+  // 旁观者只读：否则任何登录用户都能往任意房间的聊天流里注入文本
+  // （包括直接喊答案、刷屏）。前端同时会隐藏输入框。
+  if (!state.players.some((p) => p.userId === userId)) {
+    throw new HttpError(403, '观众只能观看，不能发言')
+  }
 
   // waiting 阶段是普通闲聊；drawing 才有猜对一说。
   // 画家的文字在 drawing 阶段一律不进聊天 —— 哪怕不是答案，也容易变成变相提示。
@@ -490,10 +597,32 @@ export function guessDrawWord(
     throw new HttpError(400, '你是画家，回合内不能用文字交流')
   }
 
+  // 按**内容**判断这条会不会泄题，而不是只看 correct 标记。
+  //
+  // 两个真实缺口：
+  //  1. 已经猜对的玩家再发一次答案：applyGuess 会对 guessed=true 早退返回
+  //     correct=false，随后走普通 appendChat —— 答案原文照样进共享 chat。
+  //  2. "很接近"的句子通常包含答案本身（答案是「苹果」，输入「苹果好吃」），
+  //     close 标记只在部分情况下为真。
+  // 所以 drafting 阶段只要归一化后的文本包含归一化后的答案，text 一律置空。
+  // 界面本来就不读 correct/close 消息的 text（见 chatTextOf）。
+  const normalizedAnswer = (state.word ?? '').replace(/\s+/g, '').toLowerCase()
+  const mentionsAnswer =
+    state.phase === 'drawing' &&
+    normalizedAnswer.length > 0 &&
+    trimmed.replace(/\s+/g, '').toLowerCase().includes(normalizedAnswer)
+
   if (state.phase === 'drawing') {
     const outcome = applyGuess(state, userId, trimmed, now())
     if (outcome.correct) {
-      appendChat(roomId, { userId, name: userName, text: trimmed, at: now(), correct: true })
+      // ⚠️ **不要把猜中的原文存进 chat**。
+      //
+      // 猜对时 `trimmed` 就是答案本身；chat 是不做视角裁剪的（`viewFor` 只裁
+      // word / wordChoices），而 `listDrawRooms` 会把最多 50 个房间的 chat
+      // 一起返回给大厅 —— 任何登录用户在大厅列表里就能读到当前题目的答案。
+      // 前端只是把 correct 消息的**渲染文案**换成了"猜对了"，数据一直在网络层。
+      // text 留空：界面对 correct 消息本来就不读 text（见 chatTextOf）。
+      appendChat(roomId, { userId, name: userName, text: '', at: now(), correct: true })
       if (outcome.allGuessed) {
         beginReveal(state, now())
         // 全员猜对即结束绘画：这一回合的画与结果在这里定稿存档
@@ -502,7 +631,16 @@ export function guessDrawWord(
       persist(roomId, state)
       return { room: getDrawRoom(roomId, userId, onlineIds), correct: true, close: false, allGuessed: outcome.allGuessed }
     }
-    appendChat(roomId, { userId, name: userName, text: trimmed, at: now(), close: outcome.close })
+    // close（"很接近"）同样不存原文：它是**按字符接近度**判定的，猜的句子
+// 里很可能包含答案（答案是"苹果"，输入"苹果好吃"就会命中），
+// 而界面本来就只显示"猜得很接近"，不读 text。
+    appendChat(roomId, {
+      userId,
+      name: userName,
+      text: outcome.close || mentionsAnswer ? '' : trimmed,
+      at: now(),
+      close: outcome.close,
+    })
     // 猜错不改 state，但 close 标记只给本人（见 viewFor 的约定：chat.close 全员可见没问题，
     // 因为"接近"不泄露答案方向太多 —— 与 skribbl 的通行做法一致）
     return { room: getDrawRoom(roomId, userId, onlineIds), correct: false, close: outcome.close, allGuessed: false }
@@ -590,6 +728,7 @@ export function processDrawTimeouts(nowTs: number): DrawTimeoutEvent[] {
 /** 房间销毁（删除）时把内存一起带走，防止 Map 缓慢膨胀。 */
 export function disposeDrawRoom(roomId: string): void {
   dropVolatile(roomId)
+  watchers.delete(roomId)
 }
 
 // ---------------------------------------------------------------- 对局存档
@@ -709,8 +848,12 @@ export function pruneDrawHistory(keep = DRAW_HISTORY_KEEP): { rooms: number; rou
                   WHERE kind = 'draw' AND status = 'finished'
                   ORDER BY COALESCE(finished_at, updated_at) DESC
                   LIMIT -1 OFFSET ?`
+  // 先记下要删的房间，删完把进程内的画布/聊天/观看登记一起丢掉 ——
+// 只删 DB 行的话，这些房间的 strokes 会一直留在 volatile 里。
+  const staleIds = (db.prepare(stale).all(keep) as Array<{ id: string }>).map((r) => r.id)
   const rounds = db.prepare(`DELETE FROM draw_rounds WHERE room_id IN (${stale})`).run(keep)
   const rooms = db.prepare(`DELETE FROM game_rooms WHERE id IN (${stale})`).run(keep)
+  for (const id of staleIds) disposeDrawRoom(id)
   // 兜底：旧版本里"打完就退房"留下的孤儿存档（房间行已经没了）
   db.prepare('DELETE FROM draw_rounds WHERE room_id NOT IN (SELECT id FROM game_rooms)').run()
   return { rooms: Number(rooms.changes ?? 0), rounds: Number(rounds.changes ?? 0) }

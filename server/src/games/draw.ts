@@ -391,6 +391,14 @@ export interface DrawView {
   drawerName: string
   round: number
   totalRounds: number
+  /**
+   * 回合序号（全房间单调递增）。
+   *
+   * 客户端不能只靠 `phase` 判断"换回合了"：如果恰好错过一轮
+   * reveal / choosing 的推送，前后观察到的 phase 都是 'drawing'，
+   * `phase === prev` 会早退，于是新回合的笔迹全叠在上一题的画上。
+   */
+  turnNo: number
   /** 画家的完整词 / 已猜对者的词 / reveal 后的词；其余是掩码。 */
   word: string | null
   masked: string | null
@@ -432,6 +440,7 @@ export function viewFor(state: DrawState, userId: string): DrawView {
     drawerName: drawer?.name ?? '',
     round: state.round,
     totalRounds: state.totalRounds,
+    turnNo: state.turnNo,
     word: canSeeWord ? state.word : null,
     masked: state.word ? maskedWord(state.word, state.revealed) : null,
     revealed: [...state.revealed],

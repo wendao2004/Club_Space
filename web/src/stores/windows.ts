@@ -117,7 +117,10 @@ export const useWindows = defineStore('windows', {
       // 听歌房始终单例：两个窗口 = 两个 <audio> 同时出声，相位差会让音量
       // 翻倍或产生梳状滤波，听起来就是"声音怪怪的"。右键"在新窗口打开"
       // 也一样聚焦已有窗口。
-      const alwaysSingleton = input.appId === 'music'
+      //
+      // 画桌同理：music/draw 的 store 都只有一条全局 room 状态，两个窗口会
+      // 互相覆盖；而且 draw 的 from === myId 过滤会让另一个窗口漏掉自己的笔画。
+      const alwaysSingleton = input.appId === 'music' || input.appId === 'draw'
       const singleton = sameApp.length > 0 &&
         (alwaysSingleton ||
           (!input.force &&
@@ -395,7 +398,7 @@ export const useWindows = defineStore('windows', {
         const area = workArea()
         // 恢复时也要去重：restoreLayout 不经过 open()，旧布局里如果存了
         // 两个听歌房窗口，会绕过单例直接恢复出两份播放器。
-        const singletons = new Set(['settings', 'admin', 'tools', 'music'])
+        const singletons = new Set(['settings', 'admin', 'tools', 'music', 'draw'])
         const restored = new Set<string>()
         for (const item of layout.slice(0, 8)) {
           if (singletons.has(item.appId)) {

@@ -648,6 +648,206 @@ console.log('\n【历史保留策略】')
   )
 }
 
+console.log('\n【旁观者实时同步】')
+
+{
+  // 真实场景：一局已经在画了，第三个人在房间里只"看"不加入（onEnterRoom
+  // 在 phase !== waiting 时只 GET 房间，不 join）。他不是 players，
+  // 以前不在任何推送名单里 —— 进入时 pullCanvas 拿到一帧快照，之后永不更新。
+  const created = await alice('/api/games/draw/rooms', 'POST', { title: '旁观测试', rounds: 1 })
+  const room = created.body?.room
+  await bob(`/api/games/draw/rooms/${room.id}/join`, 'POST', {})
+  await alice(`/api/games/draw/rooms/${room.id}/start`, 'POST', {})
+  const dv = await currentWordOf(alice, room.id)
+  const word = dv?.view?.wordChoices?.[0]
+  assert(typeof word === 'string' && word.length > 0, '画家拿到了候选词')
+  await alice(`/api/games/draw/rooms/${room.id}/word`, 'POST', { word })
+
+  // carol 全程没有 join —— 她是旁观者
+  const peek = await carol(`/api/games/draw/rooms/${room.id}`, 'GET')
+  eq(peek.status, 200, '非成员可以打开进行中的房间（旁观）')
+  eq(peek.body?.room?.view?.iAmDrawer, false, '旁观者不是画家')
+  eq(peek.body?.room?.view?.word, null, '旁观者看不到答案词')
+  eq(peek.body?.room?.view?.wordChoices, [], '旁观者拿不到候选词')
+
+  const watchRes = await carol(`/api/games/draw/rooms/${room.id}/watch`, 'POST', {})
+  eq(watchRes.status, 200, '旁观者登记观看')
+  eq(watchRes.body?.room?.view?.word, null, 'watch 返回的也是安全的观战视图')
+
+  // 旁观者只读：不能往房内聊天注入文本
+  const chatBefore = (await bob(`/api/games/draw/rooms/${room.id}`, 'GET')).body?.room?.chat?.length ?? 0
+  const denied = await carol(`/api/games/draw/rooms/${room.id}/guess`, 'POST', { text: '我来喊个答案' })
+  eq(denied.status, 403, '旁观者不能发言（403）')
+  const chatAfter = (await bob(`/api/games/draw/rooms/${room.id}`, 'GET')).body?.room?.chat?.length ?? 0
+  eq(chatAfter, chatBefore, '旁观者的发言没有进入聊天流')
+
+  const controller = new AbortController()
+  const sseRes = await fetch(`${BASE}/api/chat/stream`, {
+    headers: { cookie: carol.currentCookie(), accept: 'text/event-stream' },
+    signal: controller.signal,
+  })
+  assert(sseRes.status === 200, '旁观者建立 SSE 长连接')
+  const chunks = []
+  const reader = sseRes.body.getReader()
+  const decoder = new TextDecoder()
+  void (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        chunks.push(decoder.decode(value, { stream: true }))
+      }
+    } catch {
+      // abort 时正常
+    }
+  })()
+  await sleep(600)
+
+  // 画家画一笔 → 旁观者必须实时收到
+  await alice(`/api/games/draw/rooms/${room.id}/strokes`, 'POST', {
+    op: 'begin',
+    strokeId: 'sp1',
+    points: [{ x: 120, y: 300 }],
+    color: '#ff0000',
+    width: 4,
+    tool: 'pen',
+    origin: 'device-a',
+  })
+  await sleep(1000)
+  let stream = chunks.join('')
+  assert(stream.includes('event: draw-stroke'), '旁观者实时收到画笔事件（不再停在第一帧）')
+  const strokePayload = stream
+    .split('\n')
+    .filter((l) => l.startsWith('data:') && l.includes('"strokeId":"sp1"'))
+    .map((l) => {
+      try {
+        return JSON.parse(l.slice(5).trim())
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
+    .pop()
+  eq(strokePayload?.roomId, room.id, '画笔事件带 roomId（多画桌窗口不串台）')
+  eq(strokePayload?.origin, 'device-a', '画笔事件回显设备标识（同账号多设备的回声过滤）')
+
+  // 房间状态（阶段/聊天/分数）也要到旁观者
+  await bob(`/api/games/draw/rooms/${room.id}/guess`, 'POST', { text: '随便猜一句' })
+  await sleep(800)
+  stream = chunks.join('')
+  assert(stream.includes('event: game-draw'), '旁观者收到房间状态推送')
+
+  // unwatch 之后不再收笔迹（服务端 90s TTL 的主动版本）。
+  // ⚠️ 必须放在"猜对"之前：两人房里唯一猜者猜对会立刻 reveal，之后
+  // submitStroke 会被 400 拒绝，这条断言就变成真空通过了。
+  await carol(`/api/games/draw/rooms/${room.id}/unwatch`, 'POST', {})
+  const beforeCount = (chunks.join('').match(/event: draw-stroke/g) ?? []).length
+  const strokeAfterUnwatch = await alice(`/api/games/draw/rooms/${room.id}/strokes`, 'POST', {
+    op: 'begin',
+    strokeId: 'sp2',
+    points: [{ x: 200, y: 200 }],
+    color: '#00ff00',
+    width: 4,
+    tool: 'pen',
+  })
+  eq(strokeAfterUnwatch.status, 200, '取消观看时画家仍在正常作画（不是阶段问题）')
+  await sleep(1000)
+  const afterCount = (chunks.join('').match(/event: draw-stroke/g) ?? []).length
+  eq(afterCount, beforeCount, '取消观看后不再收到画笔事件')
+
+  // 重新登记后恢复
+  await carol(`/api/games/draw/rooms/${room.id}/watch`, 'POST', {})
+  await alice(`/api/games/draw/rooms/${room.id}/strokes`, 'POST', {
+    op: 'begin',
+    strokeId: 'sp3',
+    points: [{ x: 300, y: 300 }],
+    color: '#0000ff',
+    width: 4,
+    tool: 'pen',
+  })
+  await sleep(1000)
+  assert(
+    (chunks.join('').match(/event: draw-stroke/g) ?? []).length > afterCount,
+    '重新登记观看后恢复接收画笔',
+  )
+
+  // 泄题回归：猜中的原文就是答案，它**不能存进 chat**。
+  // 注意 reveal 阶段答案本来就会公开给所有人（view.word），所以这里只断言
+  // chat 里的 correct 消息——那是会被 listDrawRooms 带给大厅的部分。
+  await bob(`/api/games/draw/rooms/${room.id}/guess`, 'POST', { text: word })
+  await sleep(800)
+  stream = chunks.join('')
+  const pushedChat = stream
+    .split('\n')
+    .filter((l) => l.startsWith('data:'))
+    .map((l) => {
+      try {
+        return JSON.parse(l.slice(5).trim())
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
+    .flatMap((p) => p.room?.chat ?? [])
+  const correctMsgs = pushedChat.filter((m) => m.correct)
+  assert(correctMsgs.length > 0, '旁观者收到了"猜对了"消息')
+  assert(correctMsgs.every((m) => m.text === ''), '猜中的答案原文没有存进 chat')
+
+  const lobby = await carol('/api/games/draw/rooms', 'GET')
+  const listed = lobby.body?.rooms?.find((r) => r.id === room.id)
+  // 空数组上的 every() 会真空通过，所以直接断言"大厅列表根本不带 chat"
+  assert(
+    Array.isArray(listed?.chat) && listed.chat.length === 0,
+    '大厅列表不携带 chat（收窄泄题面）',
+    JSON.stringify(listed?.chat),
+  )
+
+  // 房间解散：最后一名玩家离开 → 删行 → 旁观者必须收到 room:null，
+  // 否则界面会停在一个已经不存在的房间上。
+  await carol(`/api/games/draw/rooms/${room.id}/watch`, 'POST', {})
+  await alice(`/api/games/draw/rooms/${room.id}/leave`, 'POST', {})
+  await bob(`/api/games/draw/rooms/${room.id}/leave`, 'POST', {})
+  await sleep(1200)
+  const finalStream = chunks.join('')
+  assert(finalStream.includes('"room":null'), '房间解散时旁观者收到 room:null')
+
+  controller.abort()
+}
+
+console.log('\n【猜词聊天不泄题】')
+
+{
+  // 三个玩家：bob 猜对后 carol 还没猜，回合继续（如果只有两个玩家，
+  // 唯一的猜者猜对就会 allGuessed → reveal，答案本来就会公开）。
+  const created = await alice('/api/games/draw/rooms', 'POST', { title: '泄题测试', rounds: 1 })
+  const room = created.body?.room
+  await bob(`/api/games/draw/rooms/${room.id}/join`, 'POST', {})
+  await carol(`/api/games/draw/rooms/${room.id}/join`, 'POST', {})
+  await alice(`/api/games/draw/rooms/${room.id}/start`, 'POST', {})
+  const dv = await currentWordOf(alice, room.id)
+  const word = dv?.view?.wordChoices?.[0]
+  assert(typeof word === 'string' && word.length > 0, '画家拿到了候选词（泄题用例）')
+  await alice(`/api/games/draw/rooms/${room.id}/word`, 'POST', { word })
+
+  const guessed = await bob(`/api/games/draw/rooms/${room.id}/guess`, 'POST', { text: word })
+  eq(guessed.body?.correct, true, 'bob 猜对了')
+  eq((await currentWordOf(alice, room.id))?.view?.phase, 'drawing', 'carol 还没猜，回合继续')
+
+  // 关键回归：已经猜对的玩家再发一次答案，applyGuess 会早退返回
+  // correct=false —— 以前它会走普通 appendChat，把答案原文写进共享 chat。
+  await bob(`/api/games/draw/rooms/${room.id}/guess`, 'POST', { text: word })
+  // 带前后缀的答案同样不能落进 chat（close/子串匹配）
+  await bob(`/api/games/draw/rooms/${room.id}/guess`, 'POST', { text: `答案是${word}` })
+
+  const asCarol = await carol(`/api/games/draw/rooms/${room.id}`, 'GET')
+  const chat = asCarol.body?.room?.chat ?? []
+  assert(!JSON.stringify(chat).includes(word), '未猜对的玩家在 chat 里看不到答案原文')
+
+  const lobby = await carol('/api/games/draw/rooms', 'GET')
+  const listed = lobby.body?.rooms?.find((x) => x.id === room.id)
+  assert(Array.isArray(listed?.chat) && listed.chat.length === 0, '大厅列表不携带聊天内容')
+}
+
 console.log('\n【退房与解散】')
 
 {

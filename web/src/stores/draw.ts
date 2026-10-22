@@ -75,7 +75,9 @@ export const useDraw = defineStore('draw', {
           const room = payload.room
           if (!room) {
             if (this.room?.id === payload.roomId) this.room = null
-            void this.loadRooms()
+            // 只从本地列表移除，不要 loadRooms()：解散推送会同时到达所有在看的
+            // 人，一次全站重拉没有必要（画出 `room:null` 本来就已经够用）。
+            this.rooms = this.rooms.filter((r) => r.id !== payload.roomId)
             return
           }
           if (this.room && this.room.id === payload.roomId) this.room = room
@@ -84,7 +86,15 @@ export const useDraw = defineStore('draw', {
         rt.on(DRAW_STROKE, (data) => {
           const op = data as DrawStrokeBroadcast | null
           if (!op) return
-          for (const listener of strokeListeners) listener(op)
+          for (const listener of strokeListeners) {
+            // 逐个隔离：一个窗口的画布已经卸载（ctx() 为 null）时抛出的异常
+            // 不能截断这个循环，否则同一用户的另一个窗口也收不到后续笔迹。
+            try {
+              listener(op)
+            } catch (err) {
+              console.error('[draw] 笔迹处理出错:', err)
+            }
+          }
         }),
       ]
     },
@@ -223,6 +233,39 @@ export const useDraw = defineStore('draw', {
       void api.draw.stroke(room.id, op).catch(() => {})
     },
 
+    /**
+ * 旁观者登记 / 续期。
+ *
+ * 玩家也会调用 —— 服务端收件人是「玩家 ∪ 观看者」并去重，重复登记无害。
+ * 这样做的好处是身份变化（中途转正、被移出玩家列表）不需要客户端判断。
+ */
+    async watch(id: string): Promise<void> {
+      try {
+        const { room } = await api.draw.watch(id)
+        // 登记成功时做一次对账：openRoom 的 GET 与这次 watch 生效之间，
+        // 房间可能刚好发生了最后一次状态变化（例如进入 finished）。
+        // 那条推送早于登记、收不到，之后也不会再有 —— 不在这里补一次，
+        // 旁观者会永久停在旧阶段。
+        if (this.room?.id !== id) return
+        if (room.updatedAt >= this.room.updatedAt) this.room = room
+      } catch {
+        // 房间已经没了：下一次 game-draw 会带 room:null，或用户自己返回大厅
+      }
+    },
+
+    async unwatch(id: string): Promise<void> {
+      try {
+        await api.draw.unwatch(id)
+      } catch {
+        // 房间已解散 / 离线：服务端有 TTL 兜底
+      }
+    },
+
+    /** 清掉本地房间（旁观者返回大厅时用 —— 他不是成员，不该调用 leave）。 */
+    clearRoom(): void {
+      this.room = null
+    },
+
     /** 刷新当前房间（重连 / 手动刷新）。 */
     async reload(): Promise<void> {
       const room = this.room
@@ -232,6 +275,11 @@ export const useDraw = defineStore('draw', {
         this.room = next
         this.error = null
       } catch (err) {
+        // 房间已经解散：清掉本地状态，让界面回大厅（而不是反复弹"刷新失败"）
+        if (err instanceof ApiError && err.status === 404) {
+          this.room = null
+          return
+        }
         this.error = messageOf(err, '刷新失败')
       }
     },

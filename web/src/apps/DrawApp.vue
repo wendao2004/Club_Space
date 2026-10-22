@@ -25,6 +25,7 @@ import {
   type DrawStrokeInput,
 } from '@/api'
 import { useDraw } from '@/stores/draw'
+import { useRealtime } from '@/stores/realtime'
 import { useUi } from '@/stores/ui'
 import { useAuth } from '@/stores/auth'
 import * as sfx from '@/lib/sfx'
@@ -46,6 +47,8 @@ const busy = ref(false)
 
 const room = computed(() => draw.room)
 const viewState = computed(() => draw.room?.view ?? null)
+/** 我是不是这一局的玩家（不是玩家 = 旁观者，只读）。 */
+const isPlayer = computed(() => viewState.value?.players.some((p) => p.userId === myId.value) ?? false)
 const rooms = computed(() => draw.rooms)
 
 /** 倒计时（秒）。phaseEndsAt 是服务器时间，与本地可能有偏差，误差 <1s 可接受。 */
@@ -73,6 +76,18 @@ const canvasBox = ref<HTMLElement | null>(null)
 
 const COLORS = ['#1f2430', '#e5484d', '#2b6cf6', '#30a46c', '#f5a623', '#8e4ec6', '#8b5a2b', '#f7f8fa']
 const WIDTHS = [3, 6, 14]
+
+/**
+ * 本窗口/设备的标识。
+ *
+ * 只用于"这条笔迹是不是我自己刚画的"：同一账号在另一台设备上打开同一局时，
+ * 光看 `from === 我` 会把另一台设备的 clear/undo 也当成自己的回声丢掉。
+ * 刷新页面后重新生成没关系 —— 它只影响回声过滤，不参与任何持久状态。
+ */
+const deviceId =
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `d${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
 
 const tool = ref<'pen' | 'eraser'>('pen')
 const color = ref(COLORS[0]!)
@@ -105,10 +120,13 @@ function scaleOf(): { sx: number; sy: number } {
   return { sx: el.width / 1000, sy: el.height / 1000 }
 }
 function drawSegment(
-  g: CanvasRenderingContext2D,
+  // 允许 null：窗口还在、画布还没挂载（或已经卸载）时，笔迹事件仍会到达。
+  // 以前这里是 `ctx()!`，null 会在 g.save() 处抛异常并截断监听器循环。
+  g: CanvasRenderingContext2D | null,
   stroke: { color: string; width: number; tool: 'pen' | 'eraser'; points: Array<{ x: number; y: number }> },
   from: number,
 ): void {
+  if (!g) return
   if (stroke.points.length < 2 || from >= stroke.points.length) return
   const { sx, sy } = scaleOf()
   g.save()
@@ -153,7 +171,7 @@ function replayAll(): void {
     const stroke = localStrokes.get(id)
     if (!stroke) continue
     drawDot(stroke)
-    drawSegment(ctx()!, stroke, 0)
+    drawSegment(ctx(), stroke, 0)
   }
 }
 
@@ -199,6 +217,7 @@ function flushPending(): void {
     color: activeStroke.color,
     width: activeStroke.width,
     tool: activeStroke.tool,
+    origin: deviceId,
   })
 }
 
@@ -247,6 +266,7 @@ function onPointerDown(event: PointerEvent): void {
     color: activeStroke.color,
     width: activeStroke.width,
     tool: activeStroke.tool,
+    origin: deviceId,
   })
   scheduleFlush()
 }
@@ -261,7 +281,7 @@ function onPointerMove(event: PointerEvent): void {
   const prev = activeStroke.points[activeStroke.points.length - 1]
   activeStroke.points.push(point)
   pendingPoints.push(point)
-  if (prev) drawSegment(ctx()!, activeStroke, activeStroke.points.length - 1)
+  if (prev) drawSegment(ctx(), activeStroke, activeStroke.points.length - 1)
 }
 
 function onPointerUp(): void {
@@ -274,6 +294,7 @@ function onPointerUp(): void {
     color: activeStroke.color,
     width: activeStroke.width,
     tool: activeStroke.tool,
+    origin: deviceId,
   })
   activeStroke = null
   stopFlush()
@@ -285,7 +306,15 @@ function undoStroke(): void {
   if (!lastId) return
   localStrokes.delete(lastId)
   replayAll()
-  draw.sendStroke({ op: 'undo', strokeId: lastId, points: [], color: color.value, width: width.value, tool: tool.value })
+  draw.sendStroke({
+    op: 'undo',
+    strokeId: lastId,
+    points: [],
+    color: color.value,
+    width: width.value,
+    tool: tool.value,
+    origin: deviceId,
+  })
 }
 
 function clearAll(): void {
@@ -295,16 +324,44 @@ function clearAll(): void {
   activeStroke = null
   pendingPoints = []
   clearCanvas()
-  draw.sendStroke({ op: 'clear', strokeId: '', points: [], color: color.value, width: width.value, tool: tool.value })
+  draw.sendStroke({
+    op: 'clear',
+    strokeId: '',
+    points: [],
+    color: color.value,
+    width: width.value,
+    tool: tool.value,
+    origin: deviceId,
+  })
 }
 
 // ---------------------------------------------------------------- 别人的笔迹
 
-const offStroke = draw.onStroke((op: DrawStrokeBroadcast) => {
-  // 自己的回声跳过：本地在 pointer 事件里已经画过了（见 myStrokeIds）。
-  // 例外是 clear —— 它没有 strokeId，本地处理过一遍，回声再来一遍会把
-  // 刚画的清掉……所以 clear 也跳过，用"发起人是不是我"判断。
-  if (op.from === myId.value) return
+/**
+ * 应用一条笔迹。
+ *
+ * 两处防线：
+ *  - **按房间过滤**：draw 窗口不是单例，同一个用户可能同时开着两个画桌；
+ *    服务端广播里现在带 roomId，别的房间的笔迹绝不能画到这张画布上。
+ *  - **画布可能不存在**：窗口还开着但画布已经随阶段卸载时，事件仍会到达；
+ *    drawSegment 对 null 上下文会直接返回，不会抛异常。
+ */
+function applyStroke(op: DrawStrokeBroadcast): void {
+  if (op.roomId && op.roomId !== room.value?.id) return
+
+  // 回声过滤按**设备**而不是按账号。
+  //
+  //  - 服务端回显了 origin：等于本设备 → 自己刚发的，跳过；否则照常应用。
+  //    同一账号的第二台设备因此能看到另一台画的笔画、clear、undo。
+  //  - 旧服务端没有 origin：有 strokeId 的按本设备创建过的 id 判断；
+  //    clear 没有 id，只能退回按 from 判断（保持旧行为）。
+  if (op.origin) {
+    if (op.origin === deviceId) return
+  } else if (op.op !== 'clear') {
+    if (myStrokeIds.has(op.strokeId)) return
+  } else if (op.from === myId.value) {
+    return
+  }
 
   if (op.op === 'clear') {
     localStrokes.clear()
@@ -324,6 +381,9 @@ const offStroke = draw.onStroke((op: DrawStrokeBroadcast) => {
     return
   }
   if (op.op === 'begin') {
+    // 快照可能已经包含这支笔（补发期间实时 begin 又晚到）：不要覆盖，
+    // 否则会把快照里的点数清成 1，后续 points 全部错位重描。
+    if (localStrokes.has(op.strokeId)) return
     const stroke: LocalStroke = {
       id: op.strokeId,
       color: op.color,
@@ -341,16 +401,45 @@ const offStroke = draw.onStroke((op: DrawStrokeBroadcast) => {
     if (!stroke) return
     const before = stroke.points.length
     stroke.points.push(...op.points)
-    drawSegment(ctx()!, stroke, before === 0 ? 0 : before - 1)
+    drawSegment(ctx(), stroke, before === 0 ? 0 : before - 1)
   }
+}
+
+/**
+ * 补发期间的实时笔迹先缓存，等快照落地后按顺序补上。
+ *
+ * 不缓存的话：`pullCanvas` 在 await 返回后会清空本地笔画簿再重建，请求
+ * 期间经 SSE 到达的 begin 会被覆盖 —— 随后这支笔的 points 全部因为
+ * `localStrokes.get(...) === undefined` 被静默丢弃，这一笔在整回合里
+ * 永远缺一段。这是"进去只看到第一帧、后面少一截"的另一个来源。
+ */
+let pullingCanvas = false
+let bufferedOps: DrawStrokeBroadcast[] = []
+/**
+ * 快照代际：同时有多个 pull（进房 + resync + 回前台 + undo 兜底）时，
+ * 只有最新一代可以把结果落到画布上。旧响应晚到会覆盖新画面。
+ */
+let pullSeq = 0
+
+const offStroke = draw.onStroke((op: DrawStrokeBroadcast) => {
+  if (pullingCanvas) {
+    bufferedOps.push(op)
+    return
+  }
+  applyStroke(op)
 })
 
 /** 补发画布：进入牌桌 / 新回合开始 / 本地状态可疑时拉一次全量。 */
 async function pullCanvas(): Promise<void> {
   const current = room.value
   if (!current) return
+  const seq = ++pullSeq
+  pullingCanvas = true
+  bufferedOps = []
   try {
     const { strokes } = await api.draw.canvas(current.id)
+    // 请求期间换了房间 / 已经有更新的一代：这份快照不能落到画布上
+    if (seq !== pullSeq || room.value?.id !== current.id) return
     localStrokes.clear()
     strokeOrder.length = 0
     clearCanvas()
@@ -388,6 +477,15 @@ async function pullCanvas(): Promise<void> {
     replayAll()
   } catch {
     // 补发失败不致命：下一回合开始时会再拉
+  } finally {
+    // 只有最新一代负责收尾：旧一代的缓冲属于已经被取代的请求
+    if (seq === pullSeq) {
+      pullingCanvas = false
+      const buffered = bufferedOps
+      bufferedOps = []
+      // 快照落地后再补上请求期间到达的笔迹（applyStroke 内部会按 roomId 过滤）
+      for (const op of buffered) applyStroke(op)
+    }
   }
 }
 
@@ -521,6 +619,20 @@ async function onRefresh(): Promise<void> {
   await draw.loadRooms()
 }
 
+/**
+ * 画桌里的刷新：房间状态 + 画布都要重拉。
+ *
+ * 只 `draw.reload()` 的话，阶段/聊天会更新，但画布停在原处 —— 旁观者
+ * 会觉得"刷新也没用"。房间状态和画布是两条独立通道（GET room / GET canvas）。
+ */
+async function refreshTable(): Promise<void> {
+  await draw.reload()
+  if (view.value !== 'table' || !room.value) return
+  startWatching(room.value.id)
+  const phase = viewState.value?.phase
+  if (phase === 'drawing' || phase === 'reveal') void pullCanvas()
+}
+
 async function onEnterRoom(id: string): Promise<void> {
   const target = rooms.value.find((r) => r.id === id)
   if (!target) return
@@ -528,6 +640,13 @@ async function onEnterRoom(id: string): Promise<void> {
   try {
     if (alreadyIn || target.phase !== 'waiting') await draw.openRoom(id)
     else await draw.join(id)
+    // 房间可能在"列表渲染出来"和"点进去"之间被解散：openRoom 会吞掉 404，
+    // 这里再切 table 就会永久停在"正在加载房间…"。
+    if (!draw.room) {
+      ui.notify('warning', '这一局已经不在了', '可能刚刚解散了')
+      await draw.loadRooms()
+      return
+    }
     view.value = 'table'
     await afterEnterTable()
   } catch (err) {
@@ -536,10 +655,18 @@ async function onEnterRoom(id: string): Promise<void> {
 }
 
 async function onLeave(): Promise<void> {
-  await draw.leave()
+  stopWatching()
+  // 旁观者不是成员：调 leave 只会让服务端做一次无意义的 persist。
+  const isPlayer = viewState.value?.players.some((p) => p.userId === myId.value) ?? false
+  if (isPlayer) await draw.leave()
+  else draw.clearRoom()
   view.value = 'lobby'
   activeStroke = null
   stopFlush()
+  localStrokes.clear()
+  strokeOrder.length = 0
+  myStrokeIds.clear()
+  clearCanvas()
   await draw.loadRooms()
 }
 
@@ -547,7 +674,46 @@ async function onStart(): Promise<void> {
   await draw.start()
 }
 
+// ---------------------------------------------------------------- 旁观/观看登记
+
+let watchTimer: number | null = null
+let watchingRoomId: string | null = null
+
+/**
+ * "我还盯着这个房间"。
+ *
+ * 玩家也要登记：服务端收件人是「玩家 ∪ 观看者」并去重，重复登记无害；
+ * 而身份是会变的（中途转正、被移出玩家列表），客户端不必自己判断。
+ * 不登记的话，非成员打开进行中的房间只会拿到进入时的那一帧快照。
+ */
+function startWatching(id: string, force = false): void {
+  if (watchingRoomId === id && watchTimer !== null) {
+    // 已经在这个房间：force 用于"回到前台/重连"——必须真的发一次续期，
+    // 不能因为本地有定时器就早退（后台节流期间登记可能已经过期）。
+    if (force) void draw.watch(id)
+    return
+  }
+  stopWatching()
+  watchingRoomId = id
+  void draw.watch(id)
+  watchTimer = window.setInterval(() => {
+    if (watchingRoomId) void draw.watch(watchingRoomId)
+  }, 20_000)
+}
+
+function stopWatching(): void {
+  if (watchTimer !== null) {
+    window.clearInterval(watchTimer)
+    watchTimer = null
+  }
+  const id = watchingRoomId
+  watchingRoomId = null
+  if (id) void draw.unwatch(id)
+}
+
 async function afterEnterTable(): Promise<void> {
+  // 开始/续期观看登记：这是旁观者能持续收到 game-draw / draw-stroke 的前提
+  if (room.value) startWatching(room.value.id)
   await nextTick()
   // 两帧之后再设尺寸：避开窗口打开动画的中间态（见 resizeCanvas 的重试）。
   // 观察器在 nextTick 后就建 —— 它只依赖"画布已在 DOM 里"，不必等动画；
@@ -557,8 +723,10 @@ async function afterEnterTable(): Promise<void> {
     resizeCanvas()
     ensureResizeObserver()
   })
-  // 中途进来（别人已画了半张图）补一次全量
-  if (viewState.value?.phase === 'drawing') void pullCanvas()
+  // 中途进来补一次全量。reveal 也要拉：服务端缓冲到回合结束才重置，
+// 旁观者在这时进来同样应该看到本回合的画，而不是空白。
+  const enteredPhase = viewState.value?.phase
+  if (enteredPhase === 'drawing' || enteredPhase === 'reveal') void pullCanvas()
 }
 
 // ---------------------------------------------------------------- 选词 / 猜词
@@ -571,6 +739,8 @@ const guessText = ref('')
 const chatListEl = ref<HTMLElement | null>(null)
 
 async function onSendGuess(): Promise<void> {
+  // 旁观者只读（服务端同样会 403）：不要在本地先清空输入框显得"发出去了"
+  if (!isPlayer.value) return
   const text = guessText.value
   guessText.value = ''
   await draw.guess(text)
@@ -622,6 +792,48 @@ watch(
     if (phase === 'finished') sfx.playSystem('success')
   },
 )
+
+/**
+ * 换回合的兜底判据。
+ *
+ * 只靠 `phase` 会漏：如果恰好错过一轮 reveal / choosing 的推送，前后
+ * 观察到的 phase 都是 'drawing'，`phase === prev` 早退，新回合的笔迹
+ * 会整段叠在上一题的画上。turnNo 是全房间单调递增的，不受推送丢失影响。
+ */
+watch(
+  () => viewState.value?.turnNo,
+  (turn, prev) => {
+    if (turn === undefined || prev === undefined || turn === prev) return
+    localStrokes.clear()
+    strokeOrder.length = 0
+    clearCanvas()
+    if (viewState.value?.phase === 'drawing') void pullCanvas()
+  },
+)
+
+/** 换房间 / 退房：上一个房间的笔画簿不能带到下一张画布上。 */
+watch(
+  () => room.value?.id,
+  (id, prev) => {
+    if (id === prev) return
+    localStrokes.clear()
+    strokeOrder.length = 0
+    myStrokeIds.clear()
+    clearCanvas()
+    pullingCanvas = false
+    bufferedOps = []
+  },
+)
+
+/** 房间被解散（旁观者也会收到 room:null）：回到大厅，别停在幽灵房间上。 */
+watch(room, (current) => {
+  if (current || view.value !== 'table') return
+  stopWatching()
+  view.value = 'lobby'
+  localStrokes.clear()
+  strokeOrder.length = 0
+  clearCanvas()
+})
 
 // ---------------------------------------------------------------- 生命周期
 
@@ -720,9 +932,69 @@ watch(canvasEl, (el) => {
   })
 })
 
+/**
+ * canvasBox 每次随阶段重新挂载都是一个新 DOM 节点。
+ *
+ * 观察器只建一次、并且盯着旧节点的话，从第二局起尺寸就再也不会自动校正
+ * （桌面窗口拖拽不触发 window.resize，onWindowResize 兜不住）。所以
+ * canvasBox 一变就断开旧观察器、给新节点重建一个。
+ */
+watch(canvasBox, (box) => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+  if (!box) return
+  requestAnimationFrame(() => {
+    resizeCanvas()
+    ensureResizeObserver()
+  })
+})
+
+/**
+ * 回到前台 / 网络恢复：续一次观看登记、重拉房间、补一次画布。
+ *
+ * 后台标签页的定时器可能被节流到 1 次/分钟，90 秒的观看 TTL 仍可能先到期；
+ * 回来后第一件事就是把自己续上，否则画面会停在离开前的那一帧。
+ */
+function onBecomeVisible(): void {
+  if (document.visibilityState !== 'visible') return
+  if (view.value !== 'table') return
+  const current = room.value
+  if (!current) return
+  void (async () => {
+    // 强制续期（后台节流期间登记可能已经过期），再按**刷新后**的阶段
+    // 决定要不要补画布 —— 用旧 phase 判断会在换回合/结束时拉错。
+    startWatching(current.id, true)
+    await draw.reload()
+    const phase = viewState.value?.phase
+    if (phase === 'drawing' || phase === 'reveal') void pullCanvas()
+  })()
+}
+
+function onOnline(): void {
+  onBecomeVisible()
+}
+
+let offResync: (() => void) | null = null
+
 onMounted(() => {
   draw.connectRealtime()
   void draw.loadRooms()
+
+  // 断线重连 / 服务端重启：store 的 resync 会重拉房间状态，但画布是另一条
+  // 通道（GET /canvas），不在这里补一次就会停在上次收到的最后一帧。
+  offResync = useRealtime().onResync(() => {
+    if (view.value !== 'table') return
+    void (async () => {
+      // 先等房间状态落地，再判断阶段 —— 断线期间可能已经换回合/结束，
+      // 用旧 phase 判断会拉错东西（或干脆不拉）。
+      await draw.reload()
+      if (room.value) startWatching(room.value.id)
+      const phase = viewState.value?.phase
+      if (phase === 'drawing' || phase === 'reveal') void pullCanvas()
+    })()
+  })
 
   const roomId = props.win.args.roomId
   if (typeof roomId === 'string' && roomId) {
@@ -733,6 +1005,8 @@ onMounted(() => {
   // 浏览器缩放 / 换屏幕会改 devicePixelRatio，而此时容器尺寸可能一点没变
   // （ResizeObserver 不会触发），画布的像素密度就跟不上了。
   window.addEventListener('resize', onWindowResize)
+  document.addEventListener('visibilitychange', onBecomeVisible)
+  window.addEventListener('online', onOnline)
 
   tickTimer = window.setInterval(() => {
     nowTick.value = Date.now()
@@ -745,6 +1019,9 @@ function onWindowResize(): void {
 }
 
 onBeforeUnmount(() => {
+  stopWatching()
+  offResync?.()
+  offResync = null
   offStroke()
   stopFlush()
   if (tickTimer !== null) {
@@ -752,6 +1029,8 @@ onBeforeUnmount(() => {
     tickTimer = null
   }
   window.removeEventListener('resize', onWindowResize)
+  document.removeEventListener('visibilitychange', onBecomeVisible)
+  window.removeEventListener('online', onOnline)
   resizeObserver?.disconnect()
   resizeObserver = null
 })
@@ -959,7 +1238,7 @@ function chatTextOf(msg: DrawChatMsg): string {
           第 {{ viewState.round }}/{{ viewState.totalRounds }} 轮
         </span>
         <div class="spacer" />
-        <button class="wl-icon-btn" :disabled="draw.loading" title="刷新" @click="draw.reload()">
+        <button class="wl-icon-btn" :disabled="draw.loading" title="刷新" @click="refreshTable">
           <Icon name="refresh" :size="16" :class="{ spin: draw.loading }" />
         </button>
       </header>
@@ -1135,14 +1414,17 @@ function chatTextOf(msg: DrawChatMsg): string {
               <div v-if="draw.chat.length === 0" class="chat-empty">在这里输入你的猜测</div>
             </div>
             <div class="chat-input-row">
-              <input
-                v-model="guessText"
-                class="wl-input"
-                :placeholder="viewState?.phase === 'drawing' ? '在这里猜…' : '随便聊聊'"
-                maxlength="60"
-                @keydown.enter="onSendGuess"
-              />
-              <button class="wl-btn wl-btn--primary" :disabled="!guessText.trim()" @click="onSendGuess">发送</button>
+              <template v-if="isPlayer">
+                <input
+                  v-model="guessText"
+                  class="wl-input"
+                  :placeholder="viewState?.phase === 'drawing' ? '在这里猜…' : '随便聊聊'"
+                  maxlength="60"
+                  @keydown.enter="onSendGuess"
+                />
+                <button class="wl-btn wl-btn--primary" :disabled="!guessText.trim()" @click="onSendGuess">发送</button>
+              </template>
+              <span v-else class="chat-spectator">观战中，不能发言</span>
             </div>
           </aside>
         </div>
@@ -1521,6 +1803,14 @@ function chatTextOf(msg: DrawChatMsg): string {
   font-size: 12.5px;
   text-align: center;
   margin-top: var(--space-4);
+}
+
+.chat-spectator {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--text-3);
+  text-align: center;
 }
 
 .chat-input-row {
