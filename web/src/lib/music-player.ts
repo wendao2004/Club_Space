@@ -19,6 +19,8 @@
  * 位置差异，前提就是同步足够准。
  */
 
+import { serverNow as clockServerNow } from './music-clock'
+
 /** 播放状态（服务端给的权威数据）。 */
 export interface SyncSource {
   nodeId: string
@@ -35,30 +37,9 @@ const HARD_SEEK_SEC = 0.4
 /** 微调时允许的最大倍速偏移（4% ≈ 0.7 半音，基本听不出）。 */
 const MAX_RATE_ADJUST = 0.04
 
-/**
- * 估算服务端时钟偏移（毫秒）。取五次采样里 RTT 最小的那次 ——
- * 网络越顺，`serverNow - (发送+接收)/2` 越准。
- */
-export async function measureClockOffset(fetchNow: () => Promise<number>): Promise<number> {
-  let best = { rtt: Number.POSITIVE_INFINITY, offset: 0 }
-  for (let i = 0; i < 5; i++) {
-    const t0 = Date.now()
-    try {
-      const serverNow = await fetchNow()
-      const t1 = Date.now()
-      const rtt = t1 - t0
-      if (rtt < best.rtt) best = { rtt, offset: serverNow - (t0 + rtt / 2) }
-    } catch {
-      // 单次失败无所谓，其他采样还有机会
-    }
-  }
-  return Number.isFinite(best.rtt) ? best.offset : 0
-}
-
 export class SyncedPlayer {
   private el: HTMLAudioElement | null = null
-  private clockOffset = 0
-  /** 最近一次测得的偏差（毫秒，正数=本地落后）。界面用它显示同步精度。 */
+  /** 最近一次测得的**控制残差**（毫秒，正数=本地落后）。 */
   lastOffsetMs = 0
   /** 浏览器拦了自动播放（没有用户手势）时置位。 */
   blocked = false
@@ -67,17 +48,17 @@ export class SyncedPlayer {
     this.el = el
   }
 
-  setClockOffset(offset: number): void {
-    this.clockOffset = offset
-  }
-
-  serverNow(): number {
-    return Date.now() + this.clockOffset
+  /** 服务端此刻；没有有效时钟时为 null（调用方必须当成"不能判断"）。 */
+  serverNow(): number | null {
+    return clockServerNow()
   }
 
   /** 目标进度（毫秒）：暂停时是固定值，播放中由服务端时钟推算。 */
   targetMs(src: SyncSource): number {
-    return src.paused ? src.positionMs : Math.max(0, this.serverNow() - src.startedAt)
+    const now = this.serverNow()
+    if (src.paused) return src.positionMs
+    if (now === null) return 0
+    return Math.max(0, now - src.startedAt)
   }
 
   /**
@@ -87,6 +68,8 @@ export class SyncedPlayer {
   enforce(src: SyncSource): boolean {
     const el = this.el
     if (!el) return false
+    // 没有服务端时钟就不要出声：带着错误基准播放，比静音更难排查
+    if (this.serverNow() === null) return false
     if (!Number.isFinite(el.duration) || el.duration <= 0) return false
 
     const target = this.targetMs(src) / 1000
@@ -137,12 +120,29 @@ export class SyncedPlayer {
     return false
   }
 
-  dispose(): void {
+  /**
+ * 彻底松开这个元素。
+ *
+ * 只把引用置空是不够的：元素从 DOM 移除后，`player.el` 仍然指着它，
+ * 500ms 的校正定时器还会继续对**已经看不见的元素**调用 play() ——
+ * 表现就是"点了离开/切歌，声音还在放"，而且没有任何 UI 能停掉它。
+ */
+  detach(): void {
     const el = this.el
-    if (el) {
+    this.el = null
+    this.lastOffsetMs = 0
+    if (!el) return
+    try {
       el.playbackRate = 1
       el.pause()
+      el.removeAttribute('src')
+      el.load()
+    } catch {
+      // 元素已经不可用时忽略
     }
-    this.el = null
+  }
+
+  dispose(): void {
+    this.detach()
   }
 }

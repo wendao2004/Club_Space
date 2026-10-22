@@ -114,8 +114,14 @@ export const useWindows = defineStore('windows', {
     }): string {
       const args = input.args ?? {}
       const sameApp = this.windows.filter((w) => w.appId === input.appId)
-      const singleton = !input.force && sameApp.length > 0 &&
-        (input.appId === 'settings' || input.appId === 'admin' || input.appId === 'tools')
+      // 听歌房始终单例：两个窗口 = 两个 <audio> 同时出声，相位差会让音量
+      // 翻倍或产生梳状滤波，听起来就是"声音怪怪的"。右键"在新窗口打开"
+      // 也一样聚焦已有窗口。
+      const alwaysSingleton = input.appId === 'music'
+      const singleton = sameApp.length > 0 &&
+        (alwaysSingleton ||
+          (!input.force &&
+            (input.appId === 'settings' || input.appId === 'admin' || input.appId === 'tools')))
 
       const existing = singleton ? sameApp[0] : undefined
       if (existing) {
@@ -387,7 +393,15 @@ export const useWindows = defineStore('windows', {
         const layout = JSON.parse(raw) as State['savedLayout']
         if (!Array.isArray(layout)) return
         const area = workArea()
+        // 恢复时也要去重：restoreLayout 不经过 open()，旧布局里如果存了
+        // 两个听歌房窗口，会绕过单例直接恢复出两份播放器。
+        const singletons = new Set(['settings', 'admin', 'tools', 'music'])
+        const restored = new Set<string>()
         for (const item of layout.slice(0, 8)) {
+          if (singletons.has(item.appId)) {
+            if (restored.has(item.appId)) continue
+            restored.add(item.appId)
+          }
           const id = nextId()
           const w = Math.min(item.w, area.w - 16)
           const h = Math.min(item.h, area.h - 16)

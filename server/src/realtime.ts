@@ -20,11 +20,29 @@
  * 而现象是"用着用着收不到消息了"，很难排查。
  */
 import type { FastifyReply } from 'fastify'
+import { randomUUID } from 'node:crypto'
 import { presenceConnected, presenceDisconnected } from './presence.ts'
 import { getDb } from './db.ts'
 
+/**
+ * 这次进程启动的标识。
+ *
+ * 进程重启后所有绝对时间戳（started_at、暂停位置）都换了历元；客户端只有
+ * 拿到 epoch 才能知道自己手里的锚点已经作废。没有它，"服务端重启"会表现
+ * 为一台设备凭空跳几分钟。
+ */
+export const SERVER_EPOCH = randomUUID()
+
 export type RealtimeEvent =
-  | { type: 'hello'; data: { connectionId: string; serverTime: number } }
+  | { type: 'hello'; data: { connectionId: string; serverTime: number; epoch: string } }
+  /**
+   * 具名心跳。
+   *
+   * 以前是 SSE 注释行 `: ping <ts>` —— 按规范注释行会被 EventSource 直接
+   * 丢弃，JS 永远读不到那个时间戳。改成具名事件后，客户端既能用它判断
+   * 半开连接，也能把它当成一个免费的服务端时钟样本。
+   */
+  | { type: 'ping'; data: { serverTime: number; epoch: string } }
   | { type: 'message'; data: unknown }
   | { type: 'message-updated'; data: unknown }
   | { type: 'conversation'; data: unknown }
@@ -137,15 +155,10 @@ const connections = new Map<string, Set<Connection>>()
 
 let connectionSeq = 0
 
-function writeEvent(conn: Connection, event: RealtimeEvent | { type: 'ping' }): void {
+function writeEvent(conn: Connection, event: RealtimeEvent): void {
   if (conn.closed) return
   try {
     // SSE 格式：event: <名字>\ndata: <JSON>\n\n
-    // 注释行（以冒号开头）用作心跳，客户端不解析但能防止连接被判定为空闲
-    if (event.type === 'ping') {
-      conn.reply.raw.write(`: ping ${Date.now()}\n\n`)
-      return
-    }
     conn.reply.raw.write(`event: ${event.type}\n`)
     conn.reply.raw.write(`data: ${JSON.stringify(event.data)}\n\n`)
   } catch {
@@ -276,7 +289,10 @@ export function subscribe(
       //
       // 现在心跳只做两件事：点查一次会话是否还有效（读），发一个 SSE 注释行。
       // 见 presence.ts 里关于"活连接表 + 库记录"的分工说明。
-      writeEvent(conn, { type: 'ping' })
+      writeEvent(conn, {
+        type: 'ping',
+        data: { serverTime: Date.now(), epoch: SERVER_EPOCH },
+      })
     }, 25_000),
     closed: false,
   }
@@ -293,7 +309,10 @@ export function subscribe(
   presenceConnected(userId)
   if (wasOffline) broadcastPresence(userId, true)
 
-  writeEvent(conn, { type: 'hello', data: { connectionId: id, serverTime: Date.now() } })
+  writeEvent(conn, {
+    type: 'hello',
+    data: { connectionId: id, serverTime: Date.now(), epoch: SERVER_EPOCH },
+  })
 
   raw.on('close', () => closeConnection(conn))
   raw.on('error', () => closeConnection(conn))

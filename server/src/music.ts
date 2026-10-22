@@ -58,8 +58,24 @@ export interface MusicRoomView {
   inRoom: boolean
 }
 
-/** 超过这么久没心跳就算离开（前端每 40s 一次，容忍一次丢包）。 */
-const MEMBER_TTL_MS = 90_000
+/**
+ * 超过这么久没心跳就算离开（前端每 30s 一次，容忍三次丢包）。
+ *
+ * 90s → 120s 是在后台标签页定时器被节流后仍然活着的前提：Chrome 隐藏页
+ * 的定时器可能被压到 1 次/分钟，90s 窗口会在两次心跳之间到期，人还在听
+ * 歌却被判离开 —— 下一次拉房间时 `inRoom=false`，播放器被整个卸载。
+ */
+const MEMBER_TTL_MS = 120_000
+
+/**
+ * 刚离开当前曲目的那首，在这么多毫秒内仍然允许取流。
+ *
+ * 切歌瞬间，慢设备的 Range 请求还在路上；如果它立刻收到 403，这一整首
+ * 就会静音（浏览器不会因为一次 403 自动重试）。给一个短暂的宽限，
+ * 只影响"刚退场的那一首"，不是长期共享。
+ */
+const RECENT_GRACE_MS = 15_000
+const recentlyPlayed = new Map<string, number>()
 
 /** 这个人现在在不在厅里（90 秒内有心跳）。 */
 export function isMember(userId: string): boolean {
@@ -81,9 +97,18 @@ export function joinRoom(userId: string): MusicRoomView {
   return musicRoomView(userId)
 }
 
-/** 心跳：不发广播（40 秒一次，广播会把 SSE 刷满）。 */
-export function touchMember(userId: string): void {
-  getDb().prepare('UPDATE music_members SET last_seen = ? WHERE user_id = ?').run(now(), userId)
+/**
+ * 心跳：不发广播（30 秒一次，广播会把 SSE 刷满）。
+ *
+ * 返回"这条心跳有没有命中一行"。**不用 upsert**：显式点过「离开」的人
+ * 不该因为一个迟到的定时器又被加回厅里；这里只续期，不复活。客户端拿到
+ * `inRoom=false` 后自己决定要不要重新加入（它知道自己是不是想留在厅里）。
+ */
+export function touchMember(userId: string): boolean {
+  const result = getDb()
+    .prepare('UPDATE music_members SET last_seen = ? WHERE user_id = ?')
+    .run(now(), userId)
+  return result.changes > 0
 }
 
 /** 离开。 */
@@ -126,14 +151,44 @@ function rawToQueueItem(row: RawQueueRow): MusicQueueItem {
   }
 }
 
+/**
+ * 队列查询。
+ *
+ * `n.deleted_at IS NULL` 不能省：删除是软删除，节点行还在，FK 级联不会
+ * 触发。删掉一个文件夹时，里面的歌会带着 deleted_at 留在队列里 —— 不做
+ * 过滤的话，厅里会一直"播放"一首取不到流的歌，而 enqueueTrack 看到
+ * hasNow 为真又不会再启动新歌。
+ */
 const QUEUE_SELECT = `
   SELECT q.id, q.node_id, q.added_by, q.added_at, n.name, u.display_name AS added_by_name
     FROM music_queue q
     JOIN nodes n ON n.id = q.node_id
     JOIN users u ON u.id = q.added_by
+   WHERE n.deleted_at IS NULL
 `
 
+/**
+ * 自愈：正在播的那首歌如果已经被删掉（软删或行没了），推进到下一首。
+ *
+ * 删除文件夹时只对根节点调过 purge（历史上），子节点是软删 —— 队列行和
+ * music_state 都会指向一个取不到流的节点。这一层兜底保证"任何一次拉房间"
+ * 都不会把这样的僵尸状态返回给客户端。
+ */
+function healDeletedCurrent(): void {
+  const db = getDb()
+  const state = db.prepare('SELECT node_id FROM music_state WHERE id = 1').get() as
+    | { node_id: string }
+    | undefined
+  if (!state) return
+  const row = db.prepare('SELECT deleted_at FROM nodes WHERE id = ?').get(state.node_id) as
+    | { deleted_at: number | null }
+    | undefined
+  if (row && row.deleted_at === null) return
+  startNext()
+}
+
 export function musicRoomView(viewerId = ''): MusicRoomView {
+  healDeletedCurrent()
   const state = getDb().prepare('SELECT * FROM music_state WHERE id = 1').get() as
     | {
         node_id: string
@@ -148,7 +203,8 @@ export function musicRoomView(viewerId = ''): MusicRoomView {
   const nameOf = (nodeId: string, userId: string): { name: string; userName: string } => {
     const row = getDb()
       .prepare(
-        `SELECT n.name, u.display_name AS user_name FROM nodes n, users u WHERE n.id = ? AND u.id = ?`,
+        `SELECT n.name, u.display_name AS user_name FROM nodes n, users u
+          WHERE n.id = ? AND u.id = ? AND n.deleted_at IS NULL`,
       )
       .get(nodeId, userId) as { name: string; user_name: string } | undefined
     return { name: row?.name ?? '（文件已删除）', userName: row?.user_name ?? '（已注销）' }
@@ -200,6 +256,15 @@ export function musicRoomView(viewerId = ''): MusicRoomView {
 
 function startNext(): void {
   const db = getDb()
+  // 上一首进入"刚退场"宽限：慢设备的在途 Range 请求不该在切歌瞬间变成 403
+  const previous = db.prepare('SELECT node_id FROM music_state WHERE id = 1').get() as
+    | { node_id: string }
+    | undefined
+  if (previous?.node_id) recentlyPlayed.set(previous.node_id, now())
+  for (const [nodeId, at] of recentlyPlayed) {
+    if (at < now() - RECENT_GRACE_MS) recentlyPlayed.delete(nodeId)
+  }
+
   const head = db
     .prepare(`${QUEUE_SELECT} ORDER BY q.added_at ASC LIMIT 1`)
     .get() as unknown as RawQueueRow | undefined
@@ -235,28 +300,28 @@ export function pauseRoom(userId: string): MusicRoomView {
     | { started_at: number; paused_at: number | null }
     | undefined
   if (!state) throw new HttpError(400, '现在没有在放的歌')
-  if (state.paused_at !== null) return musicRoomView()
+  if (state.paused_at !== null) return musicRoomView(userId)
   const position = Math.max(0, now() - state.started_at)
   db.prepare('UPDATE music_state SET paused_at = ?, paused_position_ms = ?, paused_by = ? WHERE id = 1').run(
     now(),
     position,
     userId,
   )
-  return musicRoomView()
+  return musicRoomView(userId)
 }
 
 /** 继续：把 started_at 往回拨"已播时长"，进度就接上了。 */
-export function resumeRoom(): MusicRoomView {
+export function resumeRoom(userId: string): MusicRoomView {
   const db = getDb()
   const state = db.prepare('SELECT * FROM music_state WHERE id = 1').get() as
     | { paused_at: number | null; paused_position_ms: number }
     | undefined
   if (!state) throw new HttpError(400, '现在没有在放的歌')
-  if (state.paused_at === null) return musicRoomView()
+  if (state.paused_at === null) return musicRoomView(userId)
   db.prepare('UPDATE music_state SET started_at = ?, paused_at = NULL, paused_by = NULL WHERE id = 1').run(
     now() - state.paused_position_ms,
   )
-  return musicRoomView()
+  return musicRoomView(userId)
 }
 
 /**
@@ -271,7 +336,10 @@ export function isRoomTrack(nodeId: string): boolean {
   const inQueue = db.prepare('SELECT 1 FROM music_queue WHERE node_id = ? LIMIT 1').get(nodeId)
   if (inQueue) return true
   const playing = db.prepare('SELECT 1 FROM music_state WHERE id = 1 AND node_id = ?').get(nodeId)
-  return Boolean(playing)
+  if (playing) return true
+  // 刚退场的上一首：切歌瞬间还在路上的 Range 请求不该 403
+  const endedAt = recentlyPlayed.get(nodeId)
+  return endedAt !== undefined && endedAt >= now() - RECENT_GRACE_MS
 }
 
 /** 把歌加进队列。必须是 audio 节点、且加歌人能读到（他人私有的直接拒）。 */
@@ -298,7 +366,7 @@ export function enqueueTrack(nodeId: string, userId: string, isAdmin: boolean): 
   // 没有正在播的就直接开播（首首歌不用等人按播放）
   const hasNow = db.prepare('SELECT id FROM music_state WHERE id = 1').get()
   if (!hasNow) startNext()
-  return musicRoomView()
+  return musicRoomView(userId)
 }
 
 /**
@@ -329,7 +397,7 @@ export function removeQueued(itemId: string, userId: string, isAdmin = false): M
   if (!row) throw new HttpError(404, '队列里没有这首歌')
   if (row.added_by !== userId && !isAdmin) throw new HttpError(403, '只能撤下自己排的歌')
   getDb().prepare('DELETE FROM music_queue WHERE id = ?').run(itemId)
-  return musicRoomView()
+  return musicRoomView(userId)
 }
 
 /**
@@ -359,9 +427,37 @@ export function reportEnded(userId: string, playedToken: number): { advanced: bo
  */
 export function purgeDeletedNode(nodeId: string): void {
   const db = getDb()
-  db.prepare('DELETE FROM music_queue WHERE node_id = ?').run(nodeId)
-  const state = db.prepare('SELECT node_id FROM music_state WHERE id = 1').get() as
-    | { node_id: string }
+  // 删除是递归的（删文件夹会把整个子树软删），但历史上这里只处理了根节点。
+  // 不展开子树的话，子节点会带着 deleted_at 留在队列/当前曲里，表现为
+  // "厅里显示在放，所有人没声音"，而且 enqueueTrack 因为 hasNow 为真不会
+  // 启动新歌 —— 只能靠手动切歌救。
+  const ids: string[] = []
+  const stack = [nodeId]
+  while (stack.length > 0) {
+    const id = stack.pop()!
+    ids.push(id)
+    const children = db.prepare('SELECT id FROM nodes WHERE parent_id = ?').all(id) as Array<{
+      id: string
+    }>
+    for (const child of children) stack.push(child.id)
+  }
+
+  const placeholders = ids.map(() => '?').join(', ')
+  db.prepare(`DELETE FROM music_queue WHERE node_id IN (${placeholders})`).run(...ids)
+
+  const state = db.prepare('SELECT node_id, paused_at, paused_by FROM music_state WHERE id = 1').get() as
+    | { node_id: string; paused_at: number | null; paused_by: string | null }
     | undefined
-  if (state?.node_id === nodeId) startNext()
+  if (!state || !ids.includes(state.node_id)) return
+
+  const wasPaused = state.paused_at !== null
+  const pausedBy = state.paused_by
+  startNext()
+  // 暂停是厅级状态：删掉正在播的文件不应该把它变成"自动继续播放"。
+  // 推进到下一首后仍然停在 0 位置，等有人按继续。
+  if (wasPaused && pausedBy !== null) {
+    db.prepare(
+      'UPDATE music_state SET paused_at = ?, paused_position_ms = 0, paused_by = ? WHERE id = 1',
+    ).run(now(), pausedBy)
+  }
 }

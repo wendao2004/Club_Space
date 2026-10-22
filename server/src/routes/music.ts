@@ -52,7 +52,7 @@ export function registerMusicRoutes(app: FastifyInstance): void {
   app.post('/api/music/resume', async (req) => {
     const user = requireUser(req)
     requireMember(user.id)
-    const view = resumeRoom()
+    const view = resumeRoom(user.id)
     broadcast({ type: 'music', data: {} })
     return view
   })
@@ -74,8 +74,11 @@ export function registerMusicRoutes(app: FastifyInstance): void {
   /** 心跳：不进广播（40 秒一次会把 SSE 刷满）。 */
   app.post('/api/music/heartbeat', async (req) => {
     const user = requireUser(req)
-    touchMember(user.id)
-    return { ok: true }
+    // 返回 inRoom 而不是只回 ok：客户端需要知道自己在不在厅里。
+    // 后台标签页的定时器可能被节流到 1 次/分钟，120 秒的 TTL 仍然可能
+    // 在两次心跳之间到期 —— 没有这个字段，人会"被离开"而界面毫不知情。
+    const inRoom = touchMember(user.id)
+    return { ok: true, inRoom }
   })
 
   /** 离开听歌房。 */

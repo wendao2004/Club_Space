@@ -102,6 +102,10 @@ const OFFLINE_TESTS = [
   // 你画我猜的规则引擎：计分/提示公式、阶段机，以及**视角裁剪**（词漏了游戏就死了）
   { name: 'draw-test', label: '你画我猜（计分提示公式/阶段机/视角裁剪）' },
   { name: 'totp-test', label: 'TOTP（RFC 6238 标准向量）' },
+  // 听歌房的时钟基准：它 import 的就是 web/src/lib/music-clock.ts 本体
+  // （Node 22.18+ 默认剥离类型）。重点回归"采样全失败时绝不写 0" ——
+  // 那是一条静默把同步基准换成裸墙钟的路径。
+  { name: 'music-clock-test', label: '听歌房时钟（失败保留旧锚/epoch/休眠）' },
   { name: 'admin-test', label: '运维管控安全逻辑' },
   { name: 'ops-runner-test', label: '执行器白名单校验' },
   // 起 4 个真子进程同时迁移一个空库 —— 复现"版本号在锁外读"的那个撞车

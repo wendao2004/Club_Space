@@ -950,8 +950,8 @@ export const api = {
     /** 加入/离开厅：打开窗口不等于在厅里，得显式加入。 */
     join: () => request<MusicRoomView>('/api/music/join', { json: {} }),
     leave: () => request<MusicRoomView>('/api/music/leave', { json: {} }),
-    /** 心跳续期（90 秒不续就算离开了）。 */
-    heartbeat: () => request<{ ok: true }>('/api/music/heartbeat', { json: {} }),
+    /** 心跳续期（120 秒不续就算离开了）；返回 inRoom 让客户端知道自己还在不在厅里。 */
+    heartbeat: () => request<{ ok: true; inRoom: boolean }>('/api/music/heartbeat', { json: {} }),
   },
 
   // ---------------------------------------------------------------- 打字练习

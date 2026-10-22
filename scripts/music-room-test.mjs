@@ -315,6 +315,10 @@ assert(beforePause.paused === false, '默认是播放中')
 // 普通成员也能暂停（跟切歌一个权限级别）
 res = await alice('/api/music/pause', 'POST', {})
 eq(res.status, 200, '成员可以暂停（厅级操作）')
+// 暂停/继续/排歌/撤歌的响应必须带上"看响应的人自己"的 inRoom。
+// 漏传 viewerId 时 inRoom 恒为 false，前端会立刻把播放器卸载 ——
+// 用户看到的就是"点一下暂停，自己退出了听歌房"。
+eq(res.body.inRoom, true, '暂停后操作者仍在厅里（inRoom=true）')
 const pausedView = res.body
 assert(pausedView.nowPlaying.paused === true, '暂停后状态为 paused')
 const pausedAt = pausedView.nowPlaying.positionMs
@@ -333,6 +337,7 @@ eq(res.body.advanced, false, '暂停时上报 ended 不推进队列')
 // 继续：started_at 往回拨，进度接上
 res = await bob('/api/music/resume', 'POST', {})
 eq(res.status, 200, '任何成员都能继续')
+eq(res.body.inRoom, true, '继续后操作者仍在厅里（inRoom=true）')
 const resumed = res.body.nowPlaying
 assert(resumed.paused === false, '继续后恢复播放')
 assert(
@@ -375,6 +380,67 @@ if ((await alice('/api/music/room')).body.nowPlaying?.nodeId === privateSong) {
 }
 res = await bob(`/api/music/stream/${privateSong}`)
 eq(res.status, 403, '撤下后流通道关闭（不再是厅里的歌）')
+
+// ---------------------------------------------------------------- 心跳语义
+
+console.log('\n【心跳与成员自愈】')
+
+{
+  // 同一账号两个设备：心跳返回 inRoom，让客户端知道自己还在不在厅里。
+  // 显式离开之后不能因为一个迟到的定时器又被 upsert 回去。
+  res = await alice('/api/music/heartbeat', 'POST', {})
+  eq(res.status, 200, '心跳可用')
+  eq(res.body.inRoom, true, '在厅时心跳返回 inRoom=true')
+
+  const dana = await makeMember(`musicdana${SUFFIX}`, '小丹')
+  await dana('/api/music/join', 'POST', {})
+  await dana('/api/music/leave', 'POST', {})
+  res = await dana('/api/music/heartbeat', 'POST', {})
+  eq(res.body.inRoom, false, '显式离开后心跳不会把人upsert回来')
+
+  // 重新加入后又能续期
+  await dana('/api/music/join', 'POST', {})
+  res = await dana('/api/music/heartbeat', 'POST', {})
+  eq(res.body.inRoom, true, '重新加入后心跳恢复 inRoom=true')
+  await dana('/api/music/leave', 'POST', {})
+}
+
+// ---------------------------------------------------------------- 删除文件夹
+
+console.log('\n【删除文件夹不断声】')
+
+{
+  // 用户真实场景：把歌放进一个文件夹，删掉整个文件夹。
+  // 删除是递归软删除，只对根节点调用过 purge —— 子节点会带着
+  // deleted_at 留在队列/当前曲里，表现为"厅里显示在放，所有人没声音"，
+  // 而且 enqueueTrack 看到 hasNow 为真不会启动新歌。
+  const folder = (await creator('/api/files/folder', 'POST', { name: `歌单夹${SUFFIX}` })).body.node.id
+  const inside = await uploadFile(creator, `夹子里的歌${SUFFIX}.wav`, wavBytes())
+  const outside = await uploadFile(creator, `夹子外${SUFFIX}.wav`, wavBytes())
+  await creator(`/api/files/${inside}`, 'PATCH', { parentId: folder })
+
+  await creator('/api/music/queue', 'POST', { nodeId: inside })
+  await creator('/api/music/queue', 'POST', { nodeId: outside })
+
+  // 切到夹子里的那一首
+  for (let i = 0; i < 20; i++) {
+    const v = (await creator('/api/music/room')).body
+    if (v.nowPlaying?.nodeId === inside) break
+    if (!v.nowPlaying && v.queue.length === 0) break
+    await creator('/api/music/skip', 'POST', {})
+  }
+  eq((await creator('/api/music/room')).body.nowPlaying?.nodeId, inside, '夹子里的歌正在播')
+
+  res = await creator(`/api/files/${folder}`, 'DELETE')
+  eq(res.status, 200, '删除整个文件夹（递归软删）')
+
+  const after = (await creator('/api/music/room')).body
+  assert(after.nowPlaying?.nodeId !== inside, '删掉夹子后不再"播放"已删除的歌')
+  eq(after.nowPlaying?.nodeId, outside, '自动推进到夹子外的下一首（厅里不断声）')
+
+  res = await creator(`/api/music/stream/${inside}`)
+  assert(res.status === 404 || res.status === 403, '已删除的歌取不到流', `status=${res.status}`)
+}
 
 // ---------------------------------------------------------------- 汇总
 
