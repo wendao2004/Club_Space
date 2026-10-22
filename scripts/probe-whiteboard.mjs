@@ -1,7 +1,19 @@
 /**
- * 白板线上复现探针：本地 Chrome（忽略自签证书）连线上站点，
- * 打开白板窗口、新建一块，抓 console 错误 / 异常 / 失败请求。
- * 用法：WB_COOKIE="wl_session=..." node scripts/.probe-whiteboard.mjs
+ * 白板线上复现探针（排查"白板用不了"之类只在生产暴露的问题）。
+ *
+ * 为什么需要它：本地测试直连 node 服务，**没有 Caddy 的 CSP、没有 HTTPS、
+ * 没有真实网络路径** —— 字体从 CDN 拉、样式没引、语言包加载失败这类
+ * 问题本地全绿、线上全挂。这个探针用本地 Chrome（忽略自签证书）连线上
+ * 站点，走真实浏览器链路，抓 console 错误 / 未捕获异常 / 失败请求，
+ * 并断言画布真的渲染出来了（canvas 尺寸、工具栏、汉化文案）。
+ *
+ * 用法（cookie 从容器里造临时会话拿，见 docs/部署记录 第二十四轮）：
+ *   WB_URL=https://192.168.1.112:9443 WB_COOKIE="wl_session=..." \
+ *     NODE_TLS_REJECT_UNAUTHORIZED=0 node scripts/probe-whiteboard.mjs
+ *
+ * 注意：Excalidraw 的字体加载是"候选列表"机制（同源第一、esm.sh 兜底），
+ * 兜底尝试被 CSP 拦时 console 里会有 font 相关报错 —— 那是**噪音**，
+ * 字体已从同源 200 拿到，不影响功能。
  */
 import { spawn } from 'node:child_process'
 import { existsSync, rmSync } from 'node:fs'
