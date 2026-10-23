@@ -114,6 +114,14 @@ export function createSession(
     )
     .run(id, userId, createdAt, expiresAt, req.headers['user-agent'] ?? null, req.ip ?? null)
 
+  // **建会话 = 一次登录**，在这里记一次 last_login_at。
+  //
+  // 以前是每个调用点各自调 touchLastLogin，结果注册路径漏了：注册会建会话，
+  // 但没写 last_login_at。用户注册后一直用着这条会话（不主动登出、会话 30 天
+  // 有效），管理页就永远显示"从未登录" —— 而它明明天天在用。
+  // 放进 createSession 之后，任何新增的建会话路径都不会再漏。
+  touchLastLogin(userId)
+
   reply.setCookie(SESSION_COOKIE, signSessionId(id), {
     path: '/',
     httpOnly: true,

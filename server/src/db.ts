@@ -904,6 +904,28 @@ function migrate(database: DatabaseSync): void {
         CREATE INDEX ix_music_members_seen ON music_members(last_seen DESC);
       `)
     },
+
+    // ---- v21: 回填 last_login_at ----
+    (d) => {
+      d.exec(`
+        -- 注册路径以前只建会话、不写 last_login_at（见 auth.ts createSession
+        -- 的注释），于是"注册后一直用着会话"的用户在管理页全部显示"从未登录"。
+        --
+        -- 回填优先级：
+        --   1. 审计里的登录 / 注册事件（最持久：登出、会话过期都不会删审计）
+        --   2. 现存会话的创建时间（审计被裁剪时的兜底）
+        --
+        -- 只填 NULL：已有值的用户保留真实的最后登录时间，不被探测/测试会话覆盖。
+        UPDATE users
+           SET last_login_at = COALESCE(
+             (SELECT MAX(ts) FROM audit_log
+               WHERE actor_id = users.id
+                 AND action IN ('login', 'register', 'bootstrap-owner')),
+             (SELECT MAX(created_at) FROM sessions WHERE user_id = users.id)
+           )
+         WHERE last_login_at IS NULL;
+      `)
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

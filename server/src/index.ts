@@ -32,7 +32,6 @@ import {
   revokeInvite,
   roleAtLeast,
   setPassword,
-  touchLastLogin,
   updateUser,
   userCount,
   verifyLoginChallenge,
@@ -676,7 +675,6 @@ app.post('/api/auth/login', async (req, reply) => {
   }
 
   createSession(reply, record.id, req)
-  touchLastLogin(record.id)
 
   // 登录成功就清掉失败计数 —— 否则一个偶尔手滑的正常用户
   // 会被自己之前几次失败拖着，离限流阈值越来越近。
@@ -777,7 +775,6 @@ app.post('/api/auth/login/totp', async (req, reply) => {
   clearRateLimit(`totp:login:user:${record.id}`)
 
   createSession(reply, record.id, req)
-  touchLastLogin(record.id)
 
   audit({
     actorId: record.id,

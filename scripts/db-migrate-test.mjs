@@ -146,6 +146,53 @@ async function main() {
     db.close()
   }
 
+  // ---- v21：把历史用户的 last_login_at 回填出来 ----
+  //
+  // 真实故障：注册路径只建会话、不写 last_login_at，于是注册后一直用着
+  // 会话的人在管理页全部显示"从未登录"。这里把库伪装成 v20，塞一个
+  // last_login_at = NULL 的用户 + 一条 register 审计，重新打开触发 v21，
+  // 断言回填的是审计里的时间（而不是 NULL/0）。
+  console.log('\n【v21 回填 last_login_at】')
+  {
+    const BACKFILL_USER = 'u_backfill_test'
+    const BACKFILL_TS = 1792208023119
+    const seed = new DatabaseSync(join(dataDir, 'app.sqlite'))
+    try {
+      seed
+        .prepare(
+          `INSERT INTO users (id, username, display_name, password_hash, role, status, created_at, last_login_at)
+           VALUES (?, ?, ?, ?, 'member', 'active', ?, NULL)`,
+        )
+        .run(BACKFILL_USER, 'backfill-user', '回填测试', 'x:y', 1000)
+      seed
+        .prepare(
+          `INSERT INTO audit_log (ts, actor_id, category, action, target, payload, prev_hash, hash)
+           VALUES (?, ?, 'auth', 'register', ?, NULL, 'genesis', ?)`,
+        )
+        .run(BACKFILL_TS, BACKFILL_USER, 'backfill-user', 'hash-backfill-test')
+      seed.prepare('UPDATE schema_version SET version = 20').run()
+    } finally {
+      seed.close()
+    }
+
+    const reopened = await openInChild('backfill')
+    assert(reopened.code === 0, 'v20 → v21 迁移正常退出', reopened.out.trim().slice(-200))
+
+    const check = new DatabaseSync(join(dataDir, 'app.sqlite'))
+    try {
+      const row = check.prepare('SELECT last_login_at FROM users WHERE id = ?').get(BACKFILL_USER)
+      assert(
+        row?.last_login_at === BACKFILL_TS,
+        'NULL 的 last_login_at 按注册审计时间回填（不再显示"从未登录"）',
+        String(row?.last_login_at),
+      )
+      const v = check.prepare('SELECT version FROM schema_version').get()?.version
+      assert(v === LATEST_VERSION, '回填后版本号回到最新', `version=${v}`)
+    } finally {
+      check.close()
+    }
+  }
+
   // 并发跑完之后再开一次，确认"已经是新版"的启动路径不报错也不改动
   console.log('\n【已经是新版之后再启动】')
   const again = await openInChild(99)

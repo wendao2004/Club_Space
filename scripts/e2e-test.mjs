@@ -465,6 +465,15 @@ async function testInstantUploadRefCount() {
     assert(sizes.every((s, i) => i === 0 || sizes[i - 1] >= s), '最大的文件按大小倒序')
     const me = (storage.byOwner ?? []).find((r) => r.name && r.files > 0)
     assert(!!me, '按人汇总里有传过文件的人')
+
+    // 回归：注册会建会话，但以前没写 last_login_at —— 管理页对"注册后
+    // 一直用着会话"的人永远显示"从未登录"。
+    const overviewUsers = overview.body?.users ?? []
+    assert(
+      overviewUsers.some((u) => typeof u.last_login_at === 'number' && u.last_login_at > 0),
+      '注册 / 登录后记录 last_login_at（管理页不再显示"从未登录"）',
+      JSON.stringify(overviewUsers.map((u) => [u.username, u.last_login_at])),
+    )
   }
 
   // 清理
