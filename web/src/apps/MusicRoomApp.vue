@@ -29,6 +29,7 @@ import {
   nextRetryDelayMs,
   wasEverCalibrated,
 } from '@/lib/music-clock'
+import { soundState, volumeGain } from '@/lib/sfx'
 import { useMusic } from '@/stores/music'
 import { useAuth } from '@/stores/auth'
 import { useUi } from '@/stores/ui'
@@ -55,6 +56,29 @@ const playingNodeId = ref<string | null>(null)
 const playingToken = ref<number | null>(null)
 
 const player = new SyncedPlayer()
+
+/**
+ * 把全站音量接到听歌房的 `<audio>` 上。
+ *
+ * 任务栏喇叭与设置里的"声音"页调的是同一份 `soundState.volume`（总闸
+ * `soundState.muted` 也是同一份）。以前它只作用于 WebAudio 音效 ——
+ * 静音了，听歌房还在满音量播放。这里让音乐元素也走同一套感知曲线。
+ *
+ * 注意只改元素音量、不暂停：静音时歌曲仍然按时间线前进，取消静音后
+ * 位置是对的（暂停会破坏同步）。
+ */
+function applyMusicVolume(): void {
+  const el = audioEl.value
+  if (!el) return
+  el.muted = soundState.muted
+  el.volume = volumeGain()
+}
+
+watch(
+  () => [soundState.volume, soundState.muted] as const,
+  () => applyMusicVolume(),
+)
+
 /** 浏览器拦了自动播放时要显示"点一下开始"。 */
 const blocked = ref(false)
 /** 同步精度（毫秒）：给用户看"我们现在差多少"，也是空间声场的前提。 */
@@ -185,6 +209,8 @@ watch(
   (el) => {
     if (!el) return
     player.attach(el)
+    // 新元素挂载/换曲重建后，立刻套用当前的全站音量与静音状态
+    applyMusicVolume()
     // 换曲/首次挂载后立刻对齐一次
     const np = nowPlaying.value
     if (np) player.enforce(np)

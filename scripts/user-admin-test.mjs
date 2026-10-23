@@ -169,7 +169,12 @@ async function main() {
     method: 'PATCH',
     json: { status: 'disabled' },
   })
-  assert(roleFromMember.status === 401 || roleFromMember.status === 403, '普通成员不能调用管理接口', `状态 ${roleFromMember.status}`)
+  eq(roleFromMember.status, 403, '普通成员调用管理接口得到 403（不是 401 —— 401 会被前端当成会话过期跳登录页）')
+
+  // 设置里的"存储"页调的正是这个接口。普通成员点开它只应看到"仅管理员可查看"，
+  // 不能被踢回登录界面；根因曾经是 requireRole 抛 AuthError → 全局翻译成 401。
+  const overviewAsMember = await memberNew.api('/api/admin/overview')
+  eq(overviewAsMember.status, 403, '普通成员读管理概览得到 403（存储页显示"仅管理员可查看"）')
 
   const renamed = await owner.api(`/api/admin/users/${memberId}`, {
     method: 'PATCH',

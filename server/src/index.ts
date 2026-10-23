@@ -109,7 +109,7 @@ import {
   type RoomView,
 } from './games/rooms.ts'
 import { shutdownBotRunner } from './games/bot-runner.ts'
-import { AuthError, actorIp, requireRole, requireUser } from './routes/auth-guard.ts'
+import { AuthError, ForbiddenError, actorIp, requireRole, requireUser } from './routes/auth-guard.ts'
 import { registerBoardRoutes } from './routes/board.ts'
 import { registerPollRoutes } from './routes/poll.ts'
 import { musicPurgeDeleted, registerMusicRoutes } from './routes/music.ts'
@@ -346,6 +346,21 @@ app.setErrorHandler((err: FastifyError, req, reply) => {
       payload: { reason: err.message },
     })
     return reply.code(401).send({ error: err.message })
+  }
+
+  // 已登录、但权限不够：403 而不是 401。
+  // 401 会被前端当成"会话过期"直接跳登录页 —— 普通成员点开设置里的"存储"
+  // 就被踢回登录界面，刷新后又正常（不再自动打开那个页签），正是这个原因。
+  if (err instanceof ForbiddenError) {
+    audit({
+      actorId: currentUser(req)?.id ?? null,
+      actorIp: actorIp(req),
+      category: 'auth',
+      action: 'denied',
+      target: req.url,
+      payload: { reason: err.message },
+    })
+    return reply.code(403).send({ error: err.message })
   }
 
   if (err instanceof HttpError) {

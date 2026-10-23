@@ -213,8 +213,18 @@ const SYSTEM_BUS_GAIN = 3
  * 中段听起来几乎和最大一样响、往小调又掉得太突然。这里取 1.7 次幂折中：
  * 一半的位置听起来差不多就是"一半"。
  */
-function gainFor(volume: number): number {
+/**
+ * 感知音量曲线（0-1 → 线性增益）。
+ *
+ * 导出给听歌房复用：任务栏/设置里的音量条是同一份 `soundState.volume`，
+ * 如果音乐元素直接用原始值、音效用曲线，同一个 50% 会听起来是两种响度。
+ */
+export function volumeGain(volume = soundState.volume): number {
   return volume <= 0 ? 0 : volume ** 1.7
+}
+
+function gainFor(volume: number): number {
+  return volumeGain(volume)
 }
 
 function applyVolume(): void {
