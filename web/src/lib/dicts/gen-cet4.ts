@@ -1,7 +1,8 @@
 /**
  * CET-4 核心词 词库 —— 由 ECDICT（MIT，github.com/skywind3000/ECDICT）生成，
  * 生成脚本 scripts/.build-dicts.mjs，不要手改本文件（会被下次生成覆盖）。
- * 选词：tag 含 cet4、纯字母、词长 3-14，按 BNC 语料词频取前 480 词。
+ * 选词：纯字母、词长 3-14、tag 含 cet4，按 BNC 词频取前 N。
+ * 三个考试词库互不重复：一个词只会出现在 CET-4 / CET-6 / 考研 中的一个。
  */
 import type { TypingDict } from './types.ts'
 
@@ -167,7 +168,6 @@ export const genCet4: TypingDict = {
       { w: 'trade', ipa: 'treid', t: 'n. 贸易, 商业, 交易, 生意, 职业, 顾客, 信风' },
       { w: 'voice', ipa: 'vɒis', t: 'n. 声音, 嗓音, 嗓子, 愿望, 发言权, 表达, 喉舌, 语态' },
       { w: 'accept', ipa: 'әk\'sept', t: 'vt. 接受, 承认, 同意, 相信, 赞成, 承担, 承兑, 采纳, 接纳, 容忍' },
-      { w: 'God', ipa: '^ɔd', t: 'n. 上帝, 神像, 偶像' },
       { w: 'club', ipa: 'klʌb', t: 'n. 俱乐部, 木棍, 球棒' },
       { w: 'history', ipa: '\'histәri', t: 'n. 历史, 过去, 经历, 发展过程, 历史学, 过去的事, 历史记录' },
       { w: 'account', ipa: 'ә\'kaunt', t: 'n. 报告, 解释, 估价, 理由, 利润, 算账, 帐目' },
@@ -182,12 +182,12 @@ export const genCet4: TypingDict = {
       { w: 'apply', ipa: 'ә\'plai', t: 'vt. 涂, 应用' },
       { w: 'increase', ipa: 'in\'kri:s', t: 'n. 增加, 增进, 利益' },
       { w: 'difference', ipa: '\'difәrәns', t: 'n. 不同, 差异' },
+      { w: 'university', ipa: '.ju:ni\'vә:siti', t: 'n. 大学' },
     ],
   },
   {
     title: '第 8 章',
     words: [
-      { w: 'university', ipa: '.ju:ni\'vә:siti', t: 'n. 大学' },
       { w: 'relationship', ipa: 'ri\'leiʃәnʃip', t: 'n. 关系, 关联' },
       { w: 'claim', ipa: 'kleim', t: 'n. 要求, 要求权, 断言, 权利' },
       { w: 'indeed', ipa: 'in\'di:d', t: 'adv. 的确, 实在, 真正地, 甚至' },
@@ -207,12 +207,12 @@ export const genCet4: TypingDict = {
       { w: 'method', ipa: '\'meθәd', t: 'n. 方法, 办法, 条理, 秩序' },
       { w: 'movement', ipa: '\'mu:vmәnt', t: 'n. 运动, 动作, 运转, 移动, 倾向, 变化, 活动, 乐章' },
       { w: 'detail', ipa: '\'di:teil', t: 'n. 细节, 详情' },
+      { w: 'reduce', ipa: 'ri\'dju:s', t: 'vt. 减少, 分解, 降低, 使衰退, 把...分解, 把...归纳' },
     ],
   },
   {
     title: '第 9 章',
     words: [
-      { w: 'reduce', ipa: 'ri\'dju:s', t: 'vt. 减少, 分解, 降低, 使衰退, 把...分解, 把...归纳' },
       { w: 'especially', ipa: 'i\'speʃәli', t: 'adv. 尤其, 特别, 格外' },
       { w: 'personal', ipa: '\'pә:snl', t: 'a. 私人的, 涉及隐私的, 有人性的, 人称的, 亲自的, 身体的' },
       { w: 'establish', ipa: 'i\'stæbliʃ', t: 'vt. 建立, 确立, 制定' },
@@ -232,12 +232,12 @@ export const genCet4: TypingDict = {
       { w: 'property', ipa: '\'prɒpәti', t: 'n. 财产, 所有权, 性质, 属性' },
       { w: 'financial', ipa: 'fai\'nænʃәl', t: 'a. 财政的, 金融的' },
       { w: 'director', ipa: 'di\'rektә', t: 'n. 主管, 导演, 董事' },
+      { w: 'leader', ipa: '\'li:dә', t: 'n. 领导者, 社论, 指挥, 领袖, 领唱者, 前导字符' },
     ],
   },
   {
     title: '第 10 章',
     words: [
-      { w: 'leader', ipa: '\'li:dә', t: 'n. 领导者, 社论, 指挥, 领袖, 领唱者, 前导字符' },
       { w: 'firm', ipa: 'fә:m', t: 'n. 公司, 商号' },
       { w: 'application', ipa: '.æpli\'keiʃәn', t: 'n. 应用, 申请, 志愿书, 应用程序' },
       { w: 'production', ipa: 'prә\'dʌkʃәn', t: 'n. 制造, 生产, 产物' },
@@ -257,12 +257,12 @@ export const genCet4: TypingDict = {
       { w: 'kill', ipa: 'kil', t: 'n. 杀, 杀戮, 小河' },
       { w: 'election', ipa: 'i\'lekʃәn', t: 'n. 选举, 当选, 选择权' },
       { w: 'used', ipa: '\'ju:st', t: 'a. 使用过的, 二手的, 习惯的' },
+      { w: 'various', ipa: '\'vєәriәs', t: 'a. 不同的, 各种的, 多方面的, 许多的, 个别的, 杂色的' },
     ],
   },
   {
     title: '第 11 章',
     words: [
-      { w: 'various', ipa: '\'vєәriәs', t: 'a. 不同的, 各种的, 多方面的, 许多的, 个别的, 杂色的' },
       { w: 'rise', ipa: 'raiz', t: 'n. 上升, 增加, 上涨, 高地, 升高, 出现' },
       { w: 'represent', ipa: '.repri\'zent', t: 'vt. 表现, 表示, 描绘, 讲述, 代表, 象征, 回忆, 再赠送, 再上演' },
       { w: 'site', ipa: 'sait', t: 'n. 位置, 场所, 地点' },
@@ -282,12 +282,12 @@ export const genCet4: TypingDict = {
       { w: 'population', ipa: '.pɒpju\'leiʃәn', t: 'n. 人口, 人口数' },
       { w: 'despite', ipa: 'di\'spait', t: 'n. 轻视, 憎恨' },
       { w: 'pressure', ipa: '\'preʃә', t: 'n. 压, 榨, 按, 强制, 压力, 压迫, 压强' },
+      { w: 'performance', ipa: 'pә\'fɒ:mәns', t: 'n. 施行, 工作情况, 成绩, 行为, 表现, 演出' },
     ],
   },
   {
     title: '第 12 章',
     words: [
-      { w: 'performance', ipa: 'pә\'fɒ:mәns', t: 'n. 施行, 工作情况, 成绩, 行为, 表现, 演出' },
       { w: 'knowledge', ipa: '\'nɒlidʒ', t: 'n. 知识, 学问, 认识, 知道' },
       { w: 'basis', ipa: '\'beisis', t: 'n. 基础, 主要成分' },
       { w: 'further', ipa: '\'fә:ðә', t: 'a. 更远的, 此外的, 更多的' },
@@ -307,12 +307,12 @@ export const genCet4: TypingDict = {
       { w: 'statement', ipa: '\'steitmәnt', t: 'n. 陈述, 指令, 声明' },
       { w: 'relation', ipa: 'ri\'leiʃәn', t: 'n. 关系, 联系, 叙述, 故事, 家属, 亲戚' },
       { w: 'step', ipa: 'step', t: 'n. 步骤, 步, 步幅, 脚步声, 踏级, 步伐, 短距离, 步态, 手段, 等级' },
+      { w: 'principle', ipa: '\'prinsipl', t: 'n. 原则, 原理, 主义' },
     ],
   },
   {
     title: '第 13 章',
     words: [
-      { w: 'principle', ipa: '\'prinsipl', t: 'n. 原则, 原理, 主义' },
       { w: 'demand', ipa: 'di\'mɑ:nd', t: 'n. 要求, 需求, 需要' },
       { w: 'labour', ipa: '\'leibә', t: 'n. 劳动, 努力, 工作, 劳工, 分娩' },
       { w: 'choice', ipa: 'tʃɒis', t: 'n. 选择, 精选品, 选择权' },
@@ -332,12 +332,12 @@ export const genCet4: TypingDict = {
       { w: 'affect', ipa: 'ә\'fekt', t: 'vt. 影响, 感动, 假装, 模仿, 爱好, 倾向于' },
       { w: 'current', ipa: '\'kʌrәnt', t: 'n. 涌流, 趋势, 流' },
       { w: 'technology', ipa: 'tek\'nɒlәdʒi', t: 'n. 技术, 工业技术, 术语' },
+      { w: 'identify', ipa: 'ai\'dentifai', t: 'vt. 识别, 认为...等同于, 确定, 使参与' },
     ],
   },
   {
     title: '第 14 章',
     words: [
-      { w: 'identify', ipa: 'ai\'dentifai', t: 'vt. 识别, 认为...等同于, 确定, 使参与' },
       { w: 'whatever', ipa: 'hwɒt\'evә', t: 'pron. 无论什么' },
       { w: 'difficulty', ipa: '\'difikәlti', t: 'n. 困难, 难点' },
       { w: 'degree', ipa: 'di\'gri:', t: 'n. 程度, 度数, 学位, 度' },
@@ -357,12 +357,12 @@ export const genCet4: TypingDict = {
       { w: 'function', ipa: '\'fʌŋkʃәn', t: 'n. 官能, 职务, 功能, 函数' },
       { w: 'provision', ipa: 'prә\'viʒәn', t: 'n. (政府提供的)钱和设备, 准备, 供应品, 规定, 条款' },
       { w: 'county', ipa: '\'kaunti', t: 'n. 县, 郡' },
+      { w: 'resource', ipa: 'ri\'sɒ:s', t: 'n. 资源, 财力, 办法, 策略, 急智, 消遣' },
     ],
   },
   {
     title: '第 15 章',
     words: [
-      { w: 'resource', ipa: 'ri\'sɒ:s', t: 'n. 资源, 财力, 办法, 策略, 急智, 消遣' },
       { w: 'defence', ipa: 'di\'fens', t: 'n. 防卫, 防卫设备' },
       { w: 'style', ipa: 'stail', t: 'n. 风格, 时尚, 文体, 风度, 字体, 类型' },
       { w: 'obtain', ipa: 'әb\'tein', t: 'vt. 获得, 达到' },
@@ -382,15 +382,14 @@ export const genCet4: TypingDict = {
       { w: 'army', ipa: '\'ɑ:mi', t: 'n. 军队, 陆军' },
       { w: 'suffer', ipa: '\'sʌfә', t: 'vt. 遭受, 经历, 忍受' },
       { w: 'recently', ipa: '\'ri:sntli', t: 'adv. 最近' },
+      { w: 'previous', ipa: '\'pri:viәs', t: 'a. 早先的, 前面的, 过急的' },
     ],
   },
   {
     title: '第 16 章',
     words: [
-      { w: 'previous', ipa: '\'pri:viәs', t: 'a. 早先的, 前面的, 过急的' },
       { w: 'maintain', ipa: 'mein\'tein', t: 'vt. 维持, 维修, 保持, 坚持, 供养, 主张' },
       { w: 'publish', ipa: '\'pʌbliʃ', t: 'vt. 出版, 发行, 公开, 发表, 宣传, 公布' },
-      { w: 'France', ipa: 'frɑ:ns', t: 'n. 法国' },
       { w: 'responsibility', ipa: 'ri.spɒnsә\'biliti', t: 'n. 责任, 职责, 负担, 可靠性' },
       { w: 'total', ipa: '\'tәutl', t: 'a. 全体的, 总的, 全然的' },
       { w: 'argument', ipa: '\'ɑ:gjumәnt', t: 'n. 争论, 论证, 论据, 自变量' },
@@ -407,13 +406,13 @@ export const genCet4: TypingDict = {
       { w: 'duty', ipa: '\'dju:ti', t: 'n. 责任, 关税, 职务, 尊敬' },
       { w: 'save', ipa: 'seiv', t: 'n. 救球' },
       { w: 'tend', ipa: 'tend', t: 'vi. 走向, 有某种的倾向, 易于, 照顾, 注意' },
+      { w: 'fund', ipa: 'fʌnd', t: 'n. 基金, 资金, 存款, 财源, 贮藏' },
+      { w: 'suddenly', ipa: '\'sʌdәnli', t: 'adv. 突然, 意外, 忽然, 迅速, 即席作成, 即刻, 急速' },
     ],
   },
   {
     title: '第 17 章',
     words: [
-      { w: 'fund', ipa: 'fʌnd', t: 'n. 基金, 资金, 存款, 财源, 贮藏' },
-      { w: 'suddenly', ipa: '\'sʌdәnli', t: 'adv. 突然, 意外, 忽然, 迅速, 即席作成, 即刻, 急速' },
       { w: 'title', ipa: '\'taitl', t: 'n. 头衔, 名称, 标题, 书名, 扉页, 权利, 资格, 冠军, 字幕' },
       { w: 'treat', ipa: 'tri:t', t: 'n. 宴请, 款待' },
       { w: 'throughout', ipa: 'θru:\'aut', t: 'adv. 到处, 贯穿全部地, 自始至终' },
@@ -432,13 +431,13 @@ export const genCet4: TypingDict = {
       { w: 'profit', ipa: '\'prɒfit', t: 'n. 利润, 赢利, 利益' },
       { w: 'reflect', ipa: 'ri\'flekt', t: 'vt. 反射, 反映, 招致, 深思' },
       { w: 'assume', ipa: 'ә\'sju:m', t: 'vt. 假定, 承担, 呈现' },
+      { w: 'admit', ipa: 'әd\'mit', t: 'vt. 承认, 接受, 允许进入, 容许' },
+      { w: 'stone', ipa: 'stәun', t: 'n. 石头, 宝石, 果核, 纪念碑, 结石' },
     ],
   },
   {
     title: '第 18 章',
     words: [
-      { w: 'admit', ipa: 'әd\'mit', t: 'vt. 承认, 接受, 允许进入, 容许' },
-      { w: 'stone', ipa: 'stәun', t: 'n. 石头, 宝石, 果核, 纪念碑, 结石' },
       { w: 'measure', ipa: '\'meʒә', t: 'n. 尺寸, 量度器, 量度标准, 测量, 量具, 程度, 范围, 限度, 分寸, 措施, 方法' },
       { w: 'conference', ipa: '\'kɒnfәrәns', t: 'n. 会议' },
       { w: 'division', ipa: 'di\'viʒәn', t: 'n. 分, 分开, 除法, 部门(如部、处、系等), 师' },
@@ -456,15 +455,14 @@ export const genCet4: TypingDict = {
       { w: 'direction', ipa: 'di\'rekʃәn', t: 'n. 方向, 指导, 趋势' },
       { w: 'basic', ipa: '\'beisik', t: 'n. 基本原理, 要素, 基本规律' },
       { w: 'attack', ipa: 'ә\'tæk', t: 'n. 攻击, 抨击' },
-      { w: 'Soviet', ipa: '\'sәuviәt', t: 'n. 代表会议, 苏维埃, 苏联' },
+      { w: 'successful', ipa: 'sәk\'sesful', t: 'a. 成功的, 一帆风顺的, 顺利的' },
+      { w: 'intend', ipa: 'in\'tend', t: 'vt. 计划, 打算, 意思是' },
+      { w: 'fight', ipa: 'fait', t: 'n. 打架, 争吵, 斗志' },
     ],
   },
   {
     title: '第 19 章',
     words: [
-      { w: 'successful', ipa: 'sәk\'sesful', t: 'a. 成功的, 一帆风顺的, 顺利的' },
-      { w: 'intend', ipa: 'in\'tend', t: 'vt. 计划, 打算, 意思是' },
-      { w: 'fight', ipa: 'fait', t: 'n. 打架, 争吵, 斗志' },
       { w: 'original', ipa: 'ә\'ridʒәnl', t: 'a. 最初的, 原始的, 有创意的' },
       { w: 'attitude', ipa: '\'ætitju:d', t: 'n. 态度, 看法, 姿势' },
       { w: 'aware', ipa: 'ә\'wєә', t: 'a. 知道的, 有觉悟的' },
@@ -473,7 +471,6 @@ export const genCet4: TypingDict = {
       { w: 'exactly', ipa: 'i^\'zæktli', t: 'adv. 确切地, 精确地, 恰好, 完全地, 确实, 恰恰正是, 确实如此' },
       { w: 'drop', ipa: 'drɒp', t: 'n. 滴, 微量, 落下, 空投' },
       { w: 'hit', ipa: 'hit', t: 'n. 打击, 打, 冲撞, 讽刺' },
-      { w: 'Germany', ipa: '\'dʒә:mәni', t: 'n. 德国' },
       { w: 'goal', ipa: 'gәul', t: 'n. 目标, 终点, 得分, 球门, 守门员' },
       { w: 'disease', ipa: 'di\'zi:z', t: 'n. 疾病, 弊病' },
       { w: 'employment', ipa: 'im\'plɒimәnt', t: 'n. 雇用, 职业, 工作' },
@@ -482,15 +479,15 @@ export const genCet4: TypingDict = {
       { w: 'prevent', ipa: 'pri\'vent', t: 'v. 预防, 防止, 阻止, 妨碍' },
       { w: 'popular', ipa: '\'pɒpjulә', t: 'a. 通俗的, 流行的, 受欢迎的, 大众的, 人民的, 普及的' },
       { w: 'affair', ipa: 'ә\'fєә', t: 'n. 事件, 事务, 恋爱事件' },
+      { w: 'appeal', ipa: 'ә\'pi:l', t: 'n. 恳求, 诉请, 上诉, 吸引力' },
+      { w: 'beyond', ipa: 'bi\'jɒnd', t: 'prep. 超过, 在那一边, 迟于' },
+      { w: 'regard', ipa: 'ri\'gɑ:d', t: 'n. 关心, 注意, 尊敬, 关系, 问候' },
+      { w: 'ability', ipa: 'ә\'biliti', t: 'n. 能力, 才干' },
     ],
   },
   {
     title: '第 20 章',
     words: [
-      { w: 'appeal', ipa: 'ә\'pi:l', t: 'n. 恳求, 诉请, 上诉, 吸引力' },
-      { w: 'beyond', ipa: 'bi\'jɒnd', t: 'prep. 超过, 在那一边, 迟于' },
-      { w: 'regard', ipa: 'ri\'gɑ:d', t: 'n. 关心, 注意, 尊敬, 关系, 问候' },
-      { w: 'ability', ipa: 'ә\'biliti', t: 'n. 能力, 才干' },
       { w: 'professional', ipa: 'prә\'feʃәnl', t: 'n. 专业人才' },
       { w: 'technique', ipa: 'tek\'ni:k', t: 'n. 技巧, 技术, 方法' },
       { w: 'item', ipa: '\'aitәm', t: 'n. 项目, 条款, 一则, 项' },
@@ -507,15 +504,15 @@ export const genCet4: TypingDict = {
       { w: 'advantage', ipa: 'әd\'vɑ:ntidʒ', t: 'n. 优点, 便利, 好处, 优势' },
       { w: 'operate', ipa: '\'ɒpәreit', t: 'v. 操作, 运转, 动手术, 活动' },
       { w: 'cold', ipa: 'kәuld', t: 'n. 感冒, 寒冷' },
+      { w: 'immediately', ipa: 'i\'mi:diәtli', t: 'adv. 直接地, 立刻, 立即' },
+      { w: 'variety', ipa: 'vә\'raiәti', t: 'n. 多样, 种类, 变种, 杂耍' },
+      { w: 'memory', ipa: '\'memәri', t: 'n. 记忆, 记忆力, 回忆, 纪念, 存储' },
+      { w: 'blood', ipa: 'blʌd', t: 'n. 血, 血统, 流血, 气质, 生命' },
     ],
   },
   {
     title: '第 21 章',
     words: [
-      { w: 'immediately', ipa: 'i\'mi:diәtli', t: 'adv. 直接地, 立刻, 立即' },
-      { w: 'variety', ipa: 'vә\'raiәti', t: 'n. 多样, 种类, 变种, 杂耍' },
-      { w: 'memory', ipa: '\'memәri', t: 'n. 记忆, 记忆力, 回忆, 纪念, 存储' },
-      { w: 'blood', ipa: 'blʌd', t: 'n. 血, 血统, 流血, 气质, 生命' },
       { w: 'island', ipa: '\'ailәnd', t: 'n. 岛, 岛屿, 孤立地区, 安全岛' },
       { w: 'culture', ipa: '\'kʌltʃә', t: 'n. 文化, 修养, 耕种' },
       { w: 'useful', ipa: '\'ju:sful', t: 'a. 有用的, 有益的' },
@@ -532,18 +529,17 @@ export const genCet4: TypingDict = {
       { w: 'access', ipa: '\'ækses', t: 'n. 通路, 入口, 接近, 进入, 使用权, 发作' },
       { w: 'easily', ipa: '\'i:zili', t: 'adv. 容易地, 轻易地, 流利地' },
       { w: 'traditional', ipa: 'trә\'diʃәnl', t: 'a. 传统的, 惯例的' },
+      { w: 'effective', ipa: 'i\'fektiv', t: 'a. 有效的, 有力的, 实际的' },
+      { w: 'payment', ipa: '\'peimәnt', t: 'n. 付款, 支付的款项(或实物), 偿还, 报应, 惩罚' },
+      { w: 'independent', ipa: '.indi\'pendәnt', t: 'n. 独立自主者, 无党派者' },
+      { w: 'facility', ipa: 'fә\'siliti', t: 'n. 容易, 灵巧, 设备' },
     ],
   },
   {
     title: '第 22 章',
     words: [
-      { w: 'effective', ipa: 'i\'fektiv', t: 'a. 有效的, 有力的, 实际的' },
-      { w: 'payment', ipa: '\'peimәnt', t: 'n. 付款, 支付的款项(或实物), 偿还, 报应, 惩罚' },
-      { w: 'independent', ipa: '.indi\'pendәnt', t: 'n. 独立自主者, 无党派者' },
-      { w: 'facility', ipa: 'fә\'siliti', t: 'n. 容易, 灵巧, 设备' },
       { w: 'survey', ipa: 'sә\'vei', t: 'n. 纵览, 视察, 测量, 俯瞰, 调查' },
       { w: 'reference', ipa: '\'refәrәns', t: 'n. 参考, 索引, 参照' },
-      { w: 'German', ipa: '\'dʒә:mәn', t: 'n. 德国人, 德语' },
       { w: 'extend', ipa: 'ik\'stend', t: 'v. 扩充, 延伸, 伸展, 扩大' },
       { w: 'importance', ipa: 'im\'pɒ:tәns', t: 'n. 重要, 重要性, 重要地位, 自大' },
       { w: 'article', ipa: '\'ɑ:tikl', t: 'n. 文章, 冠词, 物品, 物件, 条款, 契约' },
@@ -557,16 +553,16 @@ export const genCet4: TypingDict = {
       { w: 'considerable', ipa: 'kәn\'sidәrәbl', t: 'a. 相当的, 可观的, 重要的' },
       { w: 'arise', ipa: 'ә\'raiz', t: 'vi. 站立, 出现, 起来' },
       { w: 'species', ipa: '\'spi:ʃiz', t: 'n. 种, 类, 外形' },
-    ],
-  },
-  {
-    title: '第 23 章',
-    words: [
       { w: 'physical', ipa: '\'fizikl', t: 'a. 身体的, 物质的, 自然的, 物理学的, 好色的' },
       { w: 'supply', ipa: 'sә\'plai', t: 'n. 补给, 供给, 供应品' },
       { w: 'examine', ipa: 'ig\'zæmin', t: 'v. 检查, 调查, 考试' },
       { w: 'document', ipa: '\'dɒkjumәnt', t: 'n. 文件, 公文, 文档' },
       { w: 'define', ipa: 'di\'fain', t: 'vt. 定义, 规定, 使明确' },
+    ],
+  },
+  {
+    title: '第 23 章',
+    words: [
       { w: 'responsible', ipa: 'ri\'spɒnsәbl', t: 'a. 有责任的, 负责的, 责任重大的' },
       { w: 'career', ipa: 'kә\'riә', t: 'n. 事业, 生涯, 成功' },
       { w: 'solution', ipa: 'sә\'lu:ʃәn', t: 'n. 解决, 解答, 溶液' },
@@ -582,16 +578,16 @@ export const genCet4: TypingDict = {
       { w: 'damage', ipa: '\'dæmidʒ', t: 'n. 损害, 伤害' },
       { w: 'shake', ipa: 'ʃeik', t: 'n. 摇动, 震动' },
       { w: 'requirement', ipa: 'ri\'kwaiәmәnt', t: 'n. 需求, 必要条件, 要求' },
-    ],
-  },
-  {
-    title: '第 24 章',
-    words: [
       { w: 'organization', ipa: '.ɒ:gәnai\'zeiʃәn', t: 'n. 组织, 结构, 团体, 体制' },
       { w: 'extra', ipa: '\'ekstrә', t: 'n. 额外的事物, 另外的收费' },
       { w: 'edge', ipa: 'edʒ', t: 'n. 边缘, 尖锐, 刀刃, 优势' },
       { w: 'stock', ipa: 'stɒk', t: 'n. 树干, 祖先, 血统, 原料, 备料, 库存, 牲畜, 股票, 股份, 保留剧目' },
       { w: 'exchange', ipa: 'iks\'tʃeindʒ', t: 'n. 交换, (电话)交换局, 交换机, 汇兑, 交易所' },
+    ],
+  },
+  {
+    title: '第 24 章',
+    words: [
       { w: 'option', ipa: '\'ɒpʃәn', t: 'n. 选择权, 挑选, 选项' },
       { w: 'eventually', ipa: 'i\'ventʃuәli', t: 'adv. 最后, 终于' },
       { w: 'occasion', ipa: 'ә\'keiʒәn', t: 'n. 场合, 时机, 机会, 诱因, 理由' },
@@ -607,6 +603,11 @@ export const genCet4: TypingDict = {
       { w: 'sex', ipa: 'seks', t: 'n. 性别, 性欲' },
       { w: 'race', ipa: 'reis', t: 'n. 种族, 人种, 赛跑, 比赛, 急流, 人类, 同道, 姜根' },
       { w: 'forest', ipa: '\'fɒrist', t: 'n. 森林, 林区' },
+      { w: 'finger', ipa: '\'fiŋgә', t: 'n. 手指, 指状物, (手套的)手指部分, 指针' },
+      { w: 'slightly', ipa: '\'slaitli', t: 'adv. 些微地, 苗条地' },
+      { w: 'scene', ipa: 'si:n', t: 'n. 场, 情景, 镜头, 发生地点, 道具, 布景, 景色' },
+      { w: 'gain', ipa: 'gein', t: 'n. 增益, 获得, 利润, 收获, 增加' },
+      { w: 'scale', ipa: 'skeil', t: 'n. 刻度, 衡量, 比例, 比例尺, 数值范围, 等级, 规模, 天平, 秤, 鳞, 积垢' },
     ],
   },
   ],

@@ -140,6 +140,31 @@ const { TYPING_DICTS } = await import('../web/src/lib/dicts/index.ts')
   }
   ok(`词库总量 ${words} 词`)
 
+  // 用户报过的真实问题：CET-4 / CET-6 / 考研 三份词库正文几乎一模一样。
+  // 根因是 ECDICT 的考试 tag 高度重叠，而生成器都按 BNC 取前 N。现在按
+  // "层级互斥"选词（见 scripts/.build-dicts.mjs），这里钉死这个约束：
+  // 三个考试词库两两不得有重复单词。
+  {
+    const examIds = ['cet4', 'cet6', 'ky']
+    const sets = examIds.map((id) => {
+      const dict = TYPING_DICTS.find((d) => d.id === id)
+      assert(!!dict, `存在词库 ${id}`)
+      return new Set(dict.chapters.flatMap((c) => c.words.map((w) => w.w)))
+    })
+    for (const [i, j] of [
+      [0, 1],
+      [0, 2],
+      [1, 2],
+    ]) {
+      const overlap = [...sets[i]].filter((w) => sets[j].has(w))
+      assert(
+        overlap.length === 0,
+        `${examIds[i]} 与 ${examIds[j]} 没有重复单词`,
+        overlap.length === 0 ? '' : `${overlap.length} 个：${overlap.slice(0, 10).join(', ')}`,
+      )
+    }
+  }
+
   // MySQL 语句词库：覆盖关键语法点，且都是合法起始写法
   const mysql = TYPING_DICTS.find((d) => d.id === 'mysql')
   assert(!!mysql, '有 MySQL 插入语句词库')
