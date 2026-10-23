@@ -171,7 +171,7 @@ async function main() {
     method: 'POST',
     json: { name: '成员不该能建', kind: 'expense' },
   })
-  assert(memberCreateCat.status === 401, '普通成员不能建分类（401）', `状态 ${memberCreateCat.status}`)
+  assert(memberCreateCat.status === 403, '普通成员不能建分类（403）', `状态 ${memberCreateCat.status}`)
 
   const adminCreateCat = await admin.api('/api/ledger/categories', {
     method: 'POST',
@@ -335,7 +335,7 @@ async function main() {
   const memberApprove = await member.api(`/api/ledger/entries/${entryId}/decide`, {
     json: { decision: 'approve' },
   })
-  assert(memberApprove.status === 401, '普通成员不能审批（401）', `状态 ${memberApprove.status}`)
+  assert(memberApprove.status === 403, '普通成员不能审批（403）', `状态 ${memberApprove.status}`)
 
   // 驳回流程
   const rejected = await admin.api(`/api/ledger/entries/${entryId}/decide`, {

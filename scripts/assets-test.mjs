@@ -116,7 +116,7 @@ async function main() {
     method: 'POST',
     json: { name: `成员建的${SUFFIX}` },
   })
-  assert(memberCat.status === 403 || memberCat.status === 401, '普通成员不能建分类', `状态 ${memberCat.status}`)
+  assert(memberCat.status === 403, '普通成员不能建分类（403）', `状态 ${memberCat.status}`)
 
   // ---------------------------------------------------------------- 物品
   console.log('\n【物品台账】')

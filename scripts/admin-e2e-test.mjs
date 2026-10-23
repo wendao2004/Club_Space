@@ -96,13 +96,13 @@ async function main() {
   // ---------------------------------------------------------------- 权限
   console.log('\n【权限边界】')
   const memberStatus = await member.api('/api/admin/totp/status')
-  assert(memberStatus.status === 401, '普通成员看不到两步验证状态（401）', `状态 ${memberStatus.status}`)
+  assert(memberStatus.status === 403, '普通成员看不到两步验证状态（403）', `状态 ${memberStatus.status}`)
 
   const memberSetup = await member.api('/api/admin/totp/setup', { method: 'POST', json: {} })
-  assert(memberSetup.status === 401, '普通成员不能发起绑定（401）', `状态 ${memberSetup.status}`)
+  assert(memberSetup.status === 403, '普通成员不能发起绑定（403）', `状态 ${memberSetup.status}`)
 
   const memberOps = await member.api('/api/admin/docker/operations')
-  assert(memberOps.status === 401, '普通成员看不到运维操作清单（401）', `状态 ${memberOps.status}`)
+  assert(memberOps.status === 403, '普通成员看不到运维操作清单（403）', `状态 ${memberOps.status}`)
 
   const anon = await fetch(`${BASE}/api/admin/totp/status`)
   assert(anon.status === 401, '未登录不能访问（401）', `状态 ${anon.status}`)
