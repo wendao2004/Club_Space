@@ -183,6 +183,16 @@ const ONLINE_TESTS = [
   { name: 'board-test', label: '留言板（发帖/处理标记/撤回/权限边界）' },
   { name: 'poll-test', label: '投票（一人一票/改票/关闭与截止/权限边界）' },
   { name: 'music-room-test', label: '听歌房（排播权限/切歌状态机/删除不断声）' },
+  // 外网不通时它自己会降级成 skip（上游不可用不是本服务故障），所以允许常驻在这一套里
+  {
+    name: 'music-online-test',
+    label: '在线曲库（哔哩哔哩搜索/代理拉流/SSRF 防线）',
+    // 让服务端把"每次真实上游调用"记进一个文件：测试要在**另一个进程**里证明
+    // "连续两次 Range 之间 playurl 只被打了一次"（<audio> 会打几十个 Range，
+    // 每个都重新解析就会卡死 + 触发风控）。不设这个变量生产环境零开销。
+    // 路径必须与 music-online-test.mjs 里的默认值一致 —— runTest 不转发 serverEnv。
+    serverEnv: { WL_MUSIC_ONLINE_TRACE: join(ROOT, '.test-music-online-trace.log') },
+  },
   { name: 'typing-test', label: '打字练习（个人进度/错题本/数据隔离）' },
   { name: 'whiteboard-test', label: '白板（全员可读/作者可写/场景校验）' },
   {

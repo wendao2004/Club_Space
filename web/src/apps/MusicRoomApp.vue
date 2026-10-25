@@ -18,7 +18,7 @@
   （playedToken 防止旧上报错切新曲）。
 -->
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { api } from '@/api'
 import { SyncedPlayer } from '@/lib/music-player'
@@ -44,6 +44,14 @@ const ui = useUi()
 // ---------------------------------------------------------------- 播放器
 
 const audioEl = ref<HTMLAudioElement | null>(null)
+/**
+ * 在线曲库**单人试听**专用的独立 `<audio>`。
+ *
+ * 绝不与 audioEl 共用：audioEl 由 music-player 每 500ms 往房间目标位置校正一次，
+ * 让一条随时会断/时长对不上的外网流去驱动它，等于把全厅的播放位置交给它。
+ * 两个元素分开，房间同步与单人试听互不干扰。
+ */
+const previewEl = ref<HTMLAudioElement | null>(null)
 /** 正在加载的曲目 id：换曲时用来触发 <audio> 重新拉流。 */
 const playingNodeId = ref<string | null>(null)
 /**
@@ -69,9 +77,16 @@ const player = new SyncedPlayer()
  */
 function applyMusicVolume(): void {
   const el = audioEl.value
-  if (!el) return
-  el.muted = soundState.muted
-  el.volume = volumeGain()
+  if (el) {
+    el.muted = soundState.muted
+    el.volume = volumeGain()
+  }
+  // 试听是另一只 <audio>，总闸同样要管它 —— 否则静音了试听还在响，用户找不到原因
+  const preview = previewEl.value
+  if (preview) {
+    preview.muted = soundState.muted
+    preview.volume = volumeGain()
+  }
 }
 
 watch(
@@ -308,9 +323,10 @@ async function openPicker(): Promise<void> {
 }
 
 async function enqueue(nodeId: string): Promise<void> {
+  // 只有"从文件里挑"才会走到这里。在线曲库那条路径**没有** enqueue 调用 —— 见下面在线曲库一节。
   const ok = await music.enqueue(nodeId)
   if (ok) {
-    picking.value = false
+    closePicker()
   } else if (music.error) {
     ui.notify('error', '排播失败', music.error)
   }
@@ -348,6 +364,195 @@ function onAudioError(): void {
   player.blocked = false
 }
 
+
+// ---------------------------------------------------------------- 在线曲库（只做单人试听）
+
+/**
+ * 一轮搜索 = 服务端聚合搜索（音源：哔哩哔哩）+ 服务端代理拉流，前端不直连外网 CDN。
+ *
+ * 一条硬规矩：**在线曲目永远不进队列**。厅里的播放进度是所有人共用的，
+ * 一条外网流随时可能 404 / 断流 / 时长和服务端元数据对不上，混进队列就是
+ * 全厅跳歌。所以这里只提供"试听"：独立的 <audio>，只响在点按钮的那台设备上。
+ */
+const pickerTab = ref<'files' | 'online'>('files')
+
+/**
+ * 服务端给的条目形状（契约：GET /api/music/online/search）。
+ *
+ * 语义上是**视频**而不是歌曲：name 是投稿标题，artist 是 UP 主名，
+ * album 是分 P 之类的次要归属（可能为空）。durationMs 可能超过一小时。
+ */
+interface OnlineTrack {
+  id: string
+  name: string
+  artist: string
+  album: string
+  durationMs: number
+  playable: boolean
+}
+
+const onlineQuery = ref('')
+const onlineLoading = ref(false)
+/** 接口整体用不了（404 / 5xx / 断网）的文案 —— 和"搜不到"是两回事，要分开说。 */
+const onlineUnavailableText = ref<string | null>(null)
+/** 后端自己说这批结果不完整时给的提示（degraded + message）。 */
+const onlineDegradedText = ref<string | null>(null)
+const onlineResults = ref<OnlineTrack[]>([])
+/** 搜过一轮没有：用来区分"还没搜"和"搜了但没结果"，两种空态文案不同。 */
+const onlineSearched = ref(false)
+
+/** 当前试听的是哪一首。null = 没在试听。 */
+const previewId = ref<string | null>(null)
+/** play() 还没返回（拉流慢的时候按钮要能显示"加载中"）。 */
+const previewPending = ref(false)
+/** 元素确实在出声。@playing / @pause 同步，避免按钮文案和实际状态不一致。 */
+const previewing = ref(false)
+const previewError = ref<string | null>(null)
+
+/** 在线条目时长：不到一小时 m:ss，超过一小时 h:mm:ss（B 站长视频很常见）。 */
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  const total = Math.floor(ms / 1000)
+  const h = Math.floor(total / 3600)
+  if (h === 0) return formatTime(total)
+  const m = Math.floor((total % 3600) / 60)
+  return `${h}:${String(m).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
+}
+
+/**
+ * playable:false 的说明。B 站没有"会员才能播"的付费墙，取不到音轨通常意味着
+ * 稿件已失效 / 被删，或者真需要大会员才能看 —— 两种情况对用户是同一句话。
+ */
+const notPlayableText = '这个条目取不到音轨（可能已失效或需要大会员）'
+
+function previewUrl(id: string): string {
+  return `/api/music/online/stream?id=${encodeURIComponent(id)}`
+}
+
+/**
+ * 搜索在线曲库。
+ *
+ * 这里直接 fetch 而不是走 api.ts 的 request()：一是 request() 没有导出，本轮
+ * 改动只在这一个文件里；二是这里要按状态码分档 —— 404 是"这个路由还没上线"，
+ * 5xx 是"后端挂了"，文案不同，而 request() 只会抛同一个 ApiError。
+ *
+ * 任何失败都必须落成界面上的一句人话：弹层不许白屏，也不许冒出未捕获异常。
+ */
+async function searchOnline(): Promise<void> {
+  const q = onlineQuery.value.trim()
+  onlineUnavailableText.value = null
+  if (!q) {
+    onlineResults.value = []
+    onlineSearched.value = false
+    return
+  }
+  onlineLoading.value = true
+  try {
+    const resp = await fetch(`/api/music/online/search?q=${encodeURIComponent(q)}&limit=20`, {
+      credentials: 'same-origin',
+    })
+    if (!resp.ok) {
+      onlineResults.value = []
+      onlineSearched.value = false
+      onlineDegradedText.value = null
+      onlineUnavailableText.value =
+        resp.status === 404
+          ? '在线曲库暂时不可用：服务端还没有这个接口。先在「从文件里挑」里排歌。'
+          : `在线曲库暂时不可用：服务端返回 ${resp.status}。先在「从文件里挑」里排歌。`
+      return
+    }
+    const data = (await resp.json()) as {
+      results?: OnlineTrack[]
+      degraded?: boolean
+      message?: string
+    }
+    onlineResults.value = Array.isArray(data.results) ? data.results : []
+    onlineDegradedText.value = data.degraded ? (data.message ?? '这批结果可能不完整') : null
+    onlineSearched.value = true
+  } catch {
+    // 断网、JSON 解析失败、跨域 —— 一律当成"现在用不了"，不往上抛
+    onlineResults.value = []
+    onlineSearched.value = false
+    onlineDegradedText.value = null
+    onlineUnavailableText.value = '在线曲库暂时不可用：连不上服务端。先在「从文件里挑」里排歌。'
+  } finally {
+    onlineLoading.value = false
+  }
+}
+
+/** 停止试听并清空状态。切页签、关弹层、卸载窗口都走这里。 */
+function stopPreview(): void {
+  const el = previewEl.value
+  // 必须先 pause：弹层是 v-if 关掉的，元素脱离 DOM 之后照样会继续出声
+  if (el) el.pause()
+  previewId.value = null
+  previewing.value = false
+  previewPending.value = false
+  previewError.value = null
+}
+
+/**
+ * 试听 / 停止。
+ *
+ * 只动 previewEl，从不碰 audioEl，也从不调用 music.enqueue —— 这条路径上
+ * 没有任何能让房间状态变化的调用。
+ */
+async function togglePreview(track: OnlineTrack): Promise<void> {
+  if (!track.playable) return
+  if (previewId.value === track.id && (previewing.value || previewPending.value)) {
+    stopPreview()
+    return
+  }
+  previewError.value = null
+  previewId.value = track.id
+  previewPending.value = true
+  // 等 Vue 把 :src 换到这一首再 play()，否则 play() 起的是上一首的流
+  await nextTick()
+  const el = previewEl.value
+  if (!el) {
+    previewPending.value = false
+    return
+  }
+  el.muted = soundState.muted
+  el.volume = volumeGain()
+  try {
+    await el.play()
+    // play() 是异步的：等待期间用户可能已经点了停止或换了另一首，
+    // 那时 previewId 已经不是这一首了，不能把状态改回"正在放"
+    if (previewId.value === track.id) previewing.value = true
+  } catch {
+    // 没拿到用户手势，或者流接口还没就绪（404 → 元素直接报错）都会走到这里
+    previewError.value = '试听没能开始 —— 在线流接口可能还没就绪，再点一次试试'
+  } finally {
+    previewPending.value = false
+  }
+}
+
+function onPreviewEnded(): void {
+  previewing.value = false
+  previewId.value = null
+}
+
+function onPreviewError(): void {
+  // 主动清空 src 也会触发 error，那种不算失败
+  if (!previewId.value) return
+  previewing.value = false
+  previewPending.value = false
+  previewError.value = '试听加载失败 —— 在线流接口可能还没就绪（后端 404），或者这首拿不到真实播放地址'
+}
+
+function switchPickerTab(next: 'files' | 'online'): void {
+  if (pickerTab.value === next) return
+  pickerTab.value = next
+  // 切回文件区就不再需要试听了。留着它在后台接着放，用户会以为全厅在放 —— 其实只有他自己听得到
+  if (next === 'files') stopPreview()
+}
+
+function closePicker(): void {
+  stopPreview()
+  picking.value = false
+}
+
 onMounted(() => {
   music.connectRealtime()
   void syncClock()
@@ -364,6 +569,8 @@ function onVisibilityChange(): void {
 }
 
 onBeforeUnmount(() => {
+  // 关窗口时试听元素会被一起销毁，但它脱离 DOM 后仍会出声 —— 先停
+  stopPreview()
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('pageshow', onWake)
   window.removeEventListener('online', onWake)
@@ -517,15 +724,35 @@ watch(
       </div>
     </div>
 
-    <!-- 选歌弹层 -->
-    <div v-if="picking" class="mask" @click.self="picking = false">
+    <!-- 选歌弹层：两个页签 —— 排歌（进队列） / 在线曲库（只能单人试听） -->
+    <div v-if="picking" class="mask" @click.self="closePicker">
       <div class="picker">
         <header class="picker-bar">
-          <strong>从文件里挑一首</strong>
+          <strong>{{ pickerTab === 'files' ? '从文件里挑一首' : '在线曲库' }}</strong>
           <div class="spacer" />
-          <button class="wl-icon-btn" @click="picking = false"><Icon name="close" :size="15" /></button>
+          <button class="wl-icon-btn" title="关闭" @click="closePicker">
+            <Icon name="close" :size="15" />
+          </button>
         </header>
-        <div class="picker-list">
+
+        <div class="picker-tabs">
+          <button
+            class="ptab"
+            :class="{ 'ptab--active': pickerTab === 'files' }"
+            @click="switchPickerTab('files')"
+          >
+            从文件里挑
+          </button>
+          <button
+            class="ptab"
+            :class="{ 'ptab--active': pickerTab === 'online' }"
+            @click="switchPickerTab('online')"
+          >
+            在线曲库
+          </button>
+        </div>
+
+        <div v-if="pickerTab === 'files'" class="picker-list">
           <p class="picker-note">
             排进听歌房 = 这首歌会共享给全厅收听（私人目录里的也行，撤下就不再共享）
           </p>
@@ -536,6 +763,95 @@ watch(
             <span class="pick-meta">{{ t.ownerName }}</span>
           </button>
         </div>
+
+        <!-- 在线曲库：这条路径上没有 enqueue —— 只能试听，绝不进队列 -->
+        <div v-else class="picker-list">
+          <form class="online-search" @submit.prevent="searchOnline">
+            <input
+              v-model="onlineQuery"
+              class="wl-input"
+              type="search"
+              placeholder="视频标题 / UP 主，回车搜索"
+              :disabled="onlineLoading"
+            />
+            <button class="wl-btn" type="submit" :disabled="onlineLoading || !onlineQuery.trim()">
+              <Icon name="search" :size="13" />搜索
+            </button>
+          </form>
+
+          <p class="picker-note">
+            <Icon name="volume" :size="11" />
+            音源来自哔哩哔哩；只你自己能听到，不会排进队列，也不影响房间的同步播放。
+          </p>
+
+          <p v-if="onlineUnavailableText" class="online-state online-state--warn">
+            <Icon name="alert" :size="12" />{{ onlineUnavailableText }}
+          </p>
+          <p v-else-if="onlineLoading" class="online-state">
+            <span class="wl-spinner" />正在搜索…
+          </p>
+          <p v-else-if="onlineDegradedText" class="online-state online-state--warn">
+            <Icon name="info" :size="12" />{{ onlineDegradedText }}
+          </p>
+          <p v-else-if="!onlineSearched" class="online-state">
+            输入关键词回车，在哔哩哔哩里找找看
+          </p>
+          <p v-else-if="onlineResults.length === 0" class="online-state">
+            没搜到「{{ onlineQuery.trim() }}」，换个关键词，或者回「从文件里挑」排一首
+          </p>
+
+          <div
+            v-for="t in onlineResults"
+            :key="t.id"
+            class="pick pick--online"
+            :class="{ 'pick--active': previewId === t.id, 'pick--locked': !t.playable }"
+          >
+            <Icon name="audio" :size="14" class="pick-icon" />
+            <div class="pick-main">
+              <span class="pick-name">{{ t.name }}</span>
+              <span class="pick-sub">
+                {{ t.artist }}<template v-if="t.album"> · {{ t.album }}</template>
+                <template v-if="formatDuration(t.durationMs)"> · {{ formatDuration(t.durationMs) }}</template>
+                <template v-if="!t.playable"> · {{ notPlayableText }}</template>
+              </span>
+            </div>
+            <button
+              class="wl-btn wl-btn--sm pick-play"
+              :disabled="!t.playable"
+              :title="t.playable ? '只在你自己的设备上播放，不进队列' : notPlayableText"
+              @click="togglePreview(t)"
+            >
+              {{
+                !t.playable
+                  ? '不可试听'
+                  : previewId === t.id && (previewing || previewPending)
+                    ? previewPending
+                      ? '加载中…'
+                      : '停止'
+                    : '试听'
+              }}
+            </button>
+          </div>
+
+          <p v-if="previewError" class="online-state online-state--warn">
+            <Icon name="alert" :size="12" />{{ previewError }}
+          </p>
+        </div>
+
+        <!--
+          试听用的**独立** <audio>：与房间播放器那个 audioEl 完全是两个元素。
+          audioEl 每 500ms 被 music-player 往房间目标位置校正一次，共用会让
+          一条外网流直接改写全厅的播放位置。
+        -->
+        <audio
+          ref="previewEl"
+          :src="previewId ? previewUrl(previewId) : undefined"
+          preload="none"
+          @playing="previewing = true"
+          @pause="previewing = false"
+          @ended="onPreviewEnded"
+          @error="onPreviewError"
+        />
       </div>
     </div>
   </div>
@@ -782,11 +1098,13 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
+  /* 手机壳里窗口会被撑满：留出边距，弹层才不会贴着屏幕边缘溢出 */
+  padding: var(--space-3);
   z-index: 10;
 }
 
 .picker {
-  width: min(480px, 90%);
+  width: min(480px, 100%);
   max-height: 70%;
   background: var(--surface-1);
   border: 1px solid var(--line-hair);
@@ -813,6 +1131,9 @@ watch(
 }
 
 .picker-list {
+  /* min-height: 0 是 flex 里能真正收缩/滚动的必要条件，否则窄屏下弹层会被内容顶破 */
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: var(--space-2);
   display: flex;
@@ -848,6 +1169,125 @@ watch(
 .pick-meta {
   font-size: 11px;
   color: var(--text-3);
+  flex: none;
+}
+
+/* ---------------- 弹层页签 */
+
+.picker-tabs {
+  flex: none;
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-2) 0;
+}
+
+.ptab {
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ptab:hover {
+  background: var(--surface-2);
+}
+
+.ptab--active {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---------------- 在线曲库（只试听，不进队列） */
+
+.online-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.online-search .wl-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.online-search .wl-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.online-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: var(--space-1) 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  background: var(--surface-2);
+}
+
+.online-state--warn {
+  color: var(--warning, #b06d00);
+  background: color-mix(in srgb, var(--warning, #b06d00) 12%, transparent);
+}
+
+.pick-icon {
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.pick--online {
+  /* 这是"行"，不是"可点的整行按钮" —— 唯一能点的是右边的试听键 */
+  cursor: default;
+}
+
+.pick--online:hover {
+  border-color: var(--line);
+}
+
+.pick--active {
+  border-color: var(--accent);
+}
+
+.pick--locked {
+  opacity: 0.7;
+}
+
+.pick-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.pick-main .pick-name {
+  /* 列向 flex 容器里 flex:1 会撑高度，这里只保留单行省略 */
+  flex: none;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pick-sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-play {
   flex: none;
 }
 </style>
