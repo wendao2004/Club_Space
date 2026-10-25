@@ -926,6 +926,67 @@ function migrate(database: DatabaseSync): void {
          WHERE last_login_at IS NULL;
       `)
     },
+
+    // ---- v22: 听歌房支持在线曲目（引用符 bi:BV...） ----
+    (d) => {
+      // 幂等：db-migrate-test 会把 schema_version 倒回 20 再跑一遍迁移，于是
+      // v22 会在一块**已经是 v22** 的库上二次执行 —— 重建表不能再跑第二次。
+      const columns = d.prepare("PRAGMA table_info('music_queue')").all() as Array<{ name: string }>
+      if (columns.some((column) => column.name === 'source')) return
+
+      d.exec(`
+        -- 在线曲目的引用符是 bi:BV...，不是 nodes.id —— 所以 music_queue.node_id
+        -- 上那条 REFERENCES nodes(id) 必须拆掉，否则排一首在线曲目就是
+        -- FOREIGN KEY constraint failed（db.ts 开头 PRAGMA foreign_keys = ON）。
+        -- node_id 由此变成"不透明引用符"：文件曲目放 nodes.id，在线曲目放 bi:...，
+        -- 谁是哪种由新增的 source 列区分。
+        --
+        -- 顺带去掉的还有级联：文件删除本来就是走 purgeDeletedNode（要先读到节点名
+        -- 才能"跳过被删的那首接着放"），而在线曲目根本没有对应的节点行。
+        CREATE TABLE music_queue_v22 (
+          id           TEXT PRIMARY KEY,
+          node_id      TEXT NOT NULL,
+          source       TEXT NOT NULL DEFAULT 'file' CHECK (source IN ('file', 'online')),
+          online_title TEXT,
+          added_by     TEXT NOT NULL REFERENCES users(id),
+          added_at     INTEGER NOT NULL
+        );
+        INSERT INTO music_queue_v22 (id, node_id, source, online_title, added_by, added_at)
+          SELECT id, node_id, 'file', NULL, added_by, added_at FROM music_queue;
+        DROP TABLE music_queue;
+        ALTER TABLE music_queue_v22 RENAME TO music_queue;
+        CREATE INDEX ix_music_queue_added ON music_queue(added_at);
+
+        -- music_state 同一条道理：在线曲目正在播时 node_id 也是 bi:...，
+        -- 而原来那条 REFERENCES nodes(id) ON DELETE CASCADE 会把它拒掉。
+        CREATE TABLE music_state_v22 (
+          id                 INTEGER PRIMARY KEY CHECK (id = 1),
+          node_id            TEXT NOT NULL,
+          source             TEXT NOT NULL DEFAULT 'file' CHECK (source IN ('file', 'online')),
+          online_title       TEXT,
+          started_by         TEXT NOT NULL REFERENCES users(id),
+          started_at         INTEGER NOT NULL,
+          played_token       INTEGER NOT NULL DEFAULT 0,
+          paused_position_ms INTEGER NOT NULL DEFAULT 0,
+          paused_at          INTEGER,
+          paused_by          TEXT
+        );
+        INSERT INTO music_state_v22 (id, node_id, source, online_title, started_by, started_at, played_token, paused_position_ms, paused_at, paused_by)
+          SELECT id, node_id, 'file', NULL, started_by, started_at, played_token, paused_position_ms, paused_at, paused_by
+            FROM music_state;
+        DROP TABLE music_state;
+        ALTER TABLE music_state_v22 RENAME TO music_state;
+      `)
+
+      // 重建后自查一次外键：两张表都还挂着 users(id)，迁移里一旦漏了行，
+      // 这里当场报出来，而不是等到某次入队时才 500。
+      for (const table of ['music_queue', 'music_state']) {
+        const broken = d.prepare(`PRAGMA foreign_key_check(${table})`).all()
+        if (broken.length > 0) {
+          throw new Error(`v22 迁移后 ${table} 存在 ${broken.length} 条外键冲突`)
+        }
+      }
+    },
   ]
 
   // 版本号必须在**拿到写锁之后**重读，锁外那一次只是"要不要进锁"的快速判断。

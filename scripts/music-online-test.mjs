@@ -16,8 +16,10 @@
  *
  * 用法：node scripts/music-online-test.mjs（run-all-tests.mjs 会自己起服务端）
  */
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const BASE = process.env.WL_TEST_BASE ?? 'http://127.0.0.1:3000'
@@ -58,7 +60,20 @@ function skip(name, reason) { skipped += 1; console.log('  \x1b[33m∅\x1b[0m ' 
  * import 时读的 env，于是本进程里这一份实例的上游就是这个 stub。
  * 走真实服务端的断言仍然打在另一个进程里，两边互不干扰。
  */
-const stub = { home: 0, search: 0, cookieOnSearch: [], riskLeft: 0 }
+const stub = { home: 0, search: 0, cookieOnSearch: [], riskLeft: 0, pagelist: 0, playurl: 0, audio: 0, audioQualities: [] }
+
+/**
+ * stub 的"音频本体"：一份确定性的字节序列。
+ *
+ * 为什么要自己造字节而不是打真实 CDN：磁盘缓存的断言是"发出去的字节数 == 缓存
+ * 文件大小"和"第二次请求零上游命中"——前者需要知道确切的长度，后者需要能数上游
+ * 调用次数。真实 CDN 两样都给不了。
+ */
+const STUB_AUDIO = Uint8Array.from({ length: 98304 }, (_, i) => (i * 7 + 13) & 0xff)
+
+/** 音频地址的 host 必须是 0.0.0.0：服务端 toSafeMediaUrl 会挡掉 127./10./192.168. 这些私网段，
+ *  而 0.0.0.0 不在黑名单里、连接时又被系统当成回环 —— 这是"零外网地测完整代理链"的唯一入口。 */
+let STUB_AUDIO_BASE = ''
 
 /** 20 条"像 B 站搜索回包"的记录：带 <em> 高亮、duration 是 "4:30" 字符串。 */
 const STUB_RESULTS = Array.from({ length: 20 }, (_, i) => ({
@@ -87,12 +102,69 @@ const stubServer = createServer((req, res) => {
     res.end(JSON.stringify(risk ? { code: -352, message: '风控校验失败' } : { code: 0, data: { result: STUB_RESULTS } }))
     return
   }
+  if (url.pathname === '/pagelist') {
+    stub.pagelist += 1
+    const bvid = url.searchParams.get('bvid') ?? ''
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ code: 0, data: [{ cid: 2000 + (bvid.charCodeAt(4) || 0) }] }))
+    return
+  }
+  if (url.pathname === '/playurl') {
+    stub.playurl += 1
+    const bvid = url.searchParams.get('bvid') ?? ''
+    // 两档码率，故意把低码率排在数组前面：断言"取 192 那档"才能证明真按 bandwidth 降序。
+    const audio = [
+      { baseUrl: STUB_AUDIO_BASE + '/audio?bvid=' + bvid + '&q=64', backupUrl: [], bandwidth: 30216 },
+      { baseUrl: STUB_AUDIO_BASE + '/audio?bvid=' + bvid + '&q=192', backupUrl: [], bandwidth: 30280 },
+    ]
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ code: 0, data: { dash: { audio } } }))
+    return
+  }
+  if (url.pathname === '/audio') {
+    stub.audio += 1
+    stub.audioQualities.push(url.searchParams.get('q') ?? '')
+    const total = STUB_AUDIO.byteLength
+    const range = req.headers.range
+    let start = 0
+    let end = total - 1
+    let status = 200
+    if (typeof range === 'string') {
+      const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim())
+      if (m) {
+        const rawStart = m[1] ?? ''
+        const rawEnd = m[2] ?? ''
+        if (!rawStart && rawEnd) {
+          start = Math.max(0, total - Number(rawEnd))
+        } else {
+          start = Number(rawStart || 0)
+          end = rawEnd ? Math.min(Number(rawEnd), total - 1) : total - 1
+        }
+        if (start >= total) {
+          res.writeHead(416, { 'content-range': 'bytes */' + total })
+          res.end()
+          return
+        }
+        status = 206
+      }
+    }
+    const headers = {
+      'content-type': 'video/mp4',
+      'accept-ranges': 'bytes',
+      'content-length': String(end - start + 1),
+    }
+    if (status === 206) headers['content-range'] = 'bytes ' + start + '-' + end + '/' + total
+    res.writeHead(status, headers)
+    res.end(Buffer.from(STUB_AUDIO.subarray(start, end + 1)))
+    return
+  }
   res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' })
   res.end('{"code":-404}')
 })
 await new Promise((resolve) => stubServer.listen(0, '127.0.0.1', resolve))
 stubServer.unref()
 const STUB_BASE = 'http://127.0.0.1:' + stubServer.address().port
+STUB_AUDIO_BASE = 'http://0.0.0.0:' + stubServer.address().port
 process.env.WL_MUSIC_ONLINE_HOME_URL = STUB_BASE + '/home'
 process.env.WL_MUSIC_ONLINE_SEARCH_URL = STUB_BASE + '/search'
 process.env.WL_MUSIC_ONLINE_PAGELIST_URL = STUB_BASE + '/pagelist'
@@ -102,12 +174,28 @@ process.env.WL_MUSIC_ONLINE_PLAYURL_URL = STUB_BASE + '/playurl'
 const TRACE_ENV_SAVED = process.env.WL_MUSIC_ONLINE_TRACE
 delete process.env.WL_MUSIC_ONLINE_TRACE
 
+/**
+ * 本进程的磁盘缓存目录。
+ *
+ * 曲库模块的缓存目录来自 config.ts 的 TMP_DIR，而那个常量是 **import 时** 读
+ * WL_TMP_DIR 的 —— 所以必须在 import 之前指过去。指到 mkdtemp 的目录里是为了
+ * 绝不写进开发库的 data/：测试污染开发数据是最难查的一类事故。
+ */
+const CACHE_TMP_DIR = mkdtempSync(join(tmpdir(), 'wl-online-cache-'))
+process.env.WL_TMP_DIR = CACHE_TMP_DIR
+
 const {
   MUSIC_ONLINE_DEGRADED_MESSAGE,
   MUSIC_ONLINE_NO_AUDIO_MESSAGE,
   MUSIC_ONLINE_PROVIDER,
+  ONLINE_CACHE_MAX_BYTES,
+  attachOnlineCacheTee,
+  openCachedOnlineTrack,
+  openOnlineStream,
   parseDurationMs,
   parseOnlineTrackId,
+  prewarmOnlineTrack,
+  resolveOnlineStreamSource,
   searchOnlineTracks,
 } = await import('../server/src/music-online.ts')
 
@@ -168,6 +256,25 @@ function countTrace(tag) {
 
 function traceAll() {
   try { return readFileSync(TRACE_PATH, 'utf8') } catch { return '' }
+}
+
+/**
+ * 按前缀计数。cache-hit 那行后面跟着文件大小（`cache-hit <bvid> <size>`），
+ * 全等匹配数不到，但前缀是稳定的。
+ */
+function countTracePrefix(prefix) {
+  let text = ''
+  try { text = readFileSync(TRACE_PATH, 'utf8') } catch { return -1 }
+  let n = 0
+  for (const line of text.split(String.fromCharCode(10))) if (line.startsWith(prefix)) n += 1
+  return n
+}
+
+/** 把任意可读流读成 Buffer（缓存/代理两侧的字节断言都要它）。 */
+async function readAll(stream) {
+  const chunks = []
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk))
+  return Buffer.concat(chunks)
 }
 
 // ---------------------------------------------------------------- 纯函数（永不 skip）
@@ -394,6 +501,113 @@ console.log('\n【回归：首页 200 但一条 cookie 都不下发（这次事�
   assert(stub.home >= 1, '重试前强制重新 bootstrap（不是拿旧 cookie 空转）', 'home=' + stub.home)
 }
 
+// ---------------------------------------------------------------- 磁盘缓存（进程内，上游 = stub）
+
+/**
+ * 这一节是"在线曲目能排进听歌房队列"的物理前提：切歌那一刻的首字节必须来自本地磁盘。
+ *
+ * 断言全打在本进程的曲库模块上（它的上游是 stub，调用次数可精确到 1）；真实服务端
+ * 是另一个进程、另一个上游，两边互不干扰。
+ */
+console.log('\n【磁盘缓存：预热零重复 / 字节一致 / Range 自算】')
+{
+  const CACHE_DIR = join(CACHE_TMP_DIR, 'online-audio')
+  const cachedFile = (bvid) => join(CACHE_DIR, bvid + '.m4a')
+  const resetStub = () => {
+    stub.pagelist = 0
+    stub.playurl = 0
+    stub.audio = 0
+    stub.audioQualities = []
+  }
+  const stubHits = () => stub.pagelist + stub.playurl + stub.audio
+
+  eq(ONLINE_CACHE_MAX_BYTES, 2 * 1024 * 1024 * 1024, '缓存总量上限常量 = 2GiB')
+
+  const bvid = STUB_RESULTS[3].bvid
+  const ref = 'bi:' + bvid
+  resetStub()
+  await prewarmOnlineTrack(ref)
+  eq(stub.pagelist, 1, '预热：pagelist 打了 1 次')
+  eq(stub.playurl, 1, '预热：playurl 打了 1 次')
+  eq(stub.audio, 1, '预热：音频本体整份只下了 1 次（不带 Range）')
+  eq(stub.audioQualities[0], '192', '预热取的是最高码率那档（真按 bandwidth 降序）')
+  const warmSize = statSync(cachedFile(bvid)).size
+  eq(warmSize, STUB_AUDIO.byteLength, '缓存文件大小 == 上游音频字节数')
+  console.log(dim('    缓存文件：' + cachedFile(bvid) + '（' + warmSize + ' bytes）'))
+
+  resetStub()
+  await prewarmOnlineTrack(ref)
+  eq(stubHits(), 0, '第二次预热：一个上游请求都不打（磁盘即答案）')
+
+  // ---- 命中缓存时 Range 由我们自己算（不再回头问上游要 content-range）
+  resetStub()
+  const whole = await openCachedOnlineTrack(bvid, undefined)
+  eq(whole.kind, 'hit', '预热后查询：命中磁盘缓存')
+  if (whole.kind === 'hit') {
+    eq(whole.status, 200, '无 Range → 200（整份）')
+    eq(whole.size, STUB_AUDIO.byteLength, '总长来自本地文件')
+    eq(whole.contentRange, null, '200 不带 content-range')
+    const bytes = await readAll(whole.body)
+    eq(bytes.byteLength, STUB_AUDIO.byteLength, '发出去的字节数 == 缓存文件大小')
+    assert(Buffer.compare(bytes, Buffer.from(STUB_AUDIO)) === 0, '字节内容与上游逐字节一致')
+  }
+
+  const ranged = await openCachedOnlineTrack(bvid, 'bytes=0-1023')
+  eq(ranged.kind, 'hit', 'Range 查询同样命中缓存')
+  if (ranged.kind === 'hit') {
+    eq(ranged.status, 206, 'Range → 206')
+    eq(ranged.contentRange, 'bytes 0-1023/' + STUB_AUDIO.byteLength, 'content-range 自己算，总数来自本地文件')
+    eq((await readAll(ranged.body)).byteLength, 1024, 'Range 只发 1024 字节')
+  }
+
+  const suffixed = await openCachedOnlineTrack(bvid, 'bytes=-64')
+  if (suffixed.kind === 'hit') {
+    eq(
+      suffixed.contentRange,
+      'bytes ' + (STUB_AUDIO.byteLength - 64) + '-' + (STUB_AUDIO.byteLength - 1) + '/' + STUB_AUDIO.byteLength,
+      '后缀式 bytes=-64 与文件曲目通道同语义',
+    )
+    eq((await readAll(suffixed.body)).byteLength, 64, '后缀式只发 64 字节')
+  }
+
+  const beyond = await openCachedOnlineTrack(bvid, 'bytes=' + STUB_AUDIO.byteLength + '-')
+  eq(beyond.kind, 'unsatisfiable', '起点越过文件末尾 → unsatisfiable（路由回 416）')
+  if (beyond.kind === 'unsatisfiable') eq(beyond.size, STUB_AUDIO.byteLength, '416 的总长取自本地文件')
+
+  const missing = await openCachedOnlineTrack('BVaaaaaaaaaa', undefined)
+  eq(missing.kind, 'miss', '没缓存过 → miss（继续走代理）')
+  eq(stubHits(), 0, '命中/未命中的查询本身零上游调用（缓存不反向触发解析）')
+
+  // ---- 冷曲目：代理这条路上顺手 tee 出一份缓存
+  const cold = STUB_RESULTS[4].bvid
+  resetStub()
+  const source = await resolveOnlineStreamSource(cold)
+  assert(source.kind === 'direct', '冷曲目解析出直连地址', String(source.kind))
+  if (source.kind === 'direct') {
+    const controller = new AbortController()
+    const upstream = await openOnlineStream(source.urls, undefined, controller.signal)
+    assert(upstream !== null, '打开上游音频流成功')
+    eq(stub.audio, 1, '打开上游音频流只打了 1 次')
+    if (upstream) {
+      const body = await attachOnlineCacheTee(
+        cold,
+        upstream.body,
+        { status: upstream.status, contentRange: upstream.contentRange, contentLength: upstream.contentLength },
+        controller.signal,
+      )
+      const bytes = await readAll(body)
+      eq(bytes.byteLength, STUB_AUDIO.byteLength, 'tee 这一路发给客户端的字节数 == 上游整份')
+      eq(statSync(cachedFile(cold)).size, bytes.byteLength, 'tee 落盘大小 == 发出去的字节数（响应结束即缓存就绪）')
+      assert(Buffer.compare(bytes, Buffer.from(STUB_AUDIO)) === 0, 'tee 发出去的字节与上游逐字节一致')
+      eq(stub.audio, 1, '整条代理路径只打了 1 次上游音频（没有为了缓存再下一遍）')
+    }
+  }
+
+  const files = readdirSync(CACHE_DIR).sort()
+  eq(files.join(','), [bvid + '.m4a', cold + '.m4a'].sort().join(','), '缓存目录里只有两个正式文件，没有残留 .part')
+  console.log(dim('    目录：' + files.join(' / ')))
+}
+
 // ---------------------------------------------------------------- 代理拉流
 
 console.log('\n【服务端代理拉流】')
@@ -511,6 +725,133 @@ console.log('\n【在线曲目不碰听歌房状态】')
   eq(roomAfter.queue.length, roomBefore.queue.length, 'music_queue 长度不变')
   eq(JSON.stringify(roomAfter.nowPlaying), JSON.stringify(roomBefore.nowPlaying), 'nowPlaying 不变')
   eq(roomAfter.members.length, roomBefore.members.length, '在场成员不变（在线试听不广播）')
+}
+
+// ---------------------------------------------------------------- 在线曲目进听歌房队列
+
+/**
+ * 这一节才是本轮的目的：在线曲目**真的能排进听歌房队列**并成为 nowPlaying。
+ *
+ * 打的是真实服务端进程（另一个进程、真上游）。磁盘缓存那条链路的跨进程证据只能在
+ * trace 文件里看：cache-hit 行 = 首字节来自本地磁盘，且 playurl/pagelist 计数为 0。
+ */
+console.log('\n【在线曲目排进听歌房队列（本地多人同步播放）】')
+{
+  const before = (await alice('/api/music/room')).body
+  const wasEmpty = Array.isArray(before.queue) && before.queue.length === 0
+  eq((await alice('/api/music/join', 'POST')).body.inRoom, true, '小爱加入听歌房')
+
+  const pick = (payload.degraded === false ? (payload.results ?? []) : [])[1] ?? null
+  const ref = pick ? pick.id : 'bi:BV1GJ411x7h7'
+  const title = pick ? pick.name : '在线测试曲（占位）'
+  console.log(dim('    入队对象：' + ref + ' / ' + title))
+
+  const enq = await alice('/api/music/queue', 'POST', { onlineId: ref, title })
+  eq(enq.status, 200, '在线曲目入队 → 200')
+  // 房间空着时这首歌会直接开播（与文件曲目一样不等第二个人），所以它可能出现在
+  // queue 里，也可能已经是 nowPlaying —— 两处都算"排进去了"。
+  const queued = (enq.body?.queue ?? []).find((item) => item.nodeId === ref) ?? null
+  const nowItem = enq.body?.nowPlaying ?? null
+  const started = nowItem !== null && nowItem.nodeId === ref
+  assert(queued !== null || started, '这个引用符出现在返回的房间视图里', ref + (started ? '（正在播）' : '（在队列里）'))
+  // 房间已经在放歌时，再排同一首（换个标题）一定留在队列里 —— 队列项字段的断言落在这里。
+  // 故意复用同一个引用符：磁盘缓存已经热了，这一步骤零上游开销，而标题必须是
+  // **这一行自己的** online_title（不是从 nowPlaying 抄来的）。
+  const title2 = title + ' #2'
+  const enq2 = await alice('/api/music/queue', 'POST', { onlineId: ref, title: title2 })
+  eq(enq2.status, 200, '同一首在线曲目再排一次 → 200')
+  const queued2 = (enq2.body?.queue ?? []).find((item) => item.nodeId === ref) ?? null
+  assert(queued2 !== null, '第二行留在队列里（房间已在播放，不抢当前曲目）', ref)
+  if (queued2) {
+    eq(queued2.source, 'online', '队列项 source=online')
+    eq(queued2.name, title2, '队列项 name 是这一行自己的标题（不是 nowPlaying 抄来的）')
+    assert(typeof queued2.addedBy === 'string' && queued2.addedBy.length > 0, 'addedBy 有值', queued2.addedBy)
+    assert(typeof queued2.addedAt === 'number' && queued2.addedAt > 0, 'addedAt 是服务端毫秒时间戳', String(queued2.addedAt))
+  }
+
+  if (wasEmpty) {
+    const now = enq.body?.nowPlaying ?? null
+    assert(now !== null, '队列原本为空 → 入队即开播（与文件曲目同一套 startNext）')
+    if (now) {
+      eq(now.nodeId, ref, 'nowPlaying.nodeId 就是那个引用符')
+      eq(now.source, 'online', 'nowPlaying.source=online')
+      eq(now.name, title, 'nowPlaying.name 用在线标题兜底')
+      // positionMs 是"按服务端时钟算出来的当前进度"，刚开播时是几十毫秒而不是 0
+      assert(typeof now.positionMs === 'number' && now.positionMs >= 0 && now.positionMs < 5000, '刚落地 positionMs 是一个很小的正数', String(now.positionMs))
+      assert(typeof now.startedAt === 'number' && now.startedAt > 0, 'startedAt 是服务端时间戳（同步时钟的锚点）', String(now.startedAt))
+      assert(typeof now.playedToken === 'number' && now.playedToken > 0, 'playedToken 递增到正数', String(now.playedToken))
+    }
+  } else {
+    skip('入队即开播', '房间原本就有歌在放（不在这一节的范围里）')
+  }
+
+  // healDeletedCurrent 只对文件曲目生效：在线曲目不能因为"nodes 里没有这一行"被切掉。
+  const seen = []
+  for (let i = 0; i < 3; i += 1) {
+    const view = (await admin('/api/music/room')).body
+    seen.push(view.nowPlaying ? view.nowPlaying.nodeId + '|' + view.nowPlaying.source : 'none')
+  }
+  eq(seen[0], seen[1], '连拉三次房间：nowPlaying 没被 heal 切走（第 1、2 次一致）')
+  eq(seen[1], seen[2], '连拉三次房间：nowPlaying 没被 heal 切走（第 2、3 次一致）')
+  eq(seen[2], ref + '|online', '在线曲目一直是当前曲目（没被判成"文件已删除"）')
+
+  // ---- 非法入参
+  const badRef = await alice('/api/music/queue', 'POST', { onlineId: 'bi:BV123', title: 'x' })
+  eq(badRef.status, 400, '格式不对的在线引用符 → 400')
+  const noTitle = await alice('/api/music/queue', 'POST', { onlineId: ref })
+  eq(noTitle.status, 400, '缺 title → 400')
+  assert(String(noTitle.body?.error ?? '').includes('歌名'), '缺 title 的文案点明歌名', String(noTitle.body?.error ?? ''))
+
+  // ---- 磁盘缓存：跨进程证据（trace 只看得见真实服务端进程）
+  const bvid = ref.replace(/^bi:/, '')
+  let warm = false
+  for (let i = 0; i < 60; i += 1) {
+    if (countTracePrefix('cache-ready ' + bvid) > 0) { warm = true; break }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  if (!warm) {
+    skip('第二次取流零上游命中（磁盘缓存）', '预热没落盘：可能出不了网 / 缓存目录不可写（服务端进程的 WL_MUSIC_ONLINE_TRACE 也可能没开）')
+  } else {
+    resetTrace()
+    const first = await streamRaw(alice, ref)
+    const firstBytes = new Uint8Array(await first.arrayBuffer())
+    const hitFirst = countTracePrefix('cache-hit ' + bvid)
+    const playFirst = countTrace('playurl ' + bvid) + countTrace('pagelist ' + bvid)
+    console.log(dim('    第 1 次取流：status=' + first.status + ' bytes=' + firstBytes.byteLength + ' cache-hit=' + hitFirst + ' playurl+pagelist=' + playFirst))
+    eq(first.status, 200, '预热之后取流 → 200（首字节来自本地磁盘）')
+    assert(firstBytes.byteLength > 10000, '真的收到了整首音频字节', firstBytes.byteLength + ' bytes')
+
+    resetTrace()
+    const second = await streamRaw(alice, ref, { range: 'bytes=0-1023' })
+    const secondBytes = new Uint8Array(await second.arrayBuffer())
+    const hitSecond = countTracePrefix('cache-hit ' + bvid)
+    const playSecond = countTrace('playurl ' + bvid) + countTrace('pagelist ' + bvid)
+    console.log(dim('    第 2 次取流：status=' + second.status + ' bytes=' + secondBytes.byteLength + ' cache-hit=' + hitSecond + ' playurl+pagelist=' + playSecond))
+    eq(second.status, 206, '第二次 Range 请求 → 206')
+    eq(second.headers.get('content-range'), 'bytes 0-1023/' + firstBytes.byteLength, 'content-range 的总长 == 第一次整份的字节数（同一份缓存）')
+    eq(secondBytes.byteLength, 1024, '第二次只发 1024 字节')
+    assert(hitSecond >= 1, '第二次请求确实命中磁盘缓存（trace 里有 cache-hit 行）', 'cache-hit=' + hitSecond)
+    eq(playSecond, 0, '第二次请求零上游命中（playurl + pagelist 都是 0）')
+  }
+
+  // ---- 队列上限 50（在线曲目与文件曲目共用同一条上限）
+  const view = (await alice('/api/music/room')).body
+  let count = Array.isArray(view.queue) ? view.queue.length : 0
+  let cap = null
+  for (let i = count; i < 52; i += 1) {
+    const res = await alice('/api/music/queue', 'POST', { onlineId: ref, title: '上限检验 ' + i })
+    if (res.status !== 200) { cap = res; break }
+    count += 1
+  }
+  assert(cap !== null, '排到第 51 首时被挡住（没被无限排下去）', '当前 ' + count + ' 首')
+  if (cap) {
+    eq(cap.status, 400, '超上限 → 400')
+    assert(String(cap.body?.error ?? '').includes('50'), '400 文案点明上限 50', String(cap.body?.error ?? ''))
+  }
+  eq(count, 50, '队列正好停在 50 首')
+  const finalView = (await alice('/api/music/room')).body
+  eq(finalView.queue.length <= 50, true, '房间视图里的队列不超过 50 首', String(finalView.queue.length))
+  eq(finalView.nowPlaying.nodeId, ref, '排满队列也没把正在放的在线曲目挤掉')
 }
 
 // ---------------------------------------------------------------- 汇总

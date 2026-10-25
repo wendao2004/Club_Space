@@ -8,6 +8,7 @@
  */
 import type { FastifyInstance } from 'fastify'
 import {
+  enqueueOnlineTrack,
   enqueueTrack,
   musicRoomView,
   pauseRoom,
@@ -115,10 +116,26 @@ export function registerMusicRoutes(app: FastifyInstance): void {
     return { tracks }
   })
 
+  /**
+   * 排歌。两种曲目共用这一个接口，靠 body 的字段区分：
+   *   · 文件曲目 → { nodeId }（照旧）
+   *   · 在线曲目 → { onlineId: 'bi:BV...', title }
+   * 分成两个 URL 才是错的：前端只想知道"排进去没有"，而 nodeId 在两种情况下
+   * 都是那个不透明引用符（见 MusicQueueItem.nodeId 的注释），一条路径最省事。
+   */
   app.post('/api/music/queue', async (req) => {
     const user = requireUser(req)
-    const body = req.body as { nodeId?: unknown }
-    const view = enqueueTrack(typeof body.nodeId === 'string' ? body.nodeId : '', user.id, roleAtLeast(user.role, 'admin'))
+    const body = req.body as { nodeId?: unknown; onlineId?: unknown; title?: unknown }
+    // 在线曲目没有节点行，走 nodeId 那条路会先 getNode 然后 404 —— 所以必须
+    // 按字段分支，而不是让 enqueueTrack 去猜引用符的前缀。
+    const view =
+      body.onlineId !== undefined
+        ? enqueueOnlineTrack(
+            typeof body.onlineId === 'string' ? body.onlineId : '',
+            typeof body.title === 'string' ? body.title : '',
+            user.id,
+          )
+        : enqueueTrack(typeof body.nodeId === 'string' ? body.nodeId : '', user.id, roleAtLeast(user.role, 'admin'))
     notify('enqueued')
     return view
   })

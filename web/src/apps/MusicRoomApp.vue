@@ -16,6 +16,11 @@
 
   暂停/继续是厅级状态，所有人一起停、一起续。播完由任意客户端上报切歌
   （playedToken 防止旧上报错切新曲）。
+
+  曲目引用符（ref）有两种，前端只按前缀分派流地址，不新增同步逻辑：
+  - 文件曲目：nodes.id 原样，流地址 /api/music/stream/<ref>
+  - 在线曲目：bi:BVxxxxxxxxxx，流地址 /api/music/online/stream?trackId=<ref>
+  两种 ref 都由 nodeId 字段承载（不透明），source 只用于界面标识。
 -->
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -323,7 +328,7 @@ async function openPicker(): Promise<void> {
 }
 
 async function enqueue(nodeId: string): Promise<void> {
-  // 只有"从文件里挑"才会走到这里。在线曲库那条路径**没有** enqueue 调用 —— 见下面在线曲库一节。
+  // 只有「从文件里挑」走这里。在线曲目入队是另一条路径（enqueueOnline，body 是 { onlineId, title }）。
   const ok = await music.enqueue(nodeId)
   if (ok) {
     closePicker()
@@ -340,15 +345,55 @@ async function skip(): Promise<void> {
   await music.skip()
 }
 
+// ---------------------------------------------------------------- 曲目引用符
+
 /**
- * 走听歌房自己的流通道（/api/music/stream）。
+ * 对外字段名仍是 nodeId —— 它现在是一个**不透明引用符**，前端只看前缀、不解析内容：
  *
- * 不能用 preview：preview 要求 canRead，而排歌只校验"排歌人自己能读"——
- * 私人目录里的歌，除上传者外所有人 403，<audio> 静默失败，表现就是
- * "只有上传者那台电脑有声音"。厅内流通道只认"这首歌在不在厅里"。
+ * - 文件曲目：nodes.id 原样（无前缀）→ /api/music/stream/<ref>
+ * - 在线曲目：`bi:BVxxxxxxxxxx`      → /api/music/online/stream?trackId=<ref>
+ *
+ * 两种曲目走**同一条**同步路径：服务端权威 positionMs + startedAt + playedToken，
+ * 客户端 music-clock 对时 + player.enforce 漂移校正（40ms 死区 / 400ms 调速率 /
+ * 更大才 seek）。在线曲目没有第二套同步机制。
  */
-function trackUrl(nodeId: string): string {
-  return `/api/music/stream/${encodeURIComponent(nodeId)}`
+const ONLINE_REF_PREFIX = 'bi:'
+
+type TrackSource = 'file' | 'online'
+
+function isOnlineRef(ref: string | null | undefined): boolean {
+  return typeof ref === 'string' && ref.startsWith(ONLINE_REF_PREFIX)
+}
+
+/**
+ * 判断一条队列/正在播曲目的来源。
+ *
+ * 前缀是契约里写死的唯一判据，source 只是冗余字段 —— 服务端还没部署新字段时，
+ * 界面上的「在线」标识与流地址分派照样得对，所以缺失就回落到前缀。
+ */
+function refSource(
+  track: { nodeId?: string | null; source?: unknown } | null | undefined,
+): TrackSource {
+  if (!track) return 'file'
+  if (track.source === 'online' || track.source === 'file') return track.source
+  return isOnlineRef(track.nodeId) ? 'online' : 'file'
+}
+
+/**
+ * 流地址：按引用符前缀分派。
+ *
+ * 文件曲目走听歌房自己的流通道（/api/music/stream）。不能用 preview：preview 要求
+ * canRead，而排歌只校验"排歌人自己能读"—— 私人目录里的歌，除上传者外所有人 403，
+ * <audio> 静默失败，表现就是"只有上传者那台电脑有声音"。厅内流通道只认
+ * "这首歌在不在厅里"。
+ *
+ * 在线曲目**绝不能**落到文件流路由上：/api/music/stream/bi:BV... 会去查 nodes 表，
+ * 查不到就是 404，<audio> 静默失败，用户只感到"没声音"。
+ */
+function trackUrl(ref: string): string {
+  return isOnlineRef(ref)
+    ? `/api/music/online/stream?trackId=${encodeURIComponent(ref)}`
+    : `/api/music/stream/${encodeURIComponent(ref)}`
 }
 
 /** <audio> 加载失败——之前是静默的，用户只感到"没声音"。 */
@@ -357,22 +402,27 @@ const audioError = ref<string | null>(null)
 function onAudioError(): void {
   const el = audioEl.value
   const code = el?.error?.code
-  audioError.value =
-    code === 4
+  audioError.value = isOnlineRef(playingNodeId.value)
+    ? '在线流加载失败 —— 可能断流了，或者服务端的在线流接口还没就绪（404）；切下一首试试'
+    : code === 4
       ? '这首歌的格式浏览器放不了（试试 mp3 / m4a / wav）'
       : '音频加载失败 —— 可能已被移出听歌房，或者文件被删了'
   player.blocked = false
 }
 
 
-// ---------------------------------------------------------------- 在线曲库（只做单人试听）
+// ---------------------------------------------------------------- 在线曲库（试听 + 排进队列）
 
 /**
  * 一轮搜索 = 服务端聚合搜索（音源：哔哩哔哩）+ 服务端代理拉流，前端不直连外网 CDN。
  *
- * 一条硬规矩：**在线曲目永远不进队列**。厅里的播放进度是所有人共用的，
- * 一条外网流随时可能 404 / 断流 / 时长和服务端元数据对不上，混进队列就是
- * 全厅跳歌。所以这里只提供"试听"：独立的 <audio>，只响在点按钮的那台设备上。
+ * 在线曲目**可以进队列**，走的是和文件曲目同一条同步路径：队列里存 `bi:BV…`
+ * 引用符，流由 /api/music/online/stream 转一手，进度仍然只由服务端的
+ * positionMs + startedAt + playedToken 说了算。当初不敢把在线曲目排进队列的
+ * 顾虑是外网流会 404 / 断流 / 时长和服务端元数据对不上 —— 这一层现在由服务端的磁盘
+ * 缓存 + 解析缓存预热兜住；客户端**不**做额外预加载，也**不**另造一套同步。
+ *
+ * 「试听」仍然是单人路径：独立 <audio>，只响在点按钮的那台设备上，不动房间状态。
  */
 const pickerTab = ref<'files' | 'online'>('files')
 
@@ -424,10 +474,6 @@ function formatDuration(ms: number): string {
  * 稿件已失效 / 被删，或者真需要大会员才能看 —— 两种情况对用户是同一句话。
  */
 const notPlayableText = '这个条目取不到音轨（可能已失效或需要大会员）'
-
-function previewUrl(id: string): string {
-  return `/api/music/online/stream?id=${encodeURIComponent(id)}`
-}
 
 /**
  * 搜索在线曲库。
@@ -541,10 +587,54 @@ function onPreviewError(): void {
   previewError.value = '试听加载失败 —— 在线流接口可能还没就绪（后端 404），或者这首拿不到真实播放地址'
 }
 
+/** 每首在线曲目的入队状态。done 之后按钮保持禁用 —— 不给连点重复入队的机会。 */
+const onlineEnqueueState = ref<Record<string, 'pending' | 'done'>>({})
+
+/**
+ * 把在线曲目排进厅里（全厅同步播放）。
+ *
+ * 直接 fetch 而不是 music.enqueue：store 那个方法只发 body { nodeId }，在线曲目
+ * 走的是 { onlineId, title }（服务端据此按 bi:BV… 校验再把 ref 落进队列）。
+ * 这次改动的范围只有本文件，所以这条请求自带。
+ *
+ * 接口还没就位（404 / 5xx / 断网）时只影响这一个按钮：给一条人话、把状态退回可点，
+ * 绝不白屏，也不许冒未捕获异常。
+ */
+async function enqueueOnline(track: OnlineTrack): Promise<void> {
+  if (!track.playable) return
+  if (onlineEnqueueState.value[track.id]) return
+  onlineEnqueueState.value = { ...onlineEnqueueState.value, [track.id]: 'pending' }
+  try {
+    const resp = await fetch('/api/music/queue', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      // title 一起发：服务端不必为了显示队列名再去解析一遍外网元数据
+      body: JSON.stringify({ onlineId: track.id, title: track.name }),
+    })
+    if (!resp.ok) {
+      throw new Error(
+        resp.status === 404
+          ? '服务端还不支持在线曲目入队（404）—— 先在「从文件里挑」里排歌'
+          : `服务端返回 ${resp.status}，这首没能排进去`,
+      )
+    }
+    onlineEnqueueState.value = { ...onlineEnqueueState.value, [track.id]: 'done' }
+    ui.notify('success', '已排进队列', `${track.name} —— 全厅会一起同步播放`)
+    // 立刻拉一次房间：SSE 随后也会推，这里是为了队列区马上更新
+    void music.load()
+  } catch (err) {
+    const next = { ...onlineEnqueueState.value }
+    delete next[track.id]
+    onlineEnqueueState.value = next
+    ui.notify('error', '排不进队列', err instanceof Error ? err.message : '未知错误')
+  }
+}
+
 function switchPickerTab(next: 'files' | 'online'): void {
   if (pickerTab.value === next) return
   pickerTab.value = next
-  // 切回文件区就不再需要试听了。留着它在后台接着放，用户会以为全厅在放 —— 其实只有他自己听得到
+  // 切回文件区就不再需要试听了。留着它在后台接着放，用户会以为全厅在放 —— 试听那只 <audio> 只响在这台设备上
   if (next === 'files') stopPreview()
 }
 
@@ -630,7 +720,17 @@ watch(
         <div class="now-info">
           <Icon name="audio" :size="26" class="now-icon" :class="{ 'now-icon--paused': nowPlaying.paused }" />
           <div class="now-text">
-            <strong class="now-name">{{ nowPlaying.name }}</strong>
+            <span class="now-title">
+              <strong class="now-name">{{ nowPlaying.name }}</strong>
+              <!-- 在线曲目来自哔哩哔哩、流经服务端转一手：给个可见标识，别让人当成本地文件 -->
+              <span
+                v-if="refSource(nowPlaying) === 'online'"
+                class="tag-online"
+                title="在线曲目：音源来自哔哩哔哩，流经服务端转发，和文件曲目一样全厅同步播放"
+              >
+                在线
+              </span>
+            </span>
             <span class="now-meta">
               {{ nowPlaying.startedByName }} 排的 ·
               <template v-if="nowPlaying.paused">
@@ -712,6 +812,9 @@ watch(
       <div v-for="item in queue" :key="item.id" class="qrow">
         <Icon name="audio" :size="14" class="qrow-icon" />
         <span class="qrow-name">{{ item.name }}</span>
+        <span v-if="refSource(item) === 'online'" class="tag-online" title="在线曲目（哔哩哔哩）">
+          在线
+        </span>
         <span class="qrow-meta">{{ item.addedByName }}</span>
         <button
           v-if="item.addedBy === auth.user?.id"
@@ -724,7 +827,7 @@ watch(
       </div>
     </div>
 
-    <!-- 选歌弹层：两个页签 —— 排歌（进队列） / 在线曲库（只能单人试听） -->
+    <!-- 选歌弹层：两个页签 —— 排歌（进队列） / 在线曲库（可试听，也能排进队列） -->
     <div v-if="picking" class="mask" @click.self="closePicker">
       <div class="picker">
         <header class="picker-bar">
@@ -764,7 +867,7 @@ watch(
           </button>
         </div>
 
-        <!-- 在线曲库：这条路径上没有 enqueue —— 只能试听，绝不进队列 -->
+        <!-- 在线曲库：每行两个动作 ——「试听」只响在这台设备上，「排进队列」给全厅 -->
         <div v-else class="picker-list">
           <form class="online-search" @submit.prevent="searchOnline">
             <input
@@ -781,7 +884,8 @@ watch(
 
           <p class="picker-note">
             <Icon name="volume" :size="11" />
-            音源来自哔哩哔哩；只你自己能听到，不会排进队列，也不影响房间的同步播放。
+            音源来自哔哩哔哩。点「排进队列」= 和文件曲目一样进厅里的队列，全厅同步播放；
+            点「试听」只在这台设备上响，不动房间。
           </p>
 
           <p v-if="onlineUnavailableText" class="online-state online-state--warn">
@@ -815,22 +919,47 @@ watch(
                 <template v-if="!t.playable"> · {{ notPlayableText }}</template>
               </span>
             </div>
-            <button
-              class="wl-btn wl-btn--sm pick-play"
-              :disabled="!t.playable"
-              :title="t.playable ? '只在你自己的设备上播放，不进队列' : notPlayableText"
-              @click="togglePreview(t)"
-            >
-              {{
-                !t.playable
-                  ? '不可试听'
-                  : previewId === t.id && (previewing || previewPending)
-                    ? previewPending
-                      ? '加载中…'
-                      : '停止'
-                    : '试听'
-              }}
-            </button>
+            <div class="pick-actions">
+              <button
+                class="wl-btn wl-btn--sm pick-play"
+                :disabled="!t.playable"
+                :title="t.playable ? '只在这台设备上试听，不动房间' : notPlayableText"
+                @click="togglePreview(t)"
+              >
+                {{
+                  !t.playable
+                    ? '不可试听'
+                    : previewId === t.id && (previewing || previewPending)
+                      ? previewPending
+                        ? '加载中…'
+                        : '停止'
+                      : '试听'
+                }}
+              </button>
+              <button
+                class="wl-btn wl-btn--sm pick-queue"
+                :class="{ 'pick-queue--done': onlineEnqueueState[t.id] === 'done' }"
+                :disabled="!t.playable || !!onlineEnqueueState[t.id]"
+                :title="
+                  !t.playable
+                    ? notPlayableText
+                    : onlineEnqueueState[t.id] === 'done'
+                      ? '已经在队列里了（再点也不会重复入队）'
+                      : '排进听歌房队列 —— 全厅一起同步播放'
+                "
+                @click="enqueueOnline(t)"
+              >
+                <Icon v-if="onlineEnqueueState[t.id] === 'done'" name="check" :size="12" />
+                <Icon v-else name="plus" :size="12" />
+                {{
+                  onlineEnqueueState[t.id] === 'pending'
+                    ? '排队中…'
+                    : onlineEnqueueState[t.id] === 'done'
+                      ? '已排'
+                      : '排进队列'
+                }}
+              </button>
+            </div>
           </div>
 
           <p v-if="previewError" class="online-state online-state--warn">
@@ -845,7 +974,7 @@ watch(
         -->
         <audio
           ref="previewEl"
-          :src="previewId ? previewUrl(previewId) : undefined"
+          :src="previewId ? trackUrl(previewId) : undefined"
           preload="none"
           @playing="previewing = true"
           @pause="previewing = false"
@@ -993,10 +1122,38 @@ watch(
   min-width: 0;
 }
 
+.now-title {
+  /* 曲名 + 「在线」徽标排一行：曲名可省略，徽标永不被挤掉 */
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
 .now-name {
   font-size: 14px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 「在线」小徽标：正在播放区与队列行共用。纯标识，不带交互 ——
+ * 同步逻辑对两种 source 完全一样。
+ */
+.tag-online {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line-hair);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
   white-space: nowrap;
 }
 
@@ -1203,7 +1360,7 @@ watch(
   font-weight: 600;
 }
 
-/* ---------------- 在线曲库（只试听，不进队列） */
+/* ---------------- 在线曲库（试听 + 排进队列） */
 
 .online-search {
   display: flex;
@@ -1248,7 +1405,7 @@ watch(
 }
 
 .pick--online {
-  /* 这是"行"，不是"可点的整行按钮" —— 唯一能点的是右边的试听键 */
+  /* 这是"行"，不是"可点的整行按钮" —— 能点的是右边的试听 / 排队两个键 */
   cursor: default;
 }
 
@@ -1287,7 +1444,31 @@ watch(
   white-space: nowrap;
 }
 
-.pick-play {
+.pick-actions {
+  /* 试听 + 排进队列：两枚按钮成组，别让它们各自被 flex 挤压变形 */
   flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.pick-queue--done {
+  color: var(--text-secondary);
+}
+
+/*
+ * 窄屏（≤390px，常见手机壳宽度）：一行里塞两个按钮会把曲名挤成空白甚至撑破弹层。
+ * 操作区改成竖排、按钮撑满自己那一列，曲名那列就能拿到完整宽度。
+ */
+@media (max-width: 390px) {
+  .pick-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  .pick-actions .wl-btn {
+    padding: 0 var(--space-2);
+  }
 }
 </style>

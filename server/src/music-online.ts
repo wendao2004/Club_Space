@@ -22,12 +22,26 @@
  * 30020（拿不到播放地址）。接不上的平台硬接只会变成一堆必然失败的分支，所以
  * 就一个 provider，诚实地面向"一个能用的源"。
  *
- * 为什么在线曲目**不进队列**：听歌房是"所有人同一时刻听同一首"的同步模型，
- * 时钟锚点由服务端算出。如果把在线流塞进队列，其他人的播放进度会依赖"某个人
- * 能不能连上外网 CDN"，整房会一起卡住。所以在线流只做单人试听。
+ * 在线曲目现在**可以排进听歌房队列**（schema v22 起）。同步模型一点没变：时钟
+ * 锚点仍然是服务端 music_state 的 startedAt / pausedPositionMs / playedToken，
+ * 客户端按同一套漂移校正跟随（web/src/music-clock）。以前不敢让它进队列，是因为
+ * 它比文件曲目多了一段"外网不可控"：解析地址要打两次 B 站接口，首字节要等 CDN。
+ * 这一版把那一段不可控整个吃回服务端：
+ *   ① **磁盘缓存** data/tmp/online-audio/<bvid>.m4a：命中时首字节来自本地磁盘，
+ *      既不解析上游（省掉 pagelist+playurl 两次调用，也就躲开了 2 小时过期的签名
+ *      地址），也不受 CDN 抖动影响；
+ *   ② **预热** prewarmOnlineTrack：排进队列/切歌时就把整首搬到本地，等真切到它
+ *      时播放器读的是磁盘；
+ *   ③ 缓存没热上也照样能播：降级回直连代理（单人试听走的就是这条路），
+ *      "慢一点"不等于"播不了" —— 缓存是旁路，永远不是播放的前置条件。
  */
-import { appendFile } from 'node:fs'
+import { appendFile, createReadStream, createWriteStream } from 'node:fs'
+import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
+import { join } from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
+import { TMP_DIR } from './config.ts'
 
 /** 唯一的 provider。写成常量而不是字面量散落各处，前端/接口契约只有一个来源。 */
 export const MUSIC_ONLINE_PROVIDER = 'bilibili' as const
@@ -721,3 +735,437 @@ export async function openOnlineStream(
   }
   return null
 }
+
+/* ───────────────────────── 磁盘缓存（在线曲目进队列的关键） ───────────────────────── */
+
+/**
+ * 在线音频的磁盘缓存目录。
+ *
+ * 为什么是磁盘而不是内存：一首 4 分钟的歌 4~8MB，而这个进程在 NAS 上只有
+ * 512MB 预算 —— 十个人各听几首就 OOM 了。磁盘是这里唯一付得起的存储。
+ *
+ * 为什么跟着 TMP_DIR 走：目录解析沿用 config.ts 的既有约定（WL_DATA_DIR /
+ * WL_TMP_DIR 都可覆盖），绝不硬编码绝对路径 —— 否则测试会往开发库的 data/
+ * 里写文件，而"测试污染开发数据"是最难查的一类事故。
+ */
+const ONLINE_AUDIO_DIR = join(TMP_DIR, 'online-audio')
+
+/**
+ * 缓存总上限 2GiB。
+ *
+ * 上限的意义不是"省磁盘"，而是**挡住一条无限增长的路径**：每听一首多一个文件，
+ * 没有上限时 NAS 迟早被这个功能塞满，而症状会表现为"整个服务上传都失败" ——
+ * 一个听歌功能把文件服务搞挂了，谁都不会第一时间想到是它。
+ * 2GiB ≈ 300 首 128k，远超一个社团房间一晚上听的量。
+ */
+export const ONLINE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+/** 单首上限：防止一个异常大的响应把缓存目录写爆（128MB ≈ 一小时的 256k 音频）。 */
+const ONLINE_CACHE_MAX_TRACK_BYTES = 128 * 1024 * 1024
+
+/**
+ * 缓存目录只探一次。
+ *
+ * 只读盘 / 磁盘满时 mkdir 会一直失败，而每次播放都要撞一次 EACCES 是没意义的；
+ * 记住"用不了"之后所有缓存动作直接短路，播放走直连代理。
+ */
+let cacheDirState: 'unknown' | 'ready' | 'unusable' = 'unknown'
+
+async function ensureOnlineCacheDir(): Promise<boolean> {
+  if (cacheDirState === 'ready') return true
+  if (cacheDirState === 'unusable') return false
+  try {
+    await mkdir(ONLINE_AUDIO_DIR, { recursive: true })
+    cacheDirState = 'ready'
+    return true
+  } catch (err) {
+    cacheDirState = 'unusable'
+    trace('cache-fail mkdir ' + String((err as Error).message ?? err).slice(0, 120))
+    return false
+  }
+}
+
+const cachedPath = (bvid: string): string => join(ONLINE_AUDIO_DIR, bvid + '.m4a')
+const partPath = (bvid: string): string => join(ONLINE_AUDIO_DIR, bvid + '.part')
+
+/** 已经**完整**落盘的缓存大小；没有（或只是半截 .part）返回 null。 */
+async function cachedSize(bvid: string): Promise<number | null> {
+  try {
+    const info = await stat(cachedPath(bvid))
+    return info.isFile() && info.size > 0 ? info.size : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 正在下载中的 bvid → 那一次的 Promise。
+ *
+ * 必须去重：一次 <audio> 播放会打出几十个 Range 请求，缓存未命中时它们会在
+ * 同一秒里涌入，没有这张表同一首歌会被并发下载几十遍 —— 磁盘写爆 + CDN 被刷。
+ * 预热和"顺手 tee"共用它，所以两条路径不会互相踩 <bvid>.part。
+ */
+const downloads = new Map<string, Promise<void>>()
+
+/**
+ * LRU 清理：超限时按 mtime 最旧的先删。
+ *
+ * mtime 是"这个文件最后一次被写满的时间"，也就是它被预热/播放populate的时刻 ——
+ * 用它当 LRU 的依据不需要额外记账。命中缓存时不改 mtime（否则每个 Range 请求
+ * 都要一次 utimes，几十次写盘换一个更精确的 LRU 不值），所以它接近 FIFO；
+ * 对这个用途够用：真正被反复听的歌会重新预热，mtime 自然就新。
+ *
+ * 失败一律静默：清理是维护动作，不该让播放失败。
+ */
+async function trimOnlineCache(): Promise<void> {
+  if (!(await ensureOnlineCacheDir())) return
+  try {
+    const names = await readdir(ONLINE_AUDIO_DIR)
+    const files: Array<{ path: string; size: number; mtimeMs: number }> = []
+    let total = 0
+    for (const name of names) {
+      if (!name.endsWith('.m4a')) continue
+      const full = join(ONLINE_AUDIO_DIR, name)
+      try {
+        const info = await stat(full)
+        if (!info.isFile()) continue
+        files.push({ path: full, size: info.size, mtimeMs: info.mtimeMs })
+        total += info.size
+      } catch {
+        // 刚被另一个请求删掉：正常竞争，跳过
+      }
+    }
+    if (total <= ONLINE_CACHE_MAX_BYTES) return
+    files.sort((a, b) => a.mtimeMs - b.mtimeMs)
+    for (const file of files) {
+      if (total <= ONLINE_CACHE_MAX_BYTES) break
+      await rm(file.path, { force: true })
+      total -= file.size
+    }
+  } catch {
+    // 目录不可读 = 没有缓存可清
+  }
+}
+
+/**
+ * 整首下载进缓存（预热的主干）。
+ *
+ * 拉的是**不带 Range** 的完整响应：我们要的就是完整文件，而 CDN 的 200 正是
+ * 这个语义。写 <bvid>.part，只有"落盘字节数 == 上游声明的总长度"才 rename 成
+ * 正式文件名 —— **半截文件绝不能被当成完整缓存发出去**，否则那首歌会在中间
+ * 莫名结束，而症状几乎不可能靠日志定位。上游没给 content-length 时才退化成
+ * "干净结束就算完整"，并且依旧受单首上限约束。
+ */
+async function downloadOnlineTrack(bvid: string, urls: readonly string[]): Promise<void> {
+  if (!(await ensureOnlineCacheDir())) return
+  const part = partPath(bvid)
+  await rm(part, { force: true }).catch(() => {})
+
+  const controller = new AbortController()
+  // 这里用 STREAM_TIMEOUT_MS 是同一个理由：它只约束"拿到响应头"，下载中途清掉。
+  const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS)
+  try {
+    let picked: Response | null = null
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
+          headers: { ...upstreamHeaders(), accept: '*/*' },
+          signal: controller.signal,
+        })
+        if (res.status === 200 && res.body) {
+          picked = res
+          break
+        }
+        await res.body?.cancel().catch(() => {})
+      } catch {
+        // 这个候选挂了，试下一个备用地址
+      }
+      if (controller.signal.aborted) break
+    }
+    if (!picked || !picked.body) {
+      trace('cache-fail ' + bvid + ' no-source')
+      return
+    }
+    const declared = Number(picked.headers.get('content-length') ?? '')
+    const expected = Number.isFinite(declared) && declared > 0 ? declared : null
+    if (expected !== null && expected > ONLINE_CACHE_MAX_TRACK_BYTES) {
+      trace('cache-fail ' + bvid + ' too-large ' + expected)
+      await picked.body.cancel().catch(() => {})
+      return
+    }
+
+    await pipeline(
+      Readable.fromWeb(picked.body as NodeReadableStream<Uint8Array>),
+      createWriteStream(part),
+    )
+    const size = (await stat(part)).size
+    if (size > ONLINE_CACHE_MAX_TRACK_BYTES) {
+      await rm(part, { force: true })
+      trace('cache-fail ' + bvid + ' too-large ' + size)
+      return
+    }
+    if (expected !== null && size !== expected) {
+      await rm(part, { force: true })
+      trace('cache-fail ' + bvid + ' incomplete ' + size + '/' + expected)
+      return
+    }
+    await rename(part, cachedPath(bvid))
+    trace('cache-ready ' + bvid + ' ' + size)
+    void trimOnlineCache()
+  } catch (err) {
+    await rm(part, { force: true }).catch(() => {})
+    trace('cache-fail ' + bvid + ' ' + String((err as Error).message ?? err).slice(0, 120))
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 预热：把整首搬到本地磁盘。失败只 warn，**绝不上抛**。
+ *
+ * 为什么在服务端预热而不是客户端预加载：客户端预加载要先把整首走一遍 HTTP 拉
+ * 下来，和直接播没区别，还多占一份浏览器内存；服务端预热是"趁大家还在听上一首
+ * 的时候把下一首搬到本地"，切歌那一刻的首字节就变成了磁盘读。
+ *
+ * 幂等：已有完整缓存 → 直接返回（零上游调用，散在磁盘上的文件就是答案）；
+ * 同一首正在下 → 复用那一次的 Promise，不重复下载。
+ */
+export async function prewarmOnlineTrack(ref: string): Promise<void> {
+  const bvid = parseOnlineTrackId(ref)
+  if (!bvid) return
+  if (!(await ensureOnlineCacheDir())) return
+  if ((await cachedSize(bvid)) !== null) return
+  const running = downloads.get(bvid)
+  if (running) return running
+
+  const task = (async () => {
+    const source = await resolveOnlineStreamSource(bvid)
+    if (source.kind !== 'direct') return
+    await downloadOnlineTrack(bvid, source.urls)
+  })()
+    .catch((err: unknown) => {
+      // 预热是优化：网络抖动、上游风控都只是"这次没热上"，播放该走的代理照走。
+      console.warn('[music-online] 预热失败', ref, String((err as Error)?.message ?? err))
+    })
+    .finally(() => {
+      if (downloads.get(bvid) === task) downloads.delete(bvid)
+    })
+  downloads.set(bvid, task)
+  return task
+}
+
+export type CachedOnlineLookup =
+  | { kind: 'miss' }
+  /** start >= size：调用方回 416，header 里的总长就取自这里的 size。 */
+  | { kind: 'unsatisfiable'; size: number }
+  | {
+      kind: 'hit'
+      /** 200 = 整首，206 = Range 命中。 */
+      status: 200 | 206
+      /** 文件总长（content-range 里斜杠后面那个数）。 */
+      size: number
+      start: number
+      end: number
+      contentRange: string | null
+      body: Readable
+    }
+
+/**
+ * 命中磁盘缓存时直接开本地流。
+ *
+ * Range 在这里**自己算**：本地文件我们本来就精确知道总长度，命中缓存还去打
+ * 上游要 content-range，那缓存就白做了（而且上游签名地址约 2 小时就过期）。
+ * 语义与 files.ts 的 parseByteRange 保持一致 —— 后缀式 bytes=-N、start>=size
+ * 判 unsatisfiable、多段/畸形一律当整份；两个播放通道对 <audio> 必须表现得
+ * 一模一样，否则"文件曲目能拖、在线曲目不能拖"这种差异会非常难解释。
+ *
+ * miss = 没缓存（走代理）；unsatisfiable = 416。
+ */
+export async function openCachedOnlineTrack(
+  bvid: string,
+  rangeHeader: string | undefined,
+): Promise<CachedOnlineLookup> {
+  const size = await cachedSize(bvid)
+  if (size === null) return { kind: 'miss' }
+  const parsed = parseLocalByteRange(rangeHeader, size)
+  if (parsed === 'unsatisfiable') return { kind: 'unsatisfiable', size }
+  const start = parsed ? parsed.start : 0
+  const end = parsed ? parsed.end : size - 1
+  trace('cache-hit ' + bvid + ' ' + size)
+  return {
+    kind: 'hit',
+    status: parsed ? 206 : 200,
+    size,
+    start,
+    end,
+    contentRange: parsed ? `bytes ${start}-${end}/${size}` : null,
+    body: createReadStream(cachedPath(bvid), { start, end }),
+  }
+}
+
+/** 单段 Range 解析。与 files.ts 的 parseByteRange 同语义，返回 null 表示"按整份处理"。 */
+function parseLocalByteRange(
+  header: string | undefined,
+  size: number,
+): { start: number; end: number } | 'unsatisfiable' | null {
+  if (!header) return null
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
+  if (!match) return null
+  const rawStart = match[1] ?? ''
+  const rawEnd = match[2] ?? ''
+  if (!rawStart && !rawEnd) return null
+  if (!rawStart) {
+    const suffix = Number(rawEnd)
+    if (!Number.isFinite(suffix) || suffix <= 0) return null
+    return { start: Math.max(0, size - suffix), end: size - 1 }
+  }
+  const start = Number(rawStart)
+  if (!Number.isFinite(start)) return null
+  if (start >= size) return 'unsatisfiable'
+  const end = rawEnd ? Math.min(Number(rawEnd), size - 1) : size - 1
+  if (!Number.isFinite(end) || end < start) return null
+  return { start, end }
+}
+
+/**
+ * 未命中时的"顺手缓存"：把发给客户端的那份字节同时 tee 到 <bvid>.part。
+ *
+ * 只在**响应从第 0 字节开始**时做（无 Range，或 bytes=0-…）：只有从 0 连续往后
+ * 读才可能拼出完整文件。用户拖了进度条从中间读，就原样直通、不写缓存 ——
+ * 写进去也只是个缺头部的废文件。
+ *
+ * 全程旁路：写盘失败、客户端中途断开，都只是"这次没缓存上"（删掉 .part），
+ * 客户端一个字节都不受影响。
+ */
+export async function attachOnlineCacheTee(
+  bvid: string,
+  body: NodeReadableStream<Uint8Array>,
+  info: {
+    /** 上游状态码：200 表示"这就是整份"，206 要看 content-range。 */
+    status: number
+    contentRange: string | null
+    contentLength: string | null
+  },
+  signal: AbortSignal,
+): Promise<NodeReadableStream<Uint8Array>> {
+  if (teeStartOffset(info) !== 0) return body
+  if (downloads.has(bvid)) return body
+  if ((await cachedSize(bvid)) !== null) return body
+  if (!(await ensureOnlineCacheDir())) return body
+
+  const expected = teeExpectedTotal(info)
+  if (expected !== null && expected > ONLINE_CACHE_MAX_TRACK_BYTES) return body
+
+  const part = partPath(bvid)
+  const out = createWriteStream(part)
+  let writeError: Error | null = null
+  out.on('error', (err) => {
+    writeError = err
+  })
+  let written = 0
+  let settled = false
+  let release: () => void = () => {}
+  const finished = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  downloads.set(bvid, finished)
+
+  const abortTee = async (reason: string): Promise<void> => {
+    if (settled) return
+    settled = true
+    if (downloads.get(bvid) === finished) downloads.delete(bvid)
+    out.destroy()
+    await rm(part, { force: true }).catch(() => {})
+    trace('cache-fail ' + bvid + ' ' + reason)
+    release()
+  }
+
+  // 客户端断开（拖进度条/关页面）→ 半截 .part 必须删掉，否则它会永远占着位置
+  const onAbort = (): void => {
+    void abortTee('aborted ' + written)
+  }
+  if (signal.aborted) {
+    await abortTee('aborted 0')
+    return body
+  }
+  signal.addEventListener('abort', onAbort)
+
+  const finalize = async (): Promise<void> => {
+    if (settled) return
+    settled = true
+    signal.removeEventListener('abort', onAbort)
+    if (downloads.get(bvid) === finished) downloads.delete(bvid)
+    try {
+      await new Promise<void>((resolve) => {
+        out.once('finish', resolve)
+        out.once('close', resolve)
+        out.end()
+      })
+      if (writeError) throw writeError
+      const size = (await stat(part)).size
+      if (size <= 0 || (expected !== null && size !== expected)) {
+        await rm(part, { force: true })
+        trace('cache-fail ' + bvid + ' incomplete ' + size + '/' + String(expected))
+      } else {
+        await rename(part, cachedPath(bvid))
+        trace('cache-ready ' + bvid + ' ' + size)
+        void trimOnlineCache()
+      }
+    } catch (err) {
+      await rm(part, { force: true }).catch(() => {})
+      trace('cache-fail ' + bvid + ' ' + String((err as Error).message ?? err).slice(0, 120))
+    } finally {
+      release()
+    }
+  }
+
+  const tee = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      controller.enqueue(chunk)
+      if (settled) return
+      written += chunk.byteLength
+      if (written > ONLINE_CACHE_MAX_TRACK_BYTES) {
+        void abortTee('too-large')
+        return
+      }
+      try {
+        out.write(chunk)
+      } catch {
+        void abortTee('write')
+      }
+    },
+    // 等落盘完成再关流：这样"响应结束"就等于"缓存已就绪"，验收才能确定地断言
+    // cache-ready，而不是跟一个后台 rename 抢时间。代价是一次文件 close 的延时。
+    flush() {
+      return finalize()
+    },
+  })
+  return body.pipeThrough(tee)
+}
+
+/** 上游这一份响应是从第几字节开始的。判断不了一律 -1，也就是"不缓存"。 */
+function teeStartOffset(info: { status: number; contentRange: string | null }): number {
+  // 200 = 上游发了整份，天然从 0 开始（哪怕客户端带着 bytes=0-1023 来）
+  if (info.status === 200) return 0
+  if (!info.contentRange) return -1
+  const match = /^bytes\s+(\d+)-\d+\/(\d+|\*)$/.exec(info.contentRange.trim())
+  return match ? Number(match[1]) : -1
+}
+
+/** 这一份响应总共应该有多少字节；未知返回 null（那就只接受"至少下到了些什么"）。 */
+function teeExpectedTotal(info: {
+  status: number
+  contentRange: string | null
+  contentLength: string | null
+}): number | null {
+  if (info.contentRange) {
+    const match = /^bytes\s+\d+-\d+\/(\d+|\*)$/.exec(info.contentRange.trim())
+    if (match && match[2] !== '*') return Number(match[2])
+  }
+  // 206 又没给 content-range 时，content-length 是**这一段的长度**而不是总长，
+  // 拿它当总长就会把半截文件 rename 成完整缓存 —— 这种情况下宁可不校验也不缓存错。
+  if (info.status !== 200) return null
+  const total = Number(info.contentLength ?? '')
+  return Number.isFinite(total) && total > 0 ? total : null
+}
+

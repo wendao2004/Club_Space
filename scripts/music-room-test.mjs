@@ -229,10 +229,17 @@ assert(view.nowPlaying !== null, '首首歌立刻开播（不用等人按播放�
 eq(view.nowPlaying.name, '晴天.wav', '正在播 = 队头')
 eq(view.nowPlaying.startedByName, '小爱', '排歌人被记录')
 eq(view.queue.length, 0, '开播后队头出队')
+// 契约回归：文件曲目的引用符仍然是 nodes.id 原样，source 恒为 'file'。
+// 在线曲目共用同一个 nodeId 字段（值形如 bi:BV...），所以"文件曲目没被在线那套改坏"
+// 必须由这一条长期盯着。
+eq(view.nowPlaying.source, 'file', "文件曲目的 nowPlaying.source = 'file'")
+eq(view.nowPlaying.nodeId, songA, '文件曲目的 nodeId 就是 nodes.id 原样（没有前缀）')
 
 view = (await bob('/api/music/queue', 'POST', { nodeId: songB })).body
 eq(view.queue.length, 1, '第二首排在队列里')
 eq(view.queue[0].name, '夜曲.wav', '队列项正确')
+eq(view.queue[0].source, 'file', "文件曲目的队列项 source = 'file'")
+eq(view.queue[0].nodeId, songB, '文件曲目的队列项 nodeId 是 nodes.id 原样')
 
 const queuedId = view.queue[0].id
 res = await alice(`/api/music/queue/${queuedId}`, 'DELETE')

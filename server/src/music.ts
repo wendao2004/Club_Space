@@ -12,15 +12,34 @@
  *    旧曲目的上报动不了新曲目。播放器全关了就停在当前曲目 —— 下一个
  *    进来的人会直接从进度处继续。
  *
- * 队列条目引用文件系统的 audio 节点（复用内容寻址存储与权限体系），
- * 不单独上传 —— 歌已经在文件区里了，听歌房只负责"排播"。
+ * 队列条目有两种来源，靠 source 列区分：
+ *   · 'file'   —— 引用文件系统的 audio 节点（复用内容寻址存储与权限体系），
+ *                 不单独上传：歌已经在文件区里了，听歌房只负责"排播"；
+ *   · 'online' —— 引用在线曲库的哔哩哔哩曲目，nodeId 是 bi:BV... 这样的
+ *                 "不透明引用符"（见 music-online.ts 的 ONLINE_TRACK_ID）。
+ *
+ * ⚠️ 两种曲目的**同步机制完全相同**：服务端只维护权威 positionMs +
+ * startedAt + playedToken，客户端照旧用 music-clock 做漂移校正。在线曲目
+ * 的低延迟靠服务端磁盘缓存 + 预热（music-online.ts），不是另造一套同步。
  */
 import { getDb, newId, now } from './db.ts'
 import { HttpError, canRead, getNode } from './files.ts'
+import { parseOnlineTrackId, prewarmOnlineTrack } from './music-online.ts'
+
+/**
+ * 曲目来源。
+ *
+ * `nodeId` 是**不透明引用符**：文件曲目就是 nodes.id 原样，在线曲目是 bi:BV...
+ * 前端只看它的前缀决定走哪条流通道（bi: → /api/music/online/stream），
+ * 服务端靠这一列决定要不要去查 nodes 表。
+ */
+export type MusicTrackSource = 'file' | 'online'
 
 export interface MusicQueueItem {
   id: string
+  /** 不透明引用符：nodes.id（source='file'）或 bi:BV...（source='online'）。 */
   nodeId: string
+  source: MusicTrackSource
   name: string
   addedBy: string
   addedByName: string
@@ -29,6 +48,7 @@ export interface MusicQueueItem {
 
 export interface MusicNowPlaying {
   nodeId: string
+  source: MusicTrackSource
   name: string
   startedBy: string
   startedByName: string
@@ -131,12 +151,17 @@ export function requireMember(userId: string): void {
 
 const MAX_QUEUE = 50
 
+/** 在线曲目标题的长度上限（标题来自前端回传的搜索结果，必须夹住）。 */
+const MAX_ONLINE_TITLE = 200
+
 interface RawQueueRow {
   id: string
   node_id: string
+  source: string
+  online_title: string | null
   added_by: string
   added_at: number
-  name: string
+  name: string | null
   added_by_name: string
 }
 
@@ -144,7 +169,8 @@ function rawToQueueItem(row: RawQueueRow): MusicQueueItem {
   return {
     id: row.id,
     nodeId: row.node_id,
-    name: row.name,
+    source: row.source === 'online' ? 'online' : 'file',
+    name: row.name ?? '（在线曲目）',
     addedBy: row.added_by,
     addedByName: row.added_by_name,
     addedAt: row.added_at,
@@ -154,17 +180,22 @@ function rawToQueueItem(row: RawQueueRow): MusicQueueItem {
 /**
  * 队列查询。
  *
- * `n.deleted_at IS NULL` 不能省：删除是软删除，节点行还在，FK 级联不会
- * 触发。删掉一个文件夹时，里面的歌会带着 deleted_at 留在队列里 —— 不做
- * 过滤的话，厅里会一直"播放"一首取不到流的歌，而 enqueueTrack 看到
- * hasNow 为真又不会再启动新歌。
+ * 三个细节都不能省：
+ *   · **LEFT JOIN** nodes：在线曲目没有节点行，INNER JOIN 会让它们整条消失；
+ *   · COALESCE(n.name, q.online_title)：名字有两个来源 —— 文件看节点、在线看标题；
+ *   · 过滤条件必须是"在线条目一律放行，文件条目才查 deleted_at"。删除是软删除，
+ *     节点行还在，删掉一个文件夹时里面的歌会带着 deleted_at 留在队列里 ——
+ *     不过滤的话厅里会一直"播放"一首取不到流的歌，而 enqueueTrack 看到
+ *     hasNow 为真又不会再启动新歌。
  */
 const QUEUE_SELECT = `
-  SELECT q.id, q.node_id, q.added_by, q.added_at, n.name, u.display_name AS added_by_name
+  SELECT q.id, q.node_id, q.source, q.online_title, q.added_by, q.added_at,
+         COALESCE(n.name, q.online_title) AS name,
+         u.display_name AS added_by_name
     FROM music_queue q
-    JOIN nodes n ON n.id = q.node_id
+    LEFT JOIN nodes n ON n.id = q.node_id
     JOIN users u ON u.id = q.added_by
-   WHERE n.deleted_at IS NULL
+   WHERE q.source = 'online' OR n.deleted_at IS NULL
 `
 
 /**
@@ -173,13 +204,18 @@ const QUEUE_SELECT = `
  * 删除文件夹时只对根节点调过 purge（历史上），子节点是软删 —— 队列行和
  * music_state 都会指向一个取不到流的节点。这一层兜底保证"任何一次拉房间"
  * 都不会把这样的僵尸状态返回给客户端。
+ *
+ * ⚠️ **只对 source='file' 生效**：在线曲目的 nodeId 是 bi:BV...，在 nodes 表里
+ * 查不到任何行。照旧逻辑会被判成"文件已删除"，于是每一次拉房间都会把正在播的
+ * 在线曲目切掉 —— 表现是"厅里刚排的在线歌一秒就自己跳走"。这比显示不出来严重得多。
  */
 function healDeletedCurrent(): void {
   const db = getDb()
-  const state = db.prepare('SELECT node_id FROM music_state WHERE id = 1').get() as
-    | { node_id: string }
+  const state = db.prepare('SELECT node_id, source FROM music_state WHERE id = 1').get() as
+    | { node_id: string; source: string }
     | undefined
   if (!state) return
+  if (state.source === 'online') return
   const row = db.prepare('SELECT deleted_at FROM nodes WHERE id = ?').get(state.node_id) as
     | { deleted_at: number | null }
     | undefined
@@ -192,6 +228,8 @@ export function musicRoomView(viewerId = ''): MusicRoomView {
   const state = getDb().prepare('SELECT * FROM music_state WHERE id = 1').get() as
     | {
         node_id: string
+        source: MusicTrackSource
+        online_title: string | null
         started_by: string
         started_at: number
         played_token: number
@@ -200,19 +238,29 @@ export function musicRoomView(viewerId = ''): MusicRoomView {
         paused_by: string | null
       }
     | undefined
-  const nameOf = (nodeId: string, userId: string): { name: string; userName: string } => {
+  const userNameOf = (userId: string): string =>
+    (getDb().prepare('SELECT display_name FROM users WHERE id = ?').get(userId) as
+      | { display_name: string }
+      | undefined)?.display_name ?? '（已注销）'
+
+  /**
+   * 曲目的显示名。
+   *
+   * 在线曲目**不能**去 nodes 表查：nodeId 是 bi:BV...，查不到会被兜底成
+   * "（文件已删除）"，于是厅里显示一条"已删除"的在线曲目 —— 而它其实好好的。
+   */
+  const trackNameOf = (ref: string, source: MusicTrackSource, onlineTitle: string | null): string => {
+    if (source === 'online') return onlineTitle ?? '（在线曲目）'
     const row = getDb()
-      .prepare(
-        `SELECT n.name, u.display_name AS user_name FROM nodes n, users u
-          WHERE n.id = ? AND u.id = ? AND n.deleted_at IS NULL`,
-      )
-      .get(nodeId, userId) as { name: string; user_name: string } | undefined
-    return { name: row?.name ?? '（文件已删除）', userName: row?.user_name ?? '（已注销）' }
+      .prepare('SELECT name FROM nodes WHERE id = ? AND deleted_at IS NULL')
+      .get(ref) as { name: string } | undefined
+    return row?.name ?? '（文件已删除）'
   }
 
   const nowPlaying = state
     ? (() => {
-        const { name, userName } = nameOf(state.node_id, state.started_by)
+        const name = trackNameOf(state.node_id, state.source, state.online_title)
+        const userName = userNameOf(state.started_by)
         const paused = state.paused_at !== null
         // 服务端算出当前进度，客户端只用这个数 + 自己测得的时钟偏移
         const positionMs = paused
@@ -225,6 +273,7 @@ export function musicRoomView(viewerId = ''): MusicRoomView {
           : undefined
         return {
           nodeId: state.node_id,
+          source: state.source,
           name,
           startedBy: state.started_by,
           startedByName: userName,
@@ -256,7 +305,8 @@ export function musicRoomView(viewerId = ''): MusicRoomView {
 
 function startNext(): void {
   const db = getDb()
-  // 上一首进入"刚退场"宽限：慢设备的在途 Range 请求不该在切歌瞬间变成 403
+  // 上一首进入"刚退场"宽限：慢设备的在途 Range 请求不该在切歌瞬间变成 403。
+  // key 是引用符字符串，所以文件曲目和在线曲目**都**天然适用。
   const previous = db.prepare('SELECT node_id FROM music_state WHERE id = 1').get() as
     | { node_id: string }
     | undefined
@@ -276,16 +326,70 @@ function startNext(): void {
   if (head) {
     db.prepare('DELETE FROM music_queue WHERE id = ?').run(head.id)
     db.prepare(
-      `INSERT INTO music_state (id, node_id, started_by, started_at, played_token, paused_position_ms, paused_at, paused_by)
-       VALUES (1, ?, ?, ?, ?, 0, NULL, NULL)
-       ON CONFLICT(id) DO UPDATE SET node_id = excluded.node_id, started_by = excluded.started_by,
-                                     started_at = excluded.started_at, played_token = excluded.played_token,
+      `INSERT INTO music_state (id, node_id, source, online_title, started_by, started_at, played_token, paused_position_ms, paused_at, paused_by)
+       VALUES (1, ?, ?, ?, ?, ?, ?, 0, NULL, NULL)
+       ON CONFLICT(id) DO UPDATE SET node_id = excluded.node_id, source = excluded.source,
+                                     online_title = excluded.online_title,
+                                     started_by = excluded.started_by, started_at = excluded.started_at,
+                                     played_token = excluded.played_token,
                                      paused_position_ms = 0, paused_at = NULL, paused_by = NULL`,
-    ).run(head.node_id, head.added_by, now(), token)
+    ).run(head.node_id, head.source, head.online_title, head.added_by, now(), token)
   } else {
     // 队列空了就停播（清空当前曲目），不自动循环 —— 循环播谁的歌是个偏好问题
     db.prepare('DELETE FROM music_state WHERE id = 1').run()
   }
+
+  // 换完曲立刻给"正在播的那首 + 队头那首"预热磁盘缓存。
+  prewarmRoomQueue()
+}
+
+/**
+ * 给房间里的在线曲目预热磁盘缓存（fire-and-forget）。
+ *
+ * 为什么放在 startNext 里而不是路由里：排歌、切歌、播完上报、自愈都会走到
+ * startNext，而"下一首是哪首"只有服务端知道。放在这个唯一出口，客户端
+ * 不可能漏掉预热；写完 broadcast 之后下一次拉房间也已经是热的。
+ *
+ * 只预热"在播的那首 + 队头那首"：整个队列都预热等于把没人会听的歌也下一遍，
+ * 而 LRU 就那么大。任何失败都只是没预热上（prewarmOnlineTrack 自己吞掉异常），
+ * 播放该走的代理路径照样走得通 —— 预热是优化，不是播放的前置条件。
+ */
+function prewarmRoomQueue(): void {
+  const db = getDb()
+  const refs = new Set<string>()
+  const state = db.prepare('SELECT node_id, source FROM music_state WHERE id = 1').get() as
+    | { node_id: string; source: string }
+    | undefined
+  if (state?.source === 'online') refs.add(state.node_id)
+  const head = db
+    .prepare("SELECT node_id FROM music_queue WHERE source = 'online' ORDER BY added_at ASC LIMIT 1")
+    .get() as { node_id: string } | undefined
+  if (head) refs.add(head.node_id)
+  for (const ref of refs) {
+    // 绝对不 await：一次预热要下整首歌，把它塞进请求路径就是"排歌要等 20 秒"。
+    prewarmOnlineTrack(ref).catch(() => {})
+  }
+}
+
+/** 队列上限检查（两种曲目共用，在线曲目不额外占额度）。 */
+function assertQueueRoom(): void {
+  const count = (getDb().prepare('SELECT COUNT(*) AS c FROM music_queue').get() as { c: number }).c
+  if (count >= MAX_QUEUE) throw new HttpError(400, `队列最多排 ${MAX_QUEUE} 首，先听听再说`)
+}
+
+/**
+ * 入队后的共同尾巴：没有正在播的就立刻开播，再把房间视图还给调用方。
+ *
+ * 两种曲目必须走同一个结尾 —— "首首自动开播"是听歌房的既有语义，
+ * 不能因为这首是在线曲目就退化成"要等人按播放"。
+ */
+function afterEnqueue(userId: string): MusicRoomView {
+  const db = getDb()
+  const hasNow = db.prepare('SELECT id FROM music_state WHERE id = 1').get()
+  if (!hasNow) startNext()
+  // 队列头可能正是刚排进来的在线曲目：现在就预热，切歌那一刻首字节来自本地磁盘
+  prewarmRoomQueue()
+  return musicRoomView(userId)
 }
 
 /**
@@ -352,21 +456,42 @@ export function enqueueTrack(nodeId: string, userId: string, isAdmin: boolean): 
   if (!node.mime?.startsWith('audio/')) throw new HttpError(400, '只能排播音频文件')
   if (!canRead(node, userId, isAdmin)) throw new HttpError(403, '这个文件你没有权限访问')
 
-  const db = getDb()
-  const count = (db.prepare('SELECT COUNT(*) AS c FROM music_queue').get() as { c: number }).c
-  if (count >= MAX_QUEUE) throw new HttpError(400, `队列最多排 ${MAX_QUEUE} 首，先听听再说`)
+  assertQueueRoom()
+  getDb()
+    .prepare(
+      'INSERT INTO music_queue (id, node_id, source, online_title, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)',
+    )
+    .run(newId('mq'), nodeId, 'file', null, userId, now())
+  return afterEnqueue(userId)
+}
 
-  db.prepare('INSERT INTO music_queue (id, node_id, added_by, added_at) VALUES (?, ?, ?, ?)').run(
-    newId('mq'),
-    nodeId,
-    userId,
-    now(),
-  )
+/**
+ * 把一首**在线曲目**（哔哩哔哩）排进队列。
+ *
+ * 与 enqueueTrack 的差别只有三处，其余（成员校验 / 队列上限 / 首首自动开播）
+ * 刻意保持一致 —— 否则"在线曲目"会变成听歌房里一条行为不同的旁路：
+ *   ① 引用符是 bi:BV...，没有节点行可查，所以这里只校验**格式**。这不是偷懒：
+ *      那个正则就是 SSRF 防线（见 parseOnlineTrackId），而"这首到底有没有音轨"
+ *      只能等真正播放时由上游回答（那时才 404，与单人试听完全一致）；
+ *   ② 名字来自前端回传的搜索结果标题，落在 music_queue.online_title 里；
+ *   ③ 入队后立刻预热磁盘缓存，切到它时首字节来自本地磁盘而不是 CDN。
+ */
+export function enqueueOnlineTrack(ref: string, title: string, userId: string): MusicRoomView {
+  requireMember(userId)
+  // 回写规范形态：库里的引用符只有 bi:<bvid> 一种写法，前端传 bi:BVxxx 之外
+  // 的任何变体（大小写、空白、多余前缀）都在这里被拒，而不是带着脏值进库。
+  const bvid = parseOnlineTrackId(ref)
+  if (!bvid) throw new HttpError(400, '在线曲目 ID 不合法（只接受 bi:BV...）')
+  const onlineTitle = typeof title === 'string' ? title.trim().slice(0, MAX_ONLINE_TITLE) : ''
+  if (!onlineTitle) throw new HttpError(400, '在线曲目缺少歌名')
 
-  // 没有正在播的就直接开播（首首歌不用等人按播放）
-  const hasNow = db.prepare('SELECT id FROM music_state WHERE id = 1').get()
-  if (!hasNow) startNext()
-  return musicRoomView(userId)
+  assertQueueRoom()
+  getDb()
+    .prepare(
+      'INSERT INTO music_queue (id, node_id, source, online_title, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)',
+    )
+    .run(newId('mq'), `bi:${bvid}`, 'online', onlineTitle, userId, now())
+  return afterEnqueue(userId)
 }
 
 /**

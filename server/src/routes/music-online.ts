@@ -10,6 +10,8 @@ import type { FastifyInstance } from 'fastify'
 import { Readable } from 'node:stream'
 import {
   MUSIC_ONLINE_NO_AUDIO_MESSAGE,
+  attachOnlineCacheTee,
+  openCachedOnlineTrack,
   openOnlineStream,
   parseOnlineTrackId,
   resolveOnlineStreamSource,
@@ -65,8 +67,34 @@ export function registerMusicOnlineRoutes(app: FastifyInstance): void {
     // SSRF 防线：只认 bi:BV...。这条接口带着服务端的网络出口去 fetch，
     // 一旦接受任意 URL/主机名，它就是一台内网代理。返回的 bvid 只会进查询参数，
     // 永远拼不进上游 URL 的主机/路径部分。
-    const bvid = parseOnlineTrackId((req.query as { id?: unknown }).id)
+    // 参数名两个都认：trackId 是前后端契约里写的名字，id 是本文件早期的实现名。
+    // 只认一个的代价不对称 —— 发错时 <audio> 只会静默无声（400 被播放器吞掉），
+    // 排查成本远高于多读一个键。
+    const query = req.query as { id?: unknown; trackId?: unknown }
+    const bvid = parseOnlineTrackId(query.trackId ?? query.id)
     if (!bvid) throw new HttpError(400, '曲目 ID 不合法（只接受 bi:BV...）')
+
+    // ① 磁盘缓存优先。
+    //    命中时**完全不打上游**：省掉 pagelist+playurl 两次调用（那条签名地址约
+    //    2 小时就过期，少解析一次就少一次踩空），而且让"房间切到在线曲目"的首字节
+    //    变成一次本地磁盘读。在线曲目进队列之后这条路径是常态，不是优化。
+    const cached = await openCachedOnlineTrack(bvid, req.headers.range)
+    if (cached.kind === 'unsatisfiable') {
+      // 416 必须带 `bytes */总长`：播放器据此才知道该把进度条拖到哪。
+      reply.code(416).header('content-range', `bytes */${cached.size}`)
+      return reply.send('')
+    }
+    if (cached.kind === 'hit') {
+      reply.code(cached.status)
+      // 与代理路径盖同一个章（audio/mp4）：CDN 给的 video/mp4 或裸
+      // octet-stream 都在写入缓存前统一过，两个通道对 <audio> 表现一致。
+      reply.header('content-type', 'audio/mp4')
+      reply.header('accept-ranges', 'bytes')
+      reply.header('x-content-type-options', 'nosniff')
+      if (cached.contentRange) reply.header('content-range', cached.contentRange)
+      reply.header('content-length', String(cached.end - cached.start + 1))
+      return reply.send(cached.body)
+    }
 
     const source = await resolveOnlineStreamSource(bvid)
     // B 站没有网易云那种付费墙，所以这里的 404 不是"要会员才能听这首歌"，
@@ -92,8 +120,22 @@ export function registerMusicOnlineRoutes(app: FastifyInstance): void {
     if (upstream.contentRange) reply.header('content-range', upstream.contentRange)
     if (upstream.contentLength) reply.header('content-length', upstream.contentLength)
 
+    // ② 未命中：照常直连代理，同时把这份字节顺手 tee 进磁盘缓存（下满即
+    //    rename 成正式文件，下次走 ① 的本地流）。tee 全程旁路：写盘失败只是
+    //    "这次没缓存上"，客户端一个字节都不受影响。
+    const body = await attachOnlineCacheTee(
+      bvid,
+      upstream.body,
+      {
+        status: upstream.status,
+        contentRange: upstream.contentRange,
+        contentLength: upstream.contentLength,
+      },
+      controller.signal,
+    )
+
     // 交给 reply.send 直接流式转发：整段读进内存再发，一首 5MB 的歌乘以几路
     // 并发就够让这个 512MB 的容器被 OOM 杀掉。
-    return reply.send(Readable.fromWeb(upstream.body))
+    return reply.send(Readable.fromWeb(body))
   })
 }

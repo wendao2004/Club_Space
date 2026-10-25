@@ -703,12 +703,20 @@ async function main() {
     })
 
     // SSE 的 conversation 事件应该让侧栏出现这个新群（不用刷新页面）
-    await sleep(2000)
-    const groupInList = await evaluate(`JSON.stringify({
-      titles: [...document.querySelectorAll('.conv__name')].map(n => n.textContent.trim()),
-      atBadges: document.querySelectorAll('.conv__at').length
-    })`)
-    const gil = JSON.parse(groupInList)
+    //
+    // 用轮询代替固定 sleep：要证明的是「不刷新就能看到」，与耗时无关；而整机
+    // 负载高时（同轮跑过下载型的在线曲库套件）事件到达会超过 2 秒，固定等待就
+    // 会随机变红 —— 那种红灯既不是回归也不是环境坏了，只是断言写脆了。
+    let gil = { titles: [], atBadges: 0 }
+    for (let attempt = 0; attempt < 16; attempt++) {
+      await sleep(500)
+      const groupInList = await evaluate(`JSON.stringify({
+        titles: [...document.querySelectorAll('.conv__name')].map(n => n.textContent.trim()),
+        atBadges: document.querySelectorAll('.conv__at').length
+      })`)
+      gil = JSON.parse(groupInList)
+      if (gil.titles.includes('界面测试群') && gil.atBadges >= 1) break
+    }
     assert(gil.titles.includes('界面测试群'), '新建的群通过实时推送出现在会话列表里（没刷新页面）', gil.titles.join('、'))
     assert(gil.atBadges >= 1, '会话列表上出现了「有人@你」的红 @', `${gil.atBadges} 个`)
 
