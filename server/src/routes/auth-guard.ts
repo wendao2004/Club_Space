@@ -9,7 +9,10 @@
  * 401，两处必须是同一个类对象，不能各定义一份。
  */
 import type { FastifyRequest } from 'fastify'
+import { audit } from '../audit.ts'
 import { currentUser, roleAtLeast, type Role, type User } from '../auth.ts'
+import { HttpError } from '../files.ts'
+import { RATE_RULES, checkRateLimit } from '../ratelimit.ts'
 
 export class AuthError extends Error {}
 
@@ -37,4 +40,37 @@ export function requireRole(req: FastifyRequest, role: Role): User {
 
 export function actorIp(req: FastifyRequest): string | null {
   return req.ip ?? null
+}
+
+/**
+ * 限流。超限时抛 429，并记一条审计。
+ *
+ * `globalKey = true` 表示**不把请求来源 IP 拼进键里**。
+ * 用于"针对某个资源"的限流（例如某个用户名、某个账号的动态口令）——
+ * 这类限流如果带上 IP，攻击者换个 IP 就绕过了。
+ *
+ * 放在这里而不是 index.ts：拆出去的路由模块（board/poll/music…）也要限流，
+ * 留在入口文件里它们就只能反向 import index.ts —— 那是循环依赖。
+ * 搬的时候一行逻辑都没改（路由快照与全量测试都逐条比对过）。
+ */
+export function enforceRateLimit(
+  req: FastifyRequest,
+  rule: keyof typeof RATE_RULES,
+  extraKey = '',
+  globalKey = false,
+): void {
+  const ip = actorIp(req) ?? 'unknown'
+  const key = globalKey ? `${rule}${extraKey}` : `${rule}:${ip}${extraKey}`
+  const result = checkRateLimit(key, RATE_RULES[rule])
+  if (result.allowed) return
+
+  audit({
+    actorId: currentUser(req)?.id ?? null,
+    actorIp: ip,
+    category: 'auth',
+    action: 'rate-limited',
+    target: rule,
+    payload: { retryAfterSeconds: result.retryAfterSeconds, extraKey, globalKey },
+  })
+  throw new HttpError(429, `操作过于频繁，请 ${result.retryAfterSeconds} 秒后再试`)
 }

@@ -238,6 +238,48 @@ console.log('\n【撤回与删除】')
   assert(missingDel.status === 404, '删除不存在的留言也是 404', `状态 ${missingDel.status}`)
 }
 
+console.log('\n【发帖限流（按账号计）】')
+
+{
+  // 专门开一个新账号。限流的计数是按 userId 累积的，复用上面的 member 就等于
+  // 把"它已经发过几条"也算进窗口 —— 断言会变成依赖前面用例的加减法，
+  // 以后谁挪动一条用例，这里就莫名其妙地红了。
+  const spammer = await makeMember(`boardf${SUFFIX}`, '灌水的人')
+
+  let allowed = 0
+  let firstBlocked = null
+  // RATE_RULES.boardPost 是 30 条/小时：前 30 条必须放行，第 31 条必须被挡。
+  for (let i = 1; i <= 31; i++) {
+    const res = await spammer('/api/board/posts', 'POST', { kind: 'idea', body: `灌水第 ${i} 条` })
+    if (res.status === 200) allowed++
+    else if (firstBlocked === null) firstBlocked = { at: i, status: res.status, body: res.body }
+  }
+  assert(allowed === 30, '同一账号前 30 条都能发', `实际成功 ${allowed} 条`)
+  assert(firstBlocked?.at === 31, '第 31 条被限流挡住', `第一次被挡是第 ${firstBlocked?.at} 条`)
+  assert(
+    firstBlocked?.status === 429,
+    '被挡的那条是 429（不是 400/403/500）',
+    `状态 ${firstBlocked?.status}`,
+  )
+  // 文案也要看：429 但不说"等多久"，用户只会反复重试，等于没限流。
+  assert(
+    typeof firstBlocked?.body?.error === 'string' && firstBlocked.body.error.includes('秒后再试'),
+    '429 的提示里带"多少秒后再试"',
+    String(firstBlocked?.body?.error),
+  )
+
+  // 这条才是"按账号计"的证据：测试里所有客户端共用 127.0.0.1 一个出口 IP，
+  // 限流键里要是拼了 IP，下面这个新账号的第一条也会被一起挡掉 ——
+  // 那正是社团办公室里"一个人刷屏、全屋发不出留言"的样子。
+  const bystander = await makeMember(`boardb${SUFFIX}`, '旁边的人')
+  const bystanderPost = await bystander('/api/board/posts', 'POST', { kind: 'bug', body: '另一个人还能发' })
+  assert(
+    bystanderPost.status === 200,
+    '换一个账号发 1 条仍然成功（同 IP 不互相误伤）',
+    `状态 ${bystanderPost.status}`,
+  )
+}
+
 console.log(
   `\n\x1b[1m结果\x1b[0m  通过 \x1b[32m${passed}\x1b[0m  失败 \x1b[31m${failed}\x1b[0m\n`,
 )

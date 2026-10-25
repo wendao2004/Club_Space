@@ -11,6 +11,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
+import ToastHost from '@/desktop/ToastHost.vue'
 import { APPS, appComponents, findApp, type AppDef } from '@/apps/registry'
 import {
   api,
@@ -86,6 +87,14 @@ function launchApp(app: AppDef): void {
 function closeApp(): void {
   openAppId.value = ''
 }
+
+/**
+ * 打开的应用是否要在顶部标注"请在电脑上使用"。
+ *
+ * 只标注、不下架：这些应用在手机上进来还能看（狼人杀的牌面、文件的目录），
+ * 直接藏掉等于把只读能力也砍了；但什么都不说，用户只会以为应用坏了。
+ */
+const mobileHint = computed<string | null>(() => openApp.value?.mobileHint ?? null)
 
 /** 开始/关于等抽屉里出现过的应用（过滤掉非管理员看不到的管理台）。 */
 const visibleApps = computed<AppDef[]>(() =>
@@ -471,10 +480,21 @@ onBeforeUnmount(() => {
         </button>
         <span class="app__title">{{ openApp?.name ?? '应用' }}</span>
       </header>
+      <!-- 排不开的应用如实标注一句，不让手机用户对着挤成一团的界面猜哪里出错了 -->
+      <p v-if="mobileHint" class="app__hint">
+        <Icon name="info" :size="14" />
+        <span>{{ mobileHint }}</span>
+      </p>
       <div class="app__body">
         <component :is="appComponents[openAppId]" :win="openWin" />
       </div>
     </div>
+
+    <!--
+      通知宿主：桌面外壳里本来就有，移动端一直漏挂 —— 于是所有 ui.notify('error', ...)
+      在手机上都是静默消失的（音乐房、工具集的报错都走这条路）。
+    -->
+    <ToastHost />
   </div>
 </template>
 
@@ -1061,6 +1081,19 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.app__hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-tight);
 }
 
 .app__body {

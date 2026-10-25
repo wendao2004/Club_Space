@@ -17,10 +17,25 @@
      （目前只有聊天新消息），见 stores/chat.ts 的 notifyIncoming。
 -->
 <script setup lang="ts">
+import { computed } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { useUi, type Toast } from '@/stores/ui'
 
 const ui = useUi()
+
+/**
+ * 移动端的通知要躲开底部 Tab 栏。
+ *
+ * 桌面外壳的定位是 bottom: taskbar-h + space-4（任务栏 48px），但移动壳底部
+ * 是一条 56px + 安全区的 Tab 栏，48px 的偏移量不够，toast 会被压住半截。
+ * 这里只调底部偏移量，其余（宽度 340px 收成 max-width: 100vw - 32px、右下角
+ * 对齐）在手机上都本来就合适。
+ */
+const bottomInset = computed(() =>
+  ui.mobile
+    ? 'calc(56px + env(safe-area-inset-bottom) + var(--space-4))'
+    : 'calc(var(--taskbar-h) + var(--space-4))',
+)
 
 const icons: Record<string, string> = {
   info: 'info',
@@ -43,7 +58,7 @@ function onToastClick(toast: Toast): void {
 
 <template>
   <Teleport to="body">
-    <div class="toasts">
+    <div class="toasts" :style="{ bottom: bottomInset }">
       <TransitionGroup name="toast">
         <div
           v-for="toast in ui.toasts"

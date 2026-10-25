@@ -29,6 +29,7 @@ import type {
 } from '@/api'
 import { useAuth } from '@/stores/auth'
 import { useChat } from '@/stores/chat'
+import { useRealtime } from '@/stores/realtime'
 import { useUi } from '@/stores/ui'
 import type { WindowInstance } from '@/stores/windows'
 import { notificationPermission, requestNotificationPermission } from '@/lib/notify'
@@ -37,6 +38,34 @@ const props = defineProps<{ win: WindowInstance }>()
 
 const auth = useAuth()
 const chat = useChat()
+const rt = useRealtime()
+
+/**
+ * 聊天窗口顶部的断线横幅。
+ *
+ * 只看 rt.connected 不够：ChatApp 一挂载就会调 chat.connect()，在 EventSource
+ * 的 onopen 之前它一直是 false，横幅会在每次打开窗口时闪一下。正常网络下天天
+ * 见到这句"连接已断开"，喊几次狼来了之后，真断线时没人会再看它。
+ *
+ * 所以加两个前置条件，任一成立才算真断了：
+ *   - everConnected：这条连接曾经通过；
+ *   - consecutiveFailures：onerror 真的响过（首次连接就打不通也会响，正是要报的情况）。
+ */
+const everConnected = ref(rt.connected)
+watch(
+  () => rt.connected,
+  (connected) => {
+    if (connected) everConnected.value = true
+  },
+  { immediate: true },
+)
+
+const offline = computed(
+  () => !rt.connected && (everConnected.value || rt.consecutiveFailures > 0),
+)
+
+// 不显示 rt.reconnects：store 的 onopen 先置 connected 再让首个 hello 自增，页面正常
+// 打开一次它就已经是 1，拿它说"已重连 N 次"是假话。报不准还不如不报。
 
 const myId = computed(() => auth.user?.id ?? '')
 
@@ -762,6 +791,12 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="rootEl" class="chat" :data-window-id="props.win.id">
+    <!-- 断线横幅：正常连接时整行不出现，不占位。恢复后自动收起（v-if 跟着 rt.connected） -->
+    <div v-if="offline" class="chat__offline" role="status" aria-live="polite">
+      <Icon name="wifi" :size="15" />
+      <span class="chat__offline-text">连接已断开，正在重试… 这段时间收不到新消息</span>
+    </div>
+
     <div class="chat__body">
       <!-- ------------------------------------------------ 会话列表 -->
       <aside
@@ -1366,6 +1401,29 @@ onBeforeUnmount(() => {
   display: flex;
   flex: 1;
   min-height: 0;
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- 断线横幅 */
+
+/* 用 warning 而不是 danger：连接断了但 EventSource 正在自己重试，是"暂时不对"，
+   不是"出错了"；染成红色的错误条会让人以为消息发丢了要重发 */
+.chat__offline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  margin: var(--space-2) var(--space-2) 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-tight);
+}
+
+.chat__offline-text {
+  flex: 1;
   min-width: 0;
 }
 

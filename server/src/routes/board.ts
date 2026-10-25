@@ -19,7 +19,7 @@ import {
 import { audit } from '../audit.ts'
 import { broadcast } from '../realtime.ts'
 import { roleAtLeast } from '../auth.ts'
-import { actorIp, requireUser } from './auth-guard.ts'
+import { actorIp, enforceRateLimit, requireUser } from './auth-guard.ts'
 
 /**
  * 留言板（全站一份，登录即可读写）。
@@ -46,6 +46,9 @@ export function registerBoardRoutes(app: FastifyInstance): void {
 
   app.post('/api/board/posts', async (req) => {
     const user = requireUser(req)
+    // 按账号限流：留言板全站一份，一个人刷屏就会把别人的留言挤出列表首页，
+    // 而 NAT 后面的办公室按 IP 计会互相误伤（见 RATE_RULES.boardPost 的说明）。
+    enforceRateLimit(req, 'boardPost', `:${user.id}`, true)
     const body = req.body as { kind?: unknown; body?: unknown }
     const post = createBoardPost({
       authorId: user.id,

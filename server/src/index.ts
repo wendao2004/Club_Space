@@ -76,7 +76,7 @@ import {
   connectedUserIds,
   disconnectAll,
 } from './realtime.ts'
-import { RATE_RULES, checkRateLimit, clearRateLimit, rateLimitStats } from './ratelimit.ts'
+import { clearRateLimit, rateLimitStats } from './ratelimit.ts'
 import {
   AdminError,
   checkGate,
@@ -109,10 +109,18 @@ import {
   type RoomView,
 } from './games/rooms.ts'
 import { shutdownBotRunner } from './games/bot-runner.ts'
-import { AuthError, ForbiddenError, actorIp, requireRole, requireUser } from './routes/auth-guard.ts'
+import {
+  AuthError,
+  ForbiddenError,
+  actorIp,
+  enforceRateLimit,
+  requireRole,
+  requireUser,
+} from './routes/auth-guard.ts'
 import { registerBoardRoutes } from './routes/board.ts'
 import { registerPollRoutes } from './routes/poll.ts'
 import { musicPurgeDeleted, registerMusicRoutes } from './routes/music.ts'
+import { registerMusicOnlineRoutes } from './routes/music-online.ts'
 import { isRoomTrack } from './music.ts'
 import { registerTypingRoutes } from './routes/typing.ts'
 import { registerWhiteboardRoutes } from './routes/whiteboard.ts'
@@ -305,34 +313,9 @@ function spaceOf(req: FastifyRequest): Space {
 /** 会话成员 id 列表，供实时推送决定发给谁。 */
 const memberIdsOf = memberIds
 
-/**
- * 限流。超限时抛 429，并记一条审计。
- *
- * `globalKey = true` 表示**不把请求来源 IP 拼进键里**。
- * 用于"针对某个资源"的限流（例如某个用户名、某个账号的动态口令）——
- * 这类限流如果带上 IP，攻击者换个 IP 就绕过了。
- */
-function enforceRateLimit(
-  req: FastifyRequest,
-  rule: keyof typeof RATE_RULES,
-  extraKey = '',
-  globalKey = false,
-): void {
-  const ip = actorIp(req) ?? 'unknown'
-  const key = globalKey ? `${rule}${extraKey}` : `${rule}:${ip}${extraKey}`
-  const result = checkRateLimit(key, RATE_RULES[rule])
-  if (result.allowed) return
-
-  audit({
-    actorId: currentUser(req)?.id ?? null,
-    actorIp: ip,
-    category: 'auth',
-    action: 'rate-limited',
-    target: rule,
-    payload: { retryAfterSeconds: result.retryAfterSeconds, extraKey, globalKey },
-  })
-  throw new HttpError(429, `操作过于频繁，请 ${result.retryAfterSeconds} 秒后再试`)
-}
+// enforceRateLimit 已搬到 routes/auth-guard.ts —— 与 requireUser 同理：
+// 拆出去的路由模块也要限流，留在入口文件里就只能反向 import index.ts。
+// 行为一行没改，import 的是同一个函数对象。
 
 // 统一的错误响应：把各类错误翻译成合适的状态码
 app.setErrorHandler((err: FastifyError, req, reply) => {
@@ -3974,6 +3957,8 @@ registerDrawRoutes(app)
 registerBoardRoutes(app)
 registerPollRoutes(app)
 registerMusicRoutes(app)
+// 在线曲库（哔哩哔哩搜索 + 服务端代理拉流）：与听歌房文件区并列，但绝不进队列/不广播。
+registerMusicOnlineRoutes(app)
 registerTypingRoutes(app)
 registerWhiteboardRoutes(app)
 

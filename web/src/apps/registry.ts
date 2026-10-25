@@ -33,6 +33,14 @@ export interface AppDef {
   resizable?: boolean
   /** 需要管理员权限 */
   adminOnly?: boolean
+  /**
+   * 移动端打开时在返回栏下方给出的一句提醒。
+   *
+   * 刻意做成"标注"而不是"隐藏/禁用"：手机上没有上传入口的文件管理和
+   * 固定两栏的狼人杀，进来至少还能看，直接下架等于把已有的只读能力也砍掉；
+   * 但什么都不说，用户只会觉得应用坏了。只给结构上真的排不开的应用配这个字段。
+   */
+  mobileHint?: string
   component: () => Promise<{ default: Component }>
 }
 
@@ -61,6 +69,7 @@ export const APPS: AppDef[] = [
     group: '常用',
     defaultSize: { w: 980, h: 620 },
     minSize: { w: 520, h: 360 },
+    mobileHint: '请在电脑上使用：侧栏固定 180px，手机屏幕放不下，而且手机端没有上传入口',
     component: () => import('@/apps/FileManagerApp.vue'),
   },
   {
@@ -139,6 +148,7 @@ export const APPS: AppDef[] = [
     group: '常用',
     defaultSize: { w: 1080, h: 720 },
     minSize: { w: 640, h: 500 },
+    mobileHint: '请在电脑上使用：牌桌是"1fr + 290px"两栏，手机上主体只剩一条缝',
     component: () => import('@/apps/WerewolfApp.vue'),
   },
   {

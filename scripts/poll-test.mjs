@@ -223,7 +223,11 @@ let expireTarget = (await creator('/api/polls', 'POST', {
 })).body.poll
 {
   const { DatabaseSync } = await import('node:sqlite')
-  const path = process.env.WL_TEST_DB ?? '.test-data-3100/app.sqlite'
+  // 数据目录跟着端口走，别写死 3100 —— 用 WL_TEST_PORT 另开端口跑测试时
+  // (并发跑、或本机 3100 被占)，写死的路径会指向一个不存在的库：改库这条
+  // update 静默不生效（SQLite 会自己建一个空文件），于是"截止后不能投票"
+  // 变成假失败 —— 而真正的原因在测试自己身上，不在产品代码里。
+  const path = process.env.WL_TEST_DB ?? `.test-data-${process.env.WL_TEST_PORT ?? 3100}/app.sqlite`
   const db = new DatabaseSync(path)
   db.prepare('UPDATE polls SET deadline_at = ? WHERE id = ?').run(Date.now() - 1000, expireTarget.id)
   db.close()

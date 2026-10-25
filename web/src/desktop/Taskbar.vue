@@ -12,6 +12,7 @@ import { findApp } from '@/apps/registry'
 import { previewSystem, setMuted, setVolume, soundState } from '@/lib/sfx'
 import { useAuth } from '@/stores/auth'
 import { useChat } from '@/stores/chat'
+import { useRealtime } from '@/stores/realtime'
 import { badgeText, useTodos } from '@/stores/todos'
 import { useUi } from '@/stores/ui'
 import { useWindows, type WindowInstance } from '@/stores/windows'
@@ -24,9 +25,34 @@ const auth = useAuth()
 const ui = useUi()
 const chat = useChat()
 const todos = useTodos()
+const rt = useRealtime()
 
 // 未读角标：连接一次就够，任务栏是常驻的。
 // 具体在下面的 onMounted 里发起（等 clock 等状态都声明完再挂，省得顺序上互相牵扯）。
+
+// ---------------------------------------------------------------- 连接状态
+//
+// realtime store 早在维护 connected / reconnects，但这之前没有任何界面读它：
+// 断网时界面一切正常、消息却一条不来 —— 见 stores/realtime.ts 里记的那次"歌还
+// 在放，但和全厅不一样了，而且没有任何提示"。任务栏是常驻组件，托盘的这一个
+// 图标就是全局唯一的兜底提示，管所有应用（不只是聊天）。
+
+/**
+ * 托盘里是否要显示连接状态。
+ *
+ * **没断就一个像素都不占**（v-if，不是 v-show）：正常连接是最常见的状态，
+ * 为它留一个常驻图标等于在托盘里凭空多一个东西，久了就没人看它了。
+ *
+ * 反过来，"从来就没连上"也必须显示（后端没起来 / 内网断了），所以判据是
+ * "connected 为假 且 onerror 已经响过"。onerror 之前 connected 也是假，
+ * 但那只说明 EventSource 还在呼救，不是结果 —— 用 consecutiveFailures 兜住，
+ * 免得刚打开页面时先闪一下"连接已断开"。
+ */
+const connectionLost = computed(() => !rt.connected && rt.consecutiveFailures > 0)
+
+// 刻意不显示 rt.reconnects 里的次数：store 里 onopen 先把 connected 置真、随后的首个
+// hello 再自增一次，所以页面正常打开一次它就已经是 1，"已重连 1 次"是假话。宁可不报数。
+const OFFLINE_TITLE = '连接已断开，正在重试…'
 
 const startButton = ref<HTMLElement | null>(null)
 const clock = ref(formatClock())
@@ -269,6 +295,20 @@ onBeforeUnmount(() => {
 
     <!-- 右：托盘 -->
     <div class="taskbar__right">
+      <!--
+        连接状态：只在断线/重连中出现。正常时整块不存在（v-if），不占位。
+        点一下立刻重连 —— realtime store 的 reconnect() 本来就是为这个按钮准备的。
+      -->
+      <button
+        v-if="connectionLost"
+        class="taskbar__tray taskbar__tray--offline"
+        :title="OFFLINE_TITLE"
+        aria-label="连接状态"
+        @click="rt.reconnect()"
+      >
+        <Icon name="wifi" :size="15" />
+      </button>
+
       <button
         ref="volumeAnchor"
         class="taskbar__tray"
@@ -515,6 +555,16 @@ onBeforeUnmount(() => {
 .taskbar__tray:hover {
   background: var(--hover);
   color: var(--text);
+}
+
+/* 断线指示：warning 色，和"正在重试"的语义对齐；不需要额外的图标位 */
+.taskbar__tray--offline {
+  color: var(--warning);
+}
+
+.taskbar__tray--offline:hover {
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 
 .taskbar__clock {

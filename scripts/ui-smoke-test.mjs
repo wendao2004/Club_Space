@@ -4231,6 +4231,53 @@ async function main() {
       realConsole.slice(0, 3).join(' | ') || '无',
     )
 
+    // ---- 刷新后恢复窗口布局 ----
+    //
+    // 这条功能 README 第 24 行当卖点写着（"刷新页面后恢复上次打开的窗口布局"），
+    // 但测试里**一条正向断言都没有**：本文件开头只会 removeItem 把它抹掉，
+    // 好让"窗口数"类断言可重复。抹掉不等于验过 —— 恢复逻辑坏掉时，前面所有
+    // 断言照样全绿。
+    //
+    // 这里直接塞一份已知布局再重载，量的是"真的恢复出来了"，不是去 grep 代码。
+    console.log('\n【窗口布局恢复（刷新后）】')
+
+    const seededLayout = [
+      { appId: 'files', title: '文件', args: {}, x: 40, y: 40, w: 900, h: 600, maximized: false },
+      { appId: 'tools', title: '工具集', args: {}, x: 120, y: 120, w: 820, h: 560, maximized: false },
+      { appId: 'board', title: '留言板', args: {}, x: 200, y: 200, w: 760, h: 520, maximized: false },
+    ]
+    await cdp.send(
+      'Runtime.evaluate',
+      { expression: `localStorage.setItem('wl.desktop.layout', ${JSON.stringify(JSON.stringify(seededLayout))})` },
+      sessionId,
+    )
+    await cdp.send('Page.navigate', { url: `${BASE}/` }, sessionId)
+    await sleep(3500)
+
+    const restored = await evaluate(`JSON.stringify({
+      windowCount: document.querySelectorAll('.window').length,
+      titles: [...document.querySelectorAll('.window__title')].map((e) => e.textContent.trim()),
+      taskbarApps: document.querySelectorAll('.taskbar__app').length,
+    })`)
+    const rs = JSON.parse(restored ?? '{}')
+    assert(rs.windowCount === 3, '刷新后恢复了 3 个窗口', `${rs.windowCount} 个`)
+    // 用前缀匹配而不是全等：应用挂载后可以细化自己的标题 —— 文件管理器就会把
+    // 当前空间拼进去（存的是"文件"，恢复后显示"文件 · 共享空间"）。那是应用在
+    // 正常工作，不是恢复错了；拿全等去比会把它误判成失败。
+    assert(
+      seededLayout.every((s) => (rs.titles ?? []).some((t) => t.startsWith(s.title))),
+      '恢复出来的窗口标题与保存时一致',
+      `期望 ${seededLayout.map((s) => s.title).join('、')}；实际 ${(rs.titles ?? []).join('、')}`,
+    )
+    assert(rs.taskbarApps === 3, '恢复的窗口也在任务栏上有按钮', `${rs.taskbarApps} 个按钮`)
+
+    // 收拾干净：后面还要跑移动端段，别把这份布局留给下一次运行
+    await cdp.send(
+      'Runtime.evaluate',
+      { expression: `localStorage.removeItem('wl.desktop.layout')` },
+      sessionId,
+    )
+
     // ---- 移动端外壳：把视口缩到手机尺寸，应当切到移动界面而不是把桌面缩小 ----
     console.log('\n【移动端外壳（窄视口）】')
     await cdp.send(
