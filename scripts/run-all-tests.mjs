@@ -230,6 +230,39 @@ const only = onlyArg
   ? (args[args.indexOf(onlyArg) + 1] ?? '').split(',').map((s) => s.trim()).filter(Boolean)
   : null
 const skipUi = args.includes('--skip-ui')
+const listOnly = args.includes('--list')
+
+/** 全部已知套件名 —— 用来把 --only 的拼写错误变成错误，而不是静默的空跑。 */
+const KNOWN_SUITES = [...OFFLINE_TESTS, ...ONLINE_TESTS].map((t) => t.name)
+
+if (listOnly) {
+  console.log('\n\x1b[1m可用套件\x1b[0m')
+  for (const t of [...OFFLINE_TESTS, ...ONLINE_TESTS]) console.log('  ' + t.name.padEnd(26) + t.label)
+  console.log('')
+  process.exit(0)
+}
+
+/**
+ * --only 的名字必须真的存在。
+ *
+ * 为什么这里值得拦一道：--only 是唯一能只跑一个套件的开关，而拼错名字
+ * （例如写成 ui-smoke 而不是 ui-smoke-test）时，过滤结果为空 —— 进程会跑
+ * 0 个套件、打印「通过 0 失败 0」并以 **0** 退出。也就是说拼错了一个字母，
+ * 却拿到了一次成功的退出码，还顺手在日志里留下一条“全绿”记录。
+ * 这比某个断言写错更危险：它让“没跑”和“通过”长得一模一样。
+ */
+function validateOnly() {
+  if (!only) return
+  const unknown = only.filter((n) => !KNOWN_SUITES.includes(n))
+  if (unknown.length === 0) return
+  const hint = unknown.map((n) => {
+    const close = KNOWN_SUITES.filter((k) => k.includes(n) || n.includes(k))
+    return '  ' + n + (close.length ? '  ← 是不是想写：' + close.join(' / ') : '')
+  }).join('\n')
+  console.error('\n\x1b[31m--only 里有不存在的套件名：\x1b[0m\n' + hint + '\n')
+  console.error('\x1b[90m可用套件名见：node scripts/run-all-tests.mjs --list\x1b[0m\n')
+  process.exit(1)
+}
 
 function wanted(test) {
   if (skipUi && test.name === 'ui-smoke-test') return false
@@ -361,6 +394,8 @@ let totalPassed = 0
 let totalFailed = 0
 const failures = []
 const crashedTests = []
+/** 跑了但一条断言都没执行的套件（例如缺 openssl 时跳过的证书用例）。 */
+const zeroAssertionSuites = []
 /** 上一次 runTest 是否真的跑起来了（输出里有没有结果行）。 */
 let lastRunProducedOutput = false
 
@@ -391,12 +426,29 @@ function runTest(test, isRetry = false) {
   const crashed = match === null
   const failed = match ? Number(match[2]) : 1
 
+  // 跑了但一条断言都没执行：这是**第三种状态**，既不是通过也不是失败。
+  //
+  // 真实例子：cert-health-test 在缺 openssl 的机器上会打印跳过并 exit 0，
+  // 于是它显示为「通过 0 失败 0」的绿字 —— 而那 12 条断言（证书快到期时
+  // 健康检查该降级而不是 503）根本没跑过。一个什么都没验的套件与
+  // 一个全绿的套件长得一模一样，这才是最坏的形态。
+  //
+  // 这里不把它算作失败（环境缺件不该伪装成代码问题），但必须**显式标出来**，
+  // 并计入 zeroAssertionSuites 在汇总里点名 —— 让“没验”永远无法冒充“验过了”。
+  const zeroAssertions = !crashed && passed === 0 && failed === 0
+  if (zeroAssertions) zeroAssertionSuites.push({ name, label })
+
   lastRunProducedOutput = match !== null
   totalPassed += passed
   totalFailed += failed
   if (crashed) crashedTests.push({ name, label })
 
-  const status = result.status === 0 && !crashed ? '\x1b[32m通过\x1b[0m' : '\x1b[31m失败\x1b[0m'
+  const status =
+    result.status === 0 && !crashed
+      ? zeroAssertions
+        ? '\x1b[33m空跑\x1b[0m'
+        : '\x1b[32m通过\x1b[0m'
+      : '\x1b[31m失败\x1b[0m'
   console.log(
     `  ${status}  ${label.padEnd(28, ' ')} 通过 ${String(passed).padStart(3)}  失败 ${String(failed).padStart(2)}${crashed ? '  \x1b[31m(测试进程崩溃，没有输出结果行)\x1b[0m' : ''}${isRetry ? '  \x1b[90m(重试)\x1b[0m' : ''}`,
   )
@@ -408,6 +460,7 @@ function runTest(test, isRetry = false) {
 }
 
 async function main() {
+  validateOnly()
   console.log('\n\x1b[1m全部测试\x1b[0m\n')
 
   // ---- 纯逻辑测试 ----
@@ -458,10 +511,40 @@ async function main() {
   if (!ok) {
     for (const f of failures) {
       console.log(`\x1b[31m──── ${f.name} 的输出 ────\x1b[0m`)
-      const lines = f.output.split('\n').filter((l) => l.includes('✗') || l.includes('Error') || l.includes('异常'))
-      console.log(lines.slice(0, 20).join('\n') || f.output.slice(-1500))
+      // 只抽含 ✗ 的行会丢掉最要紧的那一行：本仓库的 bad() 把「期望 / 实际」
+      // 写在 ✗ 的**下一行**且带缩进（见各 scripts/*.mjs 的 bad 实现），于是
+      // 过滤后只剩一句「某某断言失败」，看不到到底期望什么、实际是什么。
+      //
+      // 另一个坑：Windows 上输出是 CRLF，用 split('\n') 拿到的行尾带 '\r'，
+      // 打印时终端会把光标移回行首、后续行覆盖前一行 —— 表现是详情看似被吞掉。
+      // 所以先统一换行，再连同 ✗ 后面的续行一起保留。
+      const all = f.output.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+      const picked = []
+      for (let i = 0; i < all.length; i++) {
+        const line = all[i]
+        if (line.includes('✗') || line.includes('Error') || line.includes('异常')) {
+          picked.push(line)
+          for (let k = 1; k <= 2 && i + k < all.length; k++) {
+            const next = all[i + k]
+            if (!next || next.trim() === '') break
+            if (!/^\s{2,}/.test(next)) break
+            picked.push(next)
+          }
+        }
+      }
+      console.log(picked.slice(0, 40).join('\n') || f.output.slice(-1500))
       console.log('')
     }
+  }
+
+  // 空跑套件必须在汇总里点名：它们的“通过”没有验证任何东西。
+  // 不判失败（缺 openssl 这类是环境问题），但**绝不静默**。
+  if (zeroAssertionSuites.length > 0) {
+    console.log(
+      '\x1b[33m注意：以下套件一条断言都没执行（环境缺件或全部跳过），它们的“通过”不代表验证过：\x1b[0m',
+    )
+    for (const z of zeroAssertionSuites) console.log(`  \x1b[33m· ${z.name}\x1b[0m  ${z.label}`)
+    console.log('')
   }
 
   cleanupDataDir(ok)
