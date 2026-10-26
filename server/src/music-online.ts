@@ -36,12 +36,12 @@
  *      "慢一点"不等于"播不了" —— 缓存是旁路，永远不是播放的前置条件。
  */
 import { appendFile, createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, readdir, rename, rm, stat, statfs } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
-import { TMP_DIR } from './config.ts'
+import { MIN_FREE_BYTES, TMP_DIR } from './config.ts'
 
 /** 唯一的 provider。写成常量而不是字面量散落各处，前端/接口契约只有一个来源。 */
 export const MUSIC_ONLINE_PROVIDER = 'bilibili' as const
@@ -751,14 +751,60 @@ export async function openOnlineStream(
 const ONLINE_AUDIO_DIR = join(TMP_DIR, 'online-audio')
 
 /**
- * 缓存总上限 2GiB。
+ * 从环境变量读一个正整数，读不到/不合法就用传进来的默认值（同 config.ts 的写法）。
+ *
+ * 为什么在本地再写一份而不是从 config.ts 导出：缓存上限是**这一个小模块自己的**
+ * 运维旋钮，塞进 config.ts 会让那个文件变成"什么都往里放的杂物箱"，而且
+ * config.ts 是 import 时求值的 —— 测试脚本要在 import 本模块之前就能把 env 指过去，
+ * 本地求值在这里更好理解（本模块本来就已经在 import 时读 TMP_DIR）。
+ */
+function cacheEnvInt(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+  const n = Number.parseInt(raw, 10)
+  return Number.isFinite(n) && n >= 0 ? n : fallback
+}
+
+/**
+ * 缓存总上限。**默认 2GiB，可用 WL_ONLINE_CACHE_MAX_BYTES 覆盖。**
+ * 设成 0 表示"这首盘不让给它任何空间"，于是缓存写入整个短路（播放照走直连代理）。
  *
  * 上限的意义不是"省磁盘"，而是**挡住一条无限增长的路径**：每听一首多一个文件，
  * 没有上限时 NAS 迟早被这个功能塞满，而症状会表现为"整个服务上传都失败" ——
  * 一个听歌功能把文件服务搞挂了，谁都不会第一时间想到是它。
  * 2GiB ≈ 300 首 128k，远超一个社团房间一晚上听的量。
+ *
+ * 为什么必须有 env 覆盖：这个数是"总共留多少给听歌缓存"的**策略**，而
+ * MIN_FREE_BYTES 是"这台机器的安全线"。两者的合适比例取决于盘有多大
+ * （一块 8TB 的盘和一块 64GB 的盘不该用同一个绝对数字）。原来是硬编码常量、
+ * 运维改不了 —— 一旦这个值恰好等于或大于安全线，缓存就会在守卫放行的同时
+ * 把盘继续吃下去，而且只能靠改代码才能调。
  */
-export const ONLINE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+export const ONLINE_CACHE_MAX_BYTES = cacheEnvInt('WL_ONLINE_CACHE_MAX_BYTES', 2 * 1024 * 1024 * 1024)
+
+/**
+ * 孤儿 .part 的判定阈值：mtime 超过这么久没动过才算"上次进程留下的尸体"。**默认 30 分钟。**
+ *
+ * 判据必须是 **mtime 足够旧**，不能是"存在就删"：.part 正是**正在进行中**的下载
+ * （见 partPath 与 attachOnlineCacheTee / downloadOnlineTrack），现在可能正有另一个
+ * 请求在往里写。存在即删会删掉别人手上的 .part —— 在 Windows 上那次写还会失败，
+ * 在 Linux 上更糟：那个 fd 还能继续写进一个已经没有名字的 inode，白写一场，
+ * 而缓存永远凑不齐。所以只有"很久没人碰过"这个状态才排除了"有人正在写"。
+ *
+ * 30 分钟的依据：单首上限 128MB，哪怕按 200KB/s 的龟速也只需 ~11 分钟，
+ * 30 分钟足够慢网络把一首歌唱完；而进程被强杀留下的尸体只会越来越旧，
+ * 多等 30 分钟对"回收"这件事没有任何损失。
+ */
+export const ONLINE_STALE_PART_MS = cacheEnvInt('WL_ONLINE_STALE_PART_MS', 30 * 60_000)
+
+/**
+ * 缓存写盘前要留的磁盘余量（字节），默认沿用全站安全线 MIN_FREE_BYTES。
+ *
+ * 单独开一个 env 只是为了能**在不改代码的前提下验证降级路径**（把它设成大于当前
+ * 余量的值，缓存就必须自动退化成纯代理）。生产环境不设它就等于直接用
+ * WL_MIN_FREE_BYTES —— 即"缓存和上传守的是同一条线"，这正是本模块要的语义。
+ */
+export const ONLINE_CACHE_MIN_FREE_BYTES = cacheEnvInt('WL_ONLINE_CACHE_MIN_FREE_BYTES', MIN_FREE_BYTES)
 
 /** 单首上限：防止一个异常大的响应把缓存目录写爆（128MB ≈ 一小时的 256k 音频）。 */
 const ONLINE_CACHE_MAX_TRACK_BYTES = 128 * 1024 * 1024
@@ -808,12 +854,70 @@ async function cachedSize(bvid: string): Promise<number | null> {
 const downloads = new Map<string, Promise<void>>()
 
 /**
- * LRU 清理：超限时按 mtime 最旧的先删。
+ * 缓存写盘前的磁盘余量守卫（与 files.ts 的 assertDiskSpace 同一条安全线）。
+ *
+ * 为什么必须在这里补一道：上传（files.ts）与在线编辑保存（index.ts）都过
+ * assertDiskSpace，而缓存曾经是**全站唯一绕过那条守卫的写盘路径** ——
+ * 它自己有个 2GiB 的"总量上限"，可那个数恰好等于整条安全线，于是"缓存写满
+ * 2GiB"和"整机只剩 2GiB"这两件事在同一个数字上撞车：缓存觉得还早，机器已经
+ * 到了不允许再写的位置。而且 trim 是**事后**触发的（rename 之后才调），
+ * 也就是说超限那一刻字节已经落在盘上了。
+ *
+ * 返回 true = 还可以写；false = 这盘现在不该再添东西了。
+ * **注意它不抛异常**：缓存是旁路，磁盘紧张只该让缓存降级成纯代理，
+ * 绝不许让一次播放变成 507 —— 播放能不能听和缓存写不写得进是两件事。
+ * 所以这里刻意不复用会抛 HttpError 的 assertDiskSpace，而是把它判断的那一条
+ * 不变量（"写完至少还剩 MIN_FREE_BYTES"）照抄过来，返回值化。
+ * 拿不到 statfs 时放行，理由同 assertDiskSpace：宁可放行，也不要因为一个统计
+ * 调用失败就禁用整个功能，真写不下时写盘那一步会自己报错。
+ */
+/**
+ * 缓存额度是否还存在（WL_ONLINE_CACHE_MAX_BYTES=0 表示运维关掉了这个功能）。
+ *
+ * 单独抽出来是因为它是**策略开关**而不是"空间够不够"：额度为 0 时连磁盘状态都
+ * 不该关心，也不该先写一份再让 trim 去删。
+ */
+function hasOnlineCacheQuota(): boolean {
+  return ONLINE_CACHE_MAX_BYTES > 0
+}
+
+async function hasOnlineCacheDiskRoom(neededBytes: number): Promise<boolean> {
+  if (ONLINE_CACHE_MIN_FREE_BYTES <= 0) return true
+  let free: number
+  try {
+    const info = await statfs(TMP_DIR)
+    // bavail 是"非特权用户还能用的块数"，容器进程就是非特权用户（同 files.ts）。
+    const unit = Number(info.bsize) || Number(info.frsize) || 4096
+    free = Number(info.bavail) * unit
+  } catch {
+    return true
+  }
+  const room = free - neededBytes >= ONLINE_CACHE_MIN_FREE_BYTES
+  if (!room) {
+    trace('cache-skip disk ' + neededBytes + ' free=' + free)
+  }
+  return room
+}
+
+/**
+ * LRU 清理：**先回收陈旧的 .part 孤儿**，再按 mtime 最旧先删正式缓存。
  *
  * mtime 是"这个文件最后一次被写满的时间"，也就是它被预热/播放populate的时刻 ——
  * 用它当 LRU 的依据不需要额外记账。命中缓存时不改 mtime（否则每个 Range 请求
  * 都要一次 utimes，几十次写盘换一个更精确的 LRU 不值），所以它接近 FIFO；
  * 对这个用途够用：真正被反复听的歌会重新预热，mtime 自然就新。
+ *
+ * 为什么 .part 也要被扫（这是修掉的一个真实缺陷）：
+ *   上传的临时目录是 <DATA>/files/tmp（files.ts 的 cleanupStaleUploads 扫的是它），
+ *   而这里的缓存目录是 <DATA>/tmp/online-audio —— **两条完全不同的路径**，
+ *   以前没有任何代码扫后一个。而本函数只统计 .m4a（if (!name.endsWith('.m4a'))），
+ *   于是 .part 既不计入总量、也永远不会被删。进程被强杀（OOM / kill -9 /
+ *   升级重启）时正在写的那份 .part 就永久留在盘上，而且**不占那条 2GiB 额度**，
+ *   等于一条不受任何上限约束的泄漏路径。
+ *
+ * 为什么 .part 的判据是 mtime 而不是"存在即删"：.part 是正在写的那份文件本身，
+ * 存在恰恰说明"可能有人正在写"。按 mtime 超过阈值才删，才能把
+ * "上次进程的死尸"和"这一次正在下的歌"区分开。代价只是孤儿多躺 30 分钟。
  *
  * 失败一律静默：清理是维护动作，不该让播放失败。
  */
@@ -822,19 +926,32 @@ async function trimOnlineCache(): Promise<void> {
   try {
     const names = await readdir(ONLINE_AUDIO_DIR)
     const files: Array<{ path: string; size: number; mtimeMs: number }> = []
+    const cutoff = Date.now() - ONLINE_STALE_PART_MS
     let total = 0
+    let swept = 0
     for (const name of names) {
-      if (!name.endsWith('.m4a')) continue
       const full = join(ONLINE_AUDIO_DIR, name)
+      const isCache = name.endsWith('.m4a')
+      const isPart = name.endsWith('.part')
+      if (!isCache && !isPart) continue
       try {
         const info = await stat(full)
         if (!info.isFile()) continue
+        if (isPart) {
+          // 只回收"很久没人碰过"的 .part：新鲜的那份可能正在被别的请求写。
+          if (info.mtimeMs <= cutoff) {
+            await rm(full, { force: true })
+            swept += 1
+          }
+          continue
+        }
         files.push({ path: full, size: info.size, mtimeMs: info.mtimeMs })
         total += info.size
       } catch {
         // 刚被另一个请求删掉：正常竞争，跳过
       }
     }
+    if (swept > 0) trace('cache-sweep part=' + swept)
     if (total <= ONLINE_CACHE_MAX_BYTES) return
     files.sort((a, b) => a.mtimeMs - b.mtimeMs)
     for (const file of files) {
@@ -848,6 +965,20 @@ async function trimOnlineCache(): Promise<void> {
 }
 
 /**
+ * 启动清理入口：回收上次进程被强杀时留下的孤儿 .part，并顺带把超限的缓存裁回上限。
+ *
+ * 为什么需要一个**导出**的入口：目录错配的原状是"本模块的缓存目录没有任何代码扫"，
+ * 而扫它必须由本模块做（ONLINE_AUDIO_DIR 是这里的私有常量）。index.ts 的启动
+ * 清理段（与 cleanupStaleUploads 同一批）只需要调用它，不必知道目录长什么样。
+ *
+ * 幂等、不会误删正在写的那份（判据是 mtime，见 trimOnlineCache 的说明），
+ * 也绝不抛异常 —— 启动清理失败不该让服务起不来。
+ */
+export async function cleanupStaleOnlineCache(): Promise<void> {
+  await trimOnlineCache()
+}
+
+/**
  * 整首下载进缓存（预热的主干）。
  *
  * 拉的是**不带 Range** 的完整响应：我们要的就是完整文件，而 CDN 的 200 正是
@@ -857,7 +988,15 @@ async function trimOnlineCache(): Promise<void> {
  * "干净结束就算完整"，并且依旧受单首上限约束。
  */
 async function downloadOnlineTrack(bvid: string, urls: readonly string[]): Promise<void> {
+  // 额度归零 = 这个功能被运维关掉了，连目录都不碰。
+  // 必须先判这里再判余量：否则"设 0"会退化成"先写满一份再被 trim 删掉"，
+  // 那是白白写一趟盘，也让返回值变成"到底写没写"这件事难以断言。
+  if (!hasOnlineCacheQuota()) return
   if (!(await ensureOnlineCacheDir())) return
+  // 再问磁盘余量：不足就整个跳过（播放那边照走直连代理）。
+  // 放在 rm(part) 之前是刻意的 —— 不够空间时连"清掉旧 .part"这个副作用都不做，
+  // 让这次预热的痕迹为零。
+  if (!(await hasOnlineCacheDiskRoom(ONLINE_CACHE_MAX_TRACK_BYTES))) return
   const part = partPath(bvid)
   await rm(part, { force: true }).catch(() => {})
 
@@ -1049,12 +1188,17 @@ export async function attachOnlineCacheTee(
   signal: AbortSignal,
 ): Promise<NodeReadableStream<Uint8Array>> {
   if (teeStartOffset(info) !== 0) return body
+  // 额度归零 = 缓存被运维关掉了：直接原样返回上游字节流（纯代理）。
+  if (!hasOnlineCacheQuota()) return body
   if (downloads.has(bvid)) return body
   if ((await cachedSize(bvid)) !== null) return body
   if (!(await ensureOnlineCacheDir())) return body
 
   const expected = teeExpectedTotal(info)
   if (expected !== null && expected > ONLINE_CACHE_MAX_TRACK_BYTES) return body
+  // 磁盘余量不足 → **原样返回 body**，也就是降级成纯代理：这一路字节一个不少地
+  // 发给客户端，只是不落盘。返回 false/少发字节都是错的（那会把播放弄坏）。
+  if (!(await hasOnlineCacheDiskRoom(expected ?? ONLINE_CACHE_MAX_TRACK_BYTES))) return body
 
   const part = partPath(bvid)
   const out = createWriteStream(part)

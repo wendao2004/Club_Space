@@ -16,7 +16,19 @@
  *
  * 用法：node scripts/music-online-test.mjs（run-all-tests.mjs 会自己起服务端）
  */
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
+import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -39,6 +51,21 @@ const TRACE_PATH =
 let passed = 0
 let failed = 0
 let skipped = 0
+
+
+/**
+ * 兜住逃逸的 Promise 拒绝，把它变成一条**有名字的失败**而不是让进程当场退出。
+ *
+ * 为什么需要：这个套件里有几处真实网络的 fetch（真实上游探测、以及后面那几台
+ * 探针服务端的取流）。网络抖动时 undici 会抛 TypeError: terminated，如果没人
+ * 接住，Node 会带着堆栈退出 —— 于是运行器只能报"测试进程崩溃，没有输出结果行"，
+ * 全部断言信息一起丢失。那比不稳定更糟：一个静默放行的崩溃等于没有测试套件。
+ * 接住之后，失败仍然计为失败（不掩盖问题），只是留下了可读的证据。
+ */
+process.on('unhandledRejection', (reason) => {
+  const text = String(reason && reason.stack ? reason.stack : reason).slice(0, 600)
+  bad('未接住的 Promise 拒绝（进程没崩，但这次运行有真实错误）', text)
+})
 
 function dim(s) { return '\x1b[90m' + s + '\x1b[0m' }
 function ok(name, extra) { passed += 1; console.log('  \x1b[32m✓\x1b[0m ' + name + (extra ? '  ' + dim(extra) : '')) }
@@ -189,7 +216,9 @@ const {
   MUSIC_ONLINE_NO_AUDIO_MESSAGE,
   MUSIC_ONLINE_PROVIDER,
   ONLINE_CACHE_MAX_BYTES,
+  ONLINE_STALE_PART_MS,
   attachOnlineCacheTee,
+  cleanupStaleOnlineCache,
   openCachedOnlineTrack,
   openOnlineStream,
   parseDurationMs,
@@ -852,6 +881,289 @@ console.log('\n【在线曲目排进听歌房队列（本地多人同步播放�
   const finalView = (await alice('/api/music/room')).body
   eq(finalView.queue.length <= 50, true, '房间视图里的队列不超过 50 首', String(finalView.queue.length))
   eq(finalView.nowPlaying.nodeId, ref, '排满队列也没把正在放的在线曲目挤掉')
+}
+
+// ---------------------------------------------------------------- 在线缓存的两个真实缺陷（第 42 轮）
+
+/**
+ * 下面三节都起**真服务端**做黑盒验证，而不是在进程内调模块。
+ *
+ * 为什么非得起进程：这两个缺陷的共性都是"接线问题" —— B1 是"这个目录没有任何
+ * 代码扫"，B2 是"缓存写入根本没经过全站磁盘守卫"。在进程内直接调函数只能证明
+ * "函数行为对"，证明不了"它真的在那个时机被调到"。而且缓存上限 / 余量阈值都是
+ * import 时读 env 的常量：只有换一个进程重新 import，才能验证 env 覆盖真的生效。
+ *
+ * 上游仍然指向本进程的 stub（探针服务端通过 127.0.0.1 打它），所以断网也不影响。
+ */
+const ROOT_DIR = fileURLToPath(new URL('..', import.meta.url))
+const sha256 = (buf) => createHash('sha256').update(buf).digest('hex')
+const STUB_AUDIO_SHA = sha256(Buffer.from(STUB_AUDIO))
+const STUB_AUDIO_TOTAL = STUB_AUDIO.byteLength
+
+/** bvid 必须是 BV + 恰好 10 位（parseOnlineTrackId 是 SSRF 白名单本体，不会放宽）。 */
+const mkBvid = (seed) => 'BV' + String(seed).padEnd(10, 'x').slice(0, 10)
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const port = probe.address().port
+      probe.close(() => resolve(port))
+    })
+  })
+}
+
+async function startProbeServer(dataDir, extraEnv) {
+  const port = await freePort()
+  const child = spawn('node', ['src/index.ts'], {
+    cwd: join(ROOT_DIR, 'server'),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      WL_PORT: String(port),
+      WL_HOST: '127.0.0.1',
+      WL_DATA_DIR: dataDir,
+      // ⚠️ 必须显式覆盖：本进程为了隔离把 WL_TMP_DIR 指到了自己的 mkdtemp 目录，
+      // 探针服务端会原样继承它 —— 那样它清盘清的是**本进程**的缓存目录，
+      // 却去 dataDir/tmp/online-audio 里找结果，断言必然红。
+      // 每个探针服务端都要有自己的一整套目录，否则"启动清理删了哪个目录"无从判断。
+      WL_TMP_DIR: join(dataDir, 'tmp'),
+      // 探针的上游是 stub，落 trace 只会污染真服务端那份计数文件。
+      WL_MUSIC_ONLINE_TRACE: '',
+      WL_MUSIC_ONLINE_HOME_URL: STUB_BASE + '/home',
+      WL_MUSIC_ONLINE_SEARCH_URL: STUB_BASE + '/search',
+      WL_MUSIC_ONLINE_PAGELIST_URL: STUB_BASE + '/pagelist',
+      WL_MUSIC_ONLINE_PLAYURL_URL: STUB_BASE + '/playurl',
+      ...extraEnv,
+    },
+  })
+  let log = ''
+  child.stdout.on('data', (d) => { log += d.toString() })
+  child.stderr.on('data', (d) => { log += d.toString() })
+  const base = 'http://127.0.0.1:' + port
+  let ready = false
+  // 轮询 /api/health 而不是固定 sleep：慢机器上更稳（同 run-all-tests 的 startServer）。
+  for (let i = 0; i < 80; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    try { await fetch(base + '/api/health'); ready = true; break } catch { /* 还没起来 */ }
+  }
+  return { child, base, port, ready, getLog: () => log }
+}
+
+function stopProbeServer(server) {
+  try { server.child.kill() } catch { /* 已经退了 */ }
+}
+
+/**
+ * 探针服务端是全新空库 → 第一个注册的人就是 owner（无需邀请码）。
+ *
+ * 这一层必须自己吞掉异常：套件任何一个没接住的 Promise 拒绝都会让整个测试进程
+ * 带着堆栈退出、**连结果行都打不出来**，那样运行器只能报"测试进程崩溃"，
+ * 一条有用的断言信息都留不下（这个坑真实踩过一次）。宁可返回 ok:false 让断言
+ * 指名道姓地变红，也不要让一次网络抖动变成一行没有下文的崩溃。
+ */
+async function probeLogin(base, username) {
+  try {
+    const res = await fetch(base + '/api/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username, displayName: '缓存探针', password: PASSWORD }),
+    })
+    const cookie = String(res.headers.get('set-cookie') ?? '').split(';')[0]
+    return { ok: res.status === 200, cookie, error: res.status === 200 ? '' : 'status=' + res.status }
+  } catch (err) {
+    return { ok: false, cookie: '', error: String(err?.message ?? err) }
+  }
+}
+
+console.log('\n【B1 · 孤儿 .part 回收：判据必须是 mtime，不是"存在即删"】')
+{
+  const CACHE_DIR = join(CACHE_TMP_DIR, 'online-audio')
+  const partOf = (bvid) => join(CACHE_DIR, bvid + '.part')
+  const fileOf = (bvid) => join(CACHE_DIR, bvid + '.m4a')
+
+  eq(ONLINE_STALE_PART_MS, 30 * 60_000, '孤儿 .part 的 mtime 阈值默认 30 分钟（env 未设时）')
+  eq(ONLINE_CACHE_MAX_BYTES, 2 * 1024 * 1024 * 1024, '缓存上限默认仍是 2GiB，但已可被 env 覆盖')
+
+  // ---- 双向：旧的必删、新的必留
+  const staleBvid = mkBvid('stale' + SUFFIX)
+  const freshBvid = mkBvid('fresh' + SUFFIX)
+  writeFileSync(partOf(staleBvid), Buffer.alloc(4096, 7))
+  writeFileSync(partOf(freshBvid), Buffer.alloc(2048, 9))
+  const twoHoursAgo = (Date.now() - 2 * 60 * 60_000) / 1000
+  utimesSync(partOf(staleBvid), twoHoursAgo, twoHoursAgo)
+  const freshMtimeBefore = statSync(partOf(freshBvid)).mtimeMs
+  eq(statSync(partOf(staleBvid)).size, 4096, '预置：一份 2 小时前的孤儿 .part（4096 bytes，模拟 OOM 强杀）')
+  eq(statSync(partOf(freshBvid)).size, 2048, '预置：一份刚写完的 .part（2048 bytes，模拟正在下载）')
+
+  await cleanupStaleOnlineCache()
+
+  const staleGone = !existsSync(partOf(staleBvid))
+  const freshKept = existsSync(partOf(freshBvid))
+  eq(staleGone, true, 'mtime 很旧的 .part 被清理删掉（孤儿真的被回收了）')
+  eq(freshKept, true, '新鲜的 .part **不**被删（"存在即删"会在这里犯错）')
+  if (freshKept) {
+    eq(statSync(partOf(freshBvid)).size, 2048, '被保留的 .part 内容一字节没动')
+    eq(statSync(partOf(freshBvid)).mtimeMs, freshMtimeBefore, '被保留的 .part 连 mtime 都没被碰过')
+  }
+  eq([staleGone, freshKept].join(','), 'true,true', '两个方向同时成立 ⇒ 判据是 mtime，不是存在即删')
+  rmSync(partOf(freshBvid), { force: true })
+
+  // ---- 阈值边界：越过 1 分钟必删，差 1 分钟必留
+  const overBvid = mkBvid('over' + SUFFIX)
+  const underBvid = mkBvid('under' + SUFFIX)
+  writeFileSync(partOf(overBvid), Buffer.alloc(64, 1))
+  writeFileSync(partOf(underBvid), Buffer.alloc(64, 2))
+  const justOver = (Date.now() - (ONLINE_STALE_PART_MS + 60_000)) / 1000
+  const justUnder = (Date.now() - (ONLINE_STALE_PART_MS - 60_000)) / 1000
+  utimesSync(partOf(overBvid), justOver, justOver)
+  utimesSync(partOf(underBvid), justUnder, justUnder)
+  await cleanupStaleOnlineCache()
+  eq(!existsSync(partOf(overBvid)), true, '阈值外 1 分钟（31 分钟前）→ 删（阈值确实在起作用）')
+  eq(existsSync(partOf(underBvid)), true, '阈值内 1 分钟（29 分钟前）→ 留（没有提前触发）')
+  rmSync(partOf(underBvid), { force: true })
+
+  // ---- .part 的扫尾不能误伤正式缓存
+  const keepBvid = mkBvid('keep' + SUFFIX)
+  writeFileSync(fileOf(keepBvid), Buffer.alloc(1024, 3))
+  const eightHoursAgo = (Date.now() - 8 * 60 * 60_000) / 1000
+  utimesSync(fileOf(keepBvid), eightHoursAgo, eightHoursAgo)
+  await cleanupStaleOnlineCache()
+  eq(existsSync(fileOf(keepBvid)), true, '很旧但仍是正式缓存的 .m4a 不被 .part 扫尾删掉（总量没超上限）')
+  rmSync(fileOf(keepBvid), { force: true })
+}
+
+console.log('\n【B1 · 启动清理真的挂在 index.ts 的启动路径上（目录错配的根因）】')
+{
+  // 缺陷的本质是"这个目录没有任何代码扫"，所以只测函数行为不够 ——
+  // 必须让一台真服务端自己启动一次，看它有没有清盘。
+  const probeData = mkdtempSync(join(tmpdir(), 'wl-online-boot-'))
+  const probeCache = join(probeData, 'tmp', 'online-audio')
+  const staleName = 'BVbootstale.part'
+  const freshName = 'BVbootfresh.part'
+  let server = null
+  try {
+    mkdirSync(probeCache, { recursive: true })
+    writeFileSync(join(probeCache, staleName), Buffer.alloc(8192, 5))
+    writeFileSync(join(probeCache, freshName), Buffer.alloc(4096, 6))
+    const threeHoursAgo = (Date.now() - 3 * 60 * 60_000) / 1000
+    utimesSync(join(probeCache, staleName), threeHoursAgo, threeHoursAgo)
+    eq(existsSync(join(probeCache, staleName)), true, '启动前：盘上有一份 3 小时前的孤儿 .part（模拟进程被强杀）')
+
+    server = await startProbeServer(probeData, {})
+    assert(server.ready, '探针服务端启动成功（独立端口 ' + server.port + ' / 独立数据目录）', server.ready ? '' : server.getLog().slice(-400))
+    if (server.ready) {
+      let gone = false
+      for (let i = 0; i < 60; i += 1) {
+        if (!existsSync(join(probeCache, staleName))) { gone = true; break }
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      eq(gone, true, '服务端启动后：3 小时前的孤儿 .part 被删掉（启动清理确实被调到）')
+      eq(existsSync(join(probeCache, freshName)), true, '服务端启动后：新鲜 .part 仍在（启动没有把目录清空）')
+      if (existsSync(join(probeCache, freshName))) {
+        eq(statSync(join(probeCache, freshName)).size, 4096, '新鲜 .part 的字节数没变（4096）')
+      }
+      console.log(dim('    启动后缓存目录：' + readdirSync(probeCache).join(' / ')))
+    }
+  } finally {
+    if (server) stopProbeServer(server)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    rmSync(probeData, { recursive: true, force: true })
+  }
+}
+
+console.log('\n【B2 · 磁盘余量不足时降级为纯代理（播放照常 200/206）】')
+{
+  const streamPath = (bvid) => '/api/music/online/stream?id=' + encodeURIComponent('bi:' + bvid)
+
+  const runScenario = async (tag, extraEnv) => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'wl-online-disk-'))
+    const cacheDir = join(dataDir, 'tmp', 'online-audio')
+    const server = await startProbeServer(dataDir, extraEnv)
+    if (!server.ready) {
+      stopProbeServer(server)
+      rmSync(dataDir, { recursive: true, force: true })
+      return { ok: false, log: server.getLog() }
+    }
+    const auth = await probeLogin(server.base, 'cacheprobe' + String(process.pid).slice(-4) + tag)
+    const bvid = mkBvid('probe' + tag + SUFFIX.slice(-3))
+    const headers = auth.cookie ? { cookie: auth.cookie } : {}
+
+    // 取流本身也要接住异常：探针服务端刚起来时偶发的一次连接被断开，
+    // 绝不能让整个测试进程带着堆栈退出（那会丢掉全部结果行）。
+    let wholeRes = null
+    let wholeBuf = Buffer.alloc(0)
+    let rangeRes = null
+    let rangeBuf = Buffer.alloc(0)
+    let streamError = ''
+    try {
+      wholeRes = await fetch(server.base + streamPath(bvid), { headers })
+      wholeBuf = Buffer.from(await wholeRes.arrayBuffer())
+      rangeRes = await fetch(server.base + streamPath(bvid), { headers: { ...headers, range: 'bytes=0-1023' } })
+      rangeBuf = Buffer.from(await rangeRes.arrayBuffer())
+    } catch (err) {
+      streamError = String(err?.message ?? err)
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    stopProbeServer(server)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    let files = []
+    try { files = readdirSync(cacheDir).sort() } catch { files = [] }
+    rmSync(dataDir, { recursive: true, force: true })
+    return {
+      ok: wholeRes !== null && rangeRes !== null,
+      streamError,
+      log: server.getLog(),
+      authOk: auth.ok,
+      authError: auth.error,
+      wholeStatus: wholeRes ? wholeRes.status : 0,
+      wholeBytes: wholeBuf.byteLength,
+      wholeSha: sha256(wholeBuf),
+      rangeStatus: rangeRes ? rangeRes.status : 0,
+      rangeBytes: rangeBuf.byteLength,
+      rangeContentRange: rangeRes ? rangeRes.headers.get('content-range') : null,
+      files,
+    }
+  }
+
+  const normal = await runScenario('norm', {})
+  assert(normal.ok, '【对照】余量充足的服务端起来并完成取流', normal.ok ? '' : (normal.streamError || String(normal.log).slice(-400)))
+  if (normal.ok) {
+    eq(normal.authOk, true, '【对照】探针账号就绪（' + normal.authError + '）')
+    eq(normal.wholeStatus, 200, '【对照】余量充足：整份取流 → 200')
+    eq(normal.wholeBytes, STUB_AUDIO_TOTAL, '【对照】余量充足：整份 ' + STUB_AUDIO_TOTAL + ' bytes')
+    eq(normal.wholeSha, STUB_AUDIO_SHA, '【对照】余量充足：字节与上游逐字节一致（sha256 相同）')
+    eq(normal.rangeStatus, 206, '【对照】余量充足：Range 取流 → 206')
+    eq(normal.rangeBytes, 1024, '【对照】余量充足：Range 只发 1024 bytes')
+    eq(normal.files.length > 0, true, '【对照】余量充足：缓存真的落盘了（' + normal.files.join(' / ') + '）')
+    console.log(dim('    【对照】播放 200/' + normal.wholeBytes + 'B、206/' + normal.rangeBytes + 'B；缓存：' + normal.files.join(' / ')))
+  }
+
+  // 阈值设成 1 PiB：大于任何真实磁盘，于是"余量不足"这条路必然触发 —— 断言
+  // 因此是确定性的，不依赖测试机还剩多少空间（与 upload-limit-test 同一手法）。
+  const starved = await runScenario('strv', { WL_ONLINE_CACHE_MIN_FREE_BYTES: String(1024 ** 5) })
+  assert(starved.ok, '【降级】余量不足的服务端起来并完成取流', starved.ok ? '' : (starved.streamError || String(starved.log).slice(-400)))
+  if (starved.ok) {
+    eq(starved.wholeStatus, 200, '【降级】磁盘余量不足时整份取流仍 200（缓存是旁路，不是播放前置条件）')
+    eq(starved.wholeBytes, STUB_AUDIO_TOTAL, '【降级】降级成纯代理后字节一个不少：' + STUB_AUDIO_TOTAL + ' bytes')
+    eq(starved.wholeSha, STUB_AUDIO_SHA, '【降级】降级路径发出的字节与上游逐字节一致（sha256 相同）')
+    eq(starved.rangeStatus, 206, '【降级】磁盘余量不足时 Range 取流仍 206')
+    eq(starved.rangeBytes, 1024, '【降级】降级路径的 Range 仍只发 1024 bytes')
+    eq(starved.rangeContentRange, 'bytes 0-1023/' + STUB_AUDIO_TOTAL, '【降级】content-range 来自上游（本地没有文件可自算）')
+    eq(starved.files.length, 0, '【降级】缓存目录一个文件都没新增（含 .part：不是"写了再删"）')
+    console.log(dim('    【降级】播放 200/' + starved.wholeBytes + 'B、206/' + starved.rangeBytes + 'B；缓存：' + (starved.files.join(' / ') || '(空)')))
+  }
+
+  // ---- 上限的 env 覆盖确实生效（0 = 关掉缓存写入，播放不受影响）
+  const capped = await runScenario('zero', { WL_ONLINE_CACHE_MAX_BYTES: '0' })
+  assert(capped.ok, '【上限 0】服务端起来并完成取流', capped.ok ? '' : (capped.streamError || String(capped.log).slice(-400)))
+  if (capped.ok) {
+    eq(capped.wholeStatus, 200, '【上限 0】WL_ONLINE_CACHE_MAX_BYTES=0 时播放仍 200（env 覆盖生效）')
+    eq(capped.wholeSha, STUB_AUDIO_SHA, '【上限 0】发出去的字节仍与上游逐字节一致')
+    eq(capped.files.length, 0, '【上限 0】一份缓存都不写（上限可被 env 调到 0）')
+  }
 }
 
 // ---------------------------------------------------------------- 汇总

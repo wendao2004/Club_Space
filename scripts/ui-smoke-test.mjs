@@ -4190,6 +4190,31 @@ async function main() {
     assert(beforeJoin.audio === 0, '未加入不渲染 <audio>（不跟着同步播放）', `${beforeJoin.audio} 个`)
     assert(beforeJoin.pickDisabled === true, '未加入时「排首歌」禁用')
 
+    // 第 42 轮：禁用原因必须**看得见**。
+    //
+    // 原来只写在 title 里 —— 触屏没有 hover，title 永远弹不出来，
+    // 手机上用户只看到两个灰掉的按钮，不知道为什么点不动。
+    // 这里量的是页面上的文字（有尺寸、在布局里），不是属性值。
+    const inlineHint = JSON.parse(
+      await evaluate(`JSON.stringify({
+        text: [...document.querySelectorAll('.music-app .entries__hint')]
+          .map((e) => e.textContent.trim()).join(' '),
+        visible: [...document.querySelectorAll('.music-app .entries__hint')].some((e) => {
+          const r = e.getBoundingClientRect()
+          return r.width > 0 && r.height > 0
+        }),
+        onlineEntry: [...document.querySelectorAll('.music-app .entries__btn')]
+          .some((b) => b.textContent.includes('在线曲库')),
+      })`),
+    )
+    assert(
+      (inlineHint.text ?? '').includes('先加入听歌房'),
+      '未加入时页面上有可见的说明文字（不是只写 title）',
+      String(inlineHint.text),
+    )
+    assert(inlineHint.visible === true, '那句说明在布局里占位置（不是 display:none）')
+    assert(inlineHint.onlineEntry === true, '「在线曲库」是顶栏上并列的第二个入口，不用先猜页签')
+
     await evaluate(`(() => {
       [...document.querySelectorAll('.music-app button')].find((b) => b.textContent.includes('加入听歌房'))?.click()
       return true
@@ -4220,7 +4245,151 @@ async function main() {
       (await evaluate(`String(!!document.querySelector('.music-app .join-panel'))`)) === 'true',
       '离开后回到"未加入"面板',
     )
+
+    // ---- 第 42 轮：文件区没有音频时，点开选歌就该直接看到在线曲库 ----
+    //
+    // 线上实测：6 个音频全在别人的私人空间，除上传者外 8 个账号打开这里，
+    // 「从文件里挑」是一页空白，而弹层默认停的就是那一页。用户看到空白就退了，
+    // 根本不会去点右边那个「在线曲库」页签。
+    // 这里先用接口确认真的是"没有可排音频"的前提，再量界面落在哪一页。
+    const tracksProbe = await apiAs(sessionCookie, '/api/music/tracks')
+    const trackCount = Array.isArray(tracksProbe.body?.tracks) ? tracksProbe.body.tracks.length : -1
+    assert(trackCount === 0, '前提：这个账号的文件区里没有可排音频', `${trackCount} 首`)
+
+    await evaluate(`(() => {
+      [...document.querySelectorAll('.music-app button')].find((b) => b.textContent.includes('加入听歌房'))?.click()
+      return true
+    })()`)
+    await sleep(1500)
+
+    const openedPicker = await evaluate(`(() => {
+      const btn = [...document.querySelectorAll('.music-app .entries__btn')]
+        .find((b) => b.textContent.includes('排首歌'))
+      if (!btn) return 'no-btn'
+      btn.click()
+      return 'clicked'
+    })()`)
+    assert(openedPicker === 'clicked', '顶栏上找得到「排首歌」入口')
+    await sleep(1200)
+
+    const pickerState = JSON.parse(
+      await evaluate(`JSON.stringify({
+        hasPicker: !!document.querySelector('.music-app .picker'),
+        activeTab: document.querySelector('.music-app .ptab--active')?.textContent?.trim() ?? null,
+        onlineInput: !!document.querySelector('.music-app .online-search input'),
+        emptyCard: (document.querySelector('.music-app .online-empty')?.textContent ?? '').replace(/\\s+/g, ''),
+        blankPanel: (() => {
+          const list = document.querySelector('.music-app .picker-list')
+          return !list || list.children.length === 0
+        })(),
+      })`),
+    )
+    assert(pickerState.hasPicker === true, '点「排首歌」弹出了选歌弹层')
+    assert(
+      pickerState.activeTab === '在线曲库',
+      '文件区没有音频时，弹层直接落在在线曲库（不用用户自己找页签）',
+      `当前页签：${pickerState.activeTab}`,
+    )
+    assert(pickerState.onlineInput === true, '在线页签里无需切页签就能看到搜索框')
+    assert(pickerState.blankPanel === false, '在线页签不是空白面板（有空态卡片）')
+    assert(
+      (pickerState.emptyCard ?? '').includes('搜索'),
+      '空态卡片写清了"输入关键词回车搜索"',
+      String(pickerState.emptyCard).slice(0, 60),
+    )
+
+    // 关掉弹层，后面还要用干净的窗口状态
+    await evaluate(`(() => {
+      document.querySelector('.music-app .picker-bar .wl-icon-btn')?.click()
+      return true
+    })()`)
+    await sleep(500)
+    await evaluate(`(() => {
+      [...document.querySelectorAll('.music-app button')].find((b) => b.textContent.trim() === '离开')?.click()
+      return true
+    })()`)
+    await sleep(1000)
     await evaluate(`window.prompt = window.__origPrompt; true`)
+
+    // ---- 关于本平台：平台能做什么 / 已知限制 ----
+    //
+    // 用户上一轮说"我没有看到任何的功能实现"。功能全都在，但说明书里
+    // 22 个应用一个都没提 —— 只能靠开始菜单里那 22 条 description 自己拼。
+    // 这两节是补上的答案：能力清单必须逐条覆盖 registry 里的每个应用，
+    // 已知限制必须和 README 一样是 11 条，不能比 README 少说。
+    console.log('\n【关于本平台 · 能力清单与限制】')
+    if (JSON.parse(await evaluate(`!!document.querySelector('.start')`))) {
+      await evaluate(`document.querySelector('.taskbar__start').click()`)
+      await sleep(200)
+    }
+    await evaluate(`document.querySelector('.taskbar__start').click()`)
+    await sleep(500)
+
+    const openedAbout = await evaluate(`
+      (() => {
+        const t = [...document.querySelectorAll('.start__tile')]
+          .find((x) => x.textContent.includes('关于本平台'))
+        if (!t) return false
+        t.click()
+        return true
+      })()
+    `)
+    assert(openedAbout === true, '开始菜单里找得到「关于本平台」')
+    await sleep(2500)
+
+    const aboutShape = JSON.parse(
+      await evaluate(`JSON.stringify({
+        hasCapabilities: !!document.querySelector('.about #sec-capabilities'),
+        capItems: document.querySelectorAll('.about #sec-capabilities .caps__item').length,
+        capNames: [...document.querySelectorAll('.about #sec-capabilities .caps__name')]
+          .map((e) => e.textContent.trim()),
+        capText: (document.querySelector('.about #sec-capabilities')?.textContent ?? '').replace(/\\s+/g, ''),
+        limitItems: document.querySelectorAll('.about #sec-limits .limits__item').length,
+        fromFilesTagged: [...document.querySelectorAll('.about #sec-capabilities .caps__tag')]
+          .filter((e) => e.textContent.includes('从文件管理器打开')).length,
+      })`),
+    )
+    assert(aboutShape.hasCapabilities === true, '关于本平台里有「这个平台能做什么」这一节')
+    assert(
+      aboutShape.capItems >= 22,
+      '能力清单逐条覆盖了 22 个应用（一条一行）',
+      `${aboutShape.capItems} 条：${(aboutShape.capNames ?? []).join('、')}`,
+    )
+    // 名字必须和 registry 对得上，不能是手抄走形的另一套说法
+    const registryNames = [
+      '聊天', '文件', '工具集', '记账', '财物', '象棋', '斗地主', '狼人杀', '你画我猜',
+      '留言板', '投票', '听歌房', '打字背单词', '白板', '任务', '设置', '管理', '运维',
+      '关于本平台', '表格编辑', '文档编辑', '预览',
+    ]
+    const missingNames = registryNames.filter((n) => !(aboutShape.capNames ?? []).includes(n))
+    assert(missingNames.length === 0, '清单里的应用名与注册表一致', `缺：${missingNames.join('、')}`)
+    assert(
+      aboutShape.fromFilesTagged === 3,
+      '表格编辑 / 文档编辑 / 预览 都标了「从文件管理器打开」',
+      `${aboutShape.fromFilesTagged} 个带了标注`,
+    )
+    assert(
+      (aboutShape.capText ?? '').includes('在线曲库'),
+      '能力清单里单独点名了听歌房的「在线曲库」',
+    )
+    // 大白话：内部术语一个都不许进这一节
+    const jargon = ['schema', 'SSRF', 'LRU', 'SSE', 'FTS5', 'SQLite', 'WAL', 'cookie', 'httpOnly']
+    const jargonHit = jargon.filter((w) => (aboutShape.capText ?? '').includes(w))
+    assert(jargonHit.length === 0, '能力清单里没有内部术语', jargonHit.join('、') || '无')
+    assert(
+      aboutShape.limitItems >= 11,
+      '已知限制补到与 README 一致的 11 条',
+      `${aboutShape.limitItems} 条`,
+    )
+
+    // 带 section 参数打开时能定位到新节：这正是 :156 那段代码的用途
+    const sectionArgs = await evaluate(`
+      (() => {
+        const el = document.querySelector('.about #sec-capabilities')
+        return el ? el.getAttribute('id') : null
+      })()
+    `)
+    assert(sectionArgs === 'sec-capabilities', '新节的 id 可以被 win.args.section 定位到')
 
     // ---- 控制台错误 ----
     console.log('\n【运行时错误检查】')
@@ -4413,6 +4582,61 @@ async function main() {
         (bm.scrollW ?? 0) <= (bm.viewW ?? 0) + 1,
         '留言板在窄屏下没有横向溢出',
         `scrollWidth ${bm.scrollW} > 视口 ${bm.viewW}`,
+      )
+
+      // ---- 听歌房在窄屏（390px）下的新入口与那句说明 ----
+      //
+      // 第 42 轮新加的一行是两个按钮 + 一句禁用说明。看着简单，
+      // 但它塞在 44px 高的顶栏下面，窄屏最容易在这一层撑破布局 ——
+      // 按钮并排各剩不到 150px、副标题被省略号吃掉，等于白拆。
+      // 这里量的还是真实 DOM 尺寸，不是去 grep CSS 里有没有 @media。
+      await cdp.send('Page.navigate', { url: `${BASE}/` }, sessionId)
+      await sleep(2500)
+      const openedMusicTile = await evaluate(`
+        (() => {
+          const tile = [...document.querySelectorAll('.apps__tile')].find((t) => t.textContent.includes('听歌房'))
+          if (!tile) return false
+          tile.click()
+          return true
+        })()
+      `)
+      assert(openedMusicTile === true, '移动端宫格里有听歌房')
+      await sleep(2500)
+
+      const mEntries = JSON.parse(
+        await evaluate(`JSON.stringify({
+          buttons: document.querySelectorAll('.music-app .entries__btn').length,
+          hints: [...document.querySelectorAll('.music-app .entries__hint')]
+            .map((e) => e.textContent.trim()).join(' '),
+          hintVisible: [...document.querySelectorAll('.music-app .entries__hint')].some((e) => {
+            const r = e.getBoundingClientRect()
+            return r.width > 0 && r.height > 0
+          }),
+          btnWidths: [...document.querySelectorAll('.music-app .entries__btn')]
+            .map((b) => Math.round(b.getBoundingClientRect().width)),
+          containerW: Math.round(
+            document.querySelector('.music-app .entries')?.getBoundingClientRect().width ?? 0,
+          ),
+          scrollW: document.documentElement.scrollWidth,
+          viewW: window.innerWidth,
+        })`),
+      )
+      assert(mEntries.buttons === 2, '窄屏下两个排歌入口都在', `${mEntries.buttons} 个`)
+      assert(
+        (mEntries.hints ?? '').includes('先加入听歌房'),
+        '窄屏下也能看到"先加入听歌房才能排歌"这句说明（不是只靠 title）',
+        String(mEntries.hints),
+      )
+      assert(mEntries.hintVisible === true, '那句说明在窄屏下占位置（不是被藏起来）')
+      assert(
+        (mEntries.btnWidths ?? []).every((w) => w > 0 && w <= (mEntries.containerW ?? 0)),
+        '窄屏下两个按钮都拿到可用宽度（没被挤成 0）',
+        `按钮 ${(mEntries.btnWidths ?? []).join(' / ')}px，容器 ${mEntries.containerW}px`,
+      )
+      assert(
+        (mEntries.scrollW ?? 0) <= (mEntries.viewW ?? 0) + 1,
+        '听歌房新入口在窄屏下没有横向溢出',
+        `scrollWidth ${mEntries.scrollW} > 视口 ${mEntries.viewW}`,
       )
     }
   } finally {

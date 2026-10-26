@@ -322,9 +322,21 @@ async function unlockAudio(): Promise<void> {
 
 const picking = ref(false)
 
-async function openPicker(): Promise<void> {
+/**
+ * 打开选歌弹层。
+ *
+ * `preferred` 是用户在界面上直接点的那一侧（在线曲库按钮），点哪页就开哪页；
+ * 不传 = 走「排首歌」这条老路径，页签由**实际有没有音频**决定 ——
+ * music.tracks 就是可排列表，空数组意味着「从文件里挑」只会是一页空白，
+ * 那就直接落在在线曲库，省掉用户自己发现右边那个页签这一步。
+ */
+async function openPicker(preferred?: 'files' | 'online'): Promise<void> {
   picking.value = true
   await music.loadTracks()
+  const fallback: 'files' | 'online' = music.tracks.length === 0 ? 'online' : 'files'
+  pickerTab.value = preferred ?? fallback
+  // 只用于在在线页签顶部解释"为什么一进来就是这页"，用户自己切页签后就清掉
+  pickerAutoOnline.value = preferred === undefined && fallback === 'online'
 }
 
 async function enqueue(nodeId: string): Promise<void> {
@@ -425,6 +437,8 @@ function onAudioError(): void {
  * 「试听」仍然是单人路径：独立 <audio>，只响在点按钮的那台设备上，不动房间状态。
  */
 const pickerTab = ref<'files' | 'online'>('files')
+/** 这次是"文件区没有音频、自动落到在线页签"的：给一句解释，别让人以为自己点错了。 */
+const pickerAutoOnline = ref(false)
 
 /**
  * 服务端给的条目形状（契约：GET /api/music/online/search）。
@@ -634,6 +648,8 @@ async function enqueueOnline(track: OnlineTrack): Promise<void> {
 function switchPickerTab(next: 'files' | 'online'): void {
   if (pickerTab.value === next) return
   pickerTab.value = next
+  // 用户自己点过页签，那句"自动打开在线曲库"的说明就不该再挂着
+  pickerAutoOnline.value = false
   // 切回文件区就不再需要试听了。留着它在后台接着放，用户会以为全厅在放 —— 试听那只 <audio> 只响在这台设备上
   if (next === 'files') stopPreview()
 }
@@ -696,10 +712,34 @@ watch(
       >
         离开
       </button>
-      <button class="wl-btn wl-btn--primary" :disabled="!inRoom" :title="inRoom ? '' : '先加入听歌房'" @click="openPicker">
-        <Icon name="plus" :size="14" />排首歌
-      </button>
     </header>
+
+    <!--
+      排歌的两个入口并列摆着，而不是只留一个默认页签藏着的按钮。
+      上一轮的实测：文件区里的音频全在别人的私人空间，除上传者外 8 个账号
+      打开这里看到的都是空页签 —— 入口只有一个、还默认停在空页签，
+      等于把"在线曲库"这个唯一能用的来源藏起来了。
+      禁用原因必须写成看得见的字：触屏上没有 hover，title 永远弹不出来。
+    -->
+    <div class="entries">
+      <button class="wl-btn wl-btn--primary entries__btn" :disabled="!inRoom" @click="openPicker()">
+        <Icon name="plus" :size="14" />
+        <span class="entries__text">
+          <span class="entries__label">排首歌</span>
+          <span class="entries__sub">从文件里挑</span>
+        </span>
+      </button>
+      <button class="wl-btn entries__btn" :disabled="!inRoom" @click="openPicker('online')">
+        <Icon name="search" :size="14" />
+        <span class="entries__text">
+          <span class="entries__label">在线曲库</span>
+          <span class="entries__sub">搜索哔哩哔哩</span>
+        </span>
+      </button>
+      <p class="entries__hint">
+        {{ inRoom ? '排进队列的歌全厅一起听' : '先加入听歌房才能排歌' }}
+      </p>
+    </div>
 
     <!-- 正在播 -->
     <section class="now" :class="{ 'now--idle': !nowPlaying }">
@@ -888,6 +928,19 @@ watch(
             点「试听」只在这台设备上响，不动房间。
           </p>
 
+          <!--
+            一进来就是一页空白面板 = 用户不知道该干什么。还没搜过时给一张
+            明确的空态卡片，把"做什么、会得到什么、失败会怎样"一次说完。
+          -->
+          <div v-if="pickerAutoOnline && !onlineSearched && !onlineUnavailableText" class="online-empty">
+            <Icon name="search" :size="20" />
+            <p class="online-empty__title">你的文件区里没有可排的音频，先在这儿搜</p>
+            <p class="online-empty__text">
+              在上面输入歌名 / UP 主，回车搜索 —— 结果来自哔哩哔哩。
+              点「排进队列」全厅一起听，点「试听」只在这台设备上响。
+            </p>
+          </div>
+
           <p v-if="onlineUnavailableText" class="online-state online-state--warn">
             <Icon name="alert" :size="12" />{{ onlineUnavailableText }}
           </p>
@@ -897,10 +950,14 @@ watch(
           <p v-else-if="onlineDegradedText" class="online-state online-state--warn">
             <Icon name="info" :size="12" />{{ onlineDegradedText }}
           </p>
-          <p v-else-if="!onlineSearched" class="online-state">
-            输入关键词回车，在哔哩哔哩里找找看
-          </p>
-          <p v-else-if="onlineResults.length === 0" class="online-state">
+          <div v-else-if="!onlineSearched && !pickerAutoOnline" class="online-empty">
+            <Icon name="search" :size="20" />
+            <p class="online-empty__title">输入关键词回车搜索</p>
+            <p class="online-empty__text">
+              搜歌名或 UP 主。点「排进队列」全厅一起听，点「试听」只在这台设备上响。
+            </p>
+          </div>
+          <p v-else-if="onlineSearched && onlineResults.length === 0" class="online-state">
             没搜到「{{ onlineQuery.trim() }}」，换个关键词，或者回「从文件里挑」排一首
           </p>
 
@@ -1014,6 +1071,57 @@ watch(
 
 .spacer {
   flex: 1;
+}
+
+/* ---------------- 排歌入口（两个并列按钮 + 一句可见说明） */
+
+.entries {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line-hair);
+  background: var(--surface-2);
+}
+
+.entries__btn {
+  /* 按钮里是"主标题 + 副标题"两行，别让 flex 把它们挤成一行 */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.entries__text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.entries__label {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.entries__sub {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+/* 禁用原因写在按钮旁边，而不是只挂在 title 上 —— 触屏没有 hover，title 弹不出来 */
+.entries__hint {
+  flex: 1 1 100%;
+  min-width: 0;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
 }
 
 /* ---------------- 正在播 */
@@ -1381,6 +1489,30 @@ watch(
   gap: 4px;
 }
 
+.online-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-3);
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.online-empty__title {
+  margin: var(--space-1) 0 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.online-empty__text {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-tertiary);
+}
+
 .online-state {
   display: flex;
   align-items: center;
@@ -1461,6 +1593,19 @@ watch(
  * 操作区改成竖排、按钮撑满自己那一列，曲名那列就能拿到完整宽度。
  */
 @media (max-width: 390px) {
+  /*
+   * 窄屏：两个入口按钮各占一行、撑满宽度。并排会各剩不到 150px，
+   * 副标题被省略号吃掉，"在线曲库"这几个字照样看不清 —— 那就白拆了。
+   */
+  .entries {
+    gap: var(--space-1);
+  }
+
+  .entries__btn {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+
   .pick-actions {
     flex-direction: column;
     align-items: stretch;

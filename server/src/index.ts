@@ -120,6 +120,7 @@ import {
 import { registerBoardRoutes } from './routes/board.ts'
 import { registerPollRoutes } from './routes/poll.ts'
 import { musicPurgeDeleted, registerMusicRoutes } from './routes/music.ts'
+import { cleanupStaleOnlineCache } from './music-online.ts'
 import { registerMusicOnlineRoutes } from './routes/music-online.ts'
 import { isRoomTrack } from './music.ts'
 import { registerTypingRoutes } from './routes/typing.ts'
@@ -4143,12 +4144,22 @@ setInterval(
 ).unref?.()
 
 /**
- * 定期回收超时未完成的上传（删临时文件）。
+ * 启动时回收两处"上次进程被强杀留下的 .part"。
  *
- * 启动时先跑一次：上次进程被强杀时可能留下了没清的 .part。
+ * 为什么是两处、为什么必须分先后：上传的临时目录是 <DATA>/files/tmp
+ * （cleanupStaleUploads 扫它），而在线曲库的磁盘缓存目录是 <DATA>/tmp/online-audio
+ * —— 两条完全不同的路径，后者以前**没有任何代码扫**，于是"正在下歌时进程被 OOM
+ * 杀掉"会在盘上永久留下一份 .part。两者的清理逻辑各自封在各自的模块里
+ * （后者是 music-online.ts 的 cleanupStaleOnlineCache），这里只负责在同一个启动
+ * 时机把它们都叫一遍：先传上传、再清缓存，先做用户可见路径（文件服务）的维护，
+ * 再做旁路功能（听歌缓存）的维护。两个都是 async 且都吞掉异常，谁先返回都不会
+ * 挡住对方，也不阻塞下面的 listen()。
  */
 void cleanupStaleUploads().catch((err) => {
   app.log.error({ err }, '启动时回收上传临时文件失败')
+})
+void cleanupStaleOnlineCache().catch((err) => {
+  app.log.error({ err }, '启动时回收在线曲库缓存临时文件失败')
 })
 setInterval(
   () => {
