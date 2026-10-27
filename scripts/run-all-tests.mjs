@@ -110,6 +110,10 @@ const OFFLINE_TESTS = [
   { name: 'ops-runner-test', label: '执行器白名单校验' },
   // 起 4 个真子进程同时迁移一个空库 —— 复现"版本号在锁外读"的那个撞车
   { name: 'db-migrate-test', label: '数据库迁移（并发启动只迁一次）' },
+  // 设计 token 体检：var(--x) 用到的 token 必须在 tokens.css 里定义过。
+  // 它不需要服务端，秒级完成。起因是真实事故：11 个 token 从未定义、56 处在用，
+  // 其中 38 处无 fallback，color 悄悄退化成 inherit —— 不报错、不变红、能活很久。
+  { name: 'design-tokens-test', label: '设计 token 一致性（未定义/僵尸/跨文件局部）' },
 ]
 
 /** 需要服务端 + 干净数据库的测试。 */

@@ -665,7 +665,7 @@ watch([isOffice, isTable], ([office, tbl]) => {
 
 .pv__nav:hover {
   opacity: 1;
-  color: var(--text-primary);
+  color: var(--text);
   background: var(--surface-2);
 }
 

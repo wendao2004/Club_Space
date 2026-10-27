@@ -466,7 +466,7 @@ function removeWrong(wordStr: string): void {
 }
 
 .chapter-pos {
-  color: var(--text-3);
+  color: var(--text-tertiary);
   font-size: 11px;
 }
 
@@ -501,14 +501,14 @@ function removeWrong(wordStr: string): void {
 
 .wrong-meta {
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   flex: 1;
 }
 
 .empty {
   margin: var(--space-2) 0;
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 /* ---------------- 练习页 */
@@ -532,12 +532,12 @@ function removeWrong(wordStr: string): void {
 
 .p-title {
   font-size: 12px;
-  color: var(--text-2);
+  color: var(--text-secondary);
 }
 
 .p-stat {
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 .p-progress {
@@ -563,7 +563,7 @@ function removeWrong(wordStr: string): void {
 
 .p-phonetic {
   font-size: 16px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   font-family: monospace;
 }
 
@@ -583,7 +583,7 @@ function removeWrong(wordStr: string): void {
   font-size: 40px;
   font-weight: 600;
   font-family: monospace;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   min-width: 0.6em;
   /* 空格也是字符（SQL 语句里有），别让它被折叠没 */
   white-space: pre;
@@ -606,13 +606,13 @@ function removeWrong(wordStr: string): void {
 
 /* 默写模式里还没打到的字符：用点占位，保留长度提示但不泄露拼写 */
 .p-char--blank {
-  color: var(--line-strong, var(--text-3));
+  color: var(--line-strong, var(--text-tertiary));
   opacity: 0.5;
 }
 
 .p-meaning {
   font-size: 15px;
-  color: var(--text-2);
+  color: var(--text-secondary);
 }
 
 .p-input {
@@ -623,7 +623,7 @@ function removeWrong(wordStr: string): void {
   border: 1px solid var(--line-hair);
   border-radius: 10px;
   background: var(--surface-1);
-  color: var(--text-1);
+  color: var(--text);
   outline: none;
 }
 
@@ -636,7 +636,7 @@ function removeWrong(wordStr: string): void {
   align-items: center;
   gap: 4px;
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 .p-hint-wrong {
@@ -671,7 +671,7 @@ function removeWrong(wordStr: string): void {
 .result-line {
   margin: var(--space-1) 0;
   font-size: 13px;
-  color: var(--text-2);
+  color: var(--text-secondary);
 }
 
 .result-actions {

@@ -351,7 +351,7 @@ watch(
   width: 18px;
   text-align: right;
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   flex: none;
 }
 
@@ -373,7 +373,7 @@ watch(
 .compose-hint {
   margin: 0;
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 .wl-input--auto {
@@ -401,7 +401,7 @@ watch(
 
 .empty {
   margin: auto;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   font-size: 13px;
 }
 
@@ -432,14 +432,14 @@ watch(
 .card-desc {
   margin: 0;
   font-size: 12px;
-  color: var(--text-2);
+  color: var(--text-secondary);
   white-space: pre-wrap;
 }
 
 .card-meta {
   margin: 0;
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 /* ---------------- 选项 */
@@ -502,7 +502,7 @@ watch(
 .opt-count {
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-2);
+  color: var(--text-secondary);
   flex: none;
 }
 
@@ -519,7 +519,7 @@ watch(
   position: relative;
   z-index: 1;
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

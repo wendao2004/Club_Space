@@ -301,7 +301,7 @@ watch(
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface);
+  background: var(--surface-1);
   color: var(--text);
   font-size: 13px;
   font-family: inherit;

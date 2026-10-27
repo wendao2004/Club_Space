@@ -353,7 +353,7 @@ function relativeTime(ts: number): string {
 .empty {
   margin: var(--space-3) 0;
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   text-align: center;
 }
 
@@ -395,7 +395,7 @@ function relativeTime(ts: number): string {
 
 .brow-meta {
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 /* ---------------- 画布 */
@@ -438,7 +438,7 @@ function relativeTime(ts: number): string {
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  color: var(--text-3);
+  color: var(--text-tertiary);
   font-size: 13px;
 }
 

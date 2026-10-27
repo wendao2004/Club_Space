@@ -1147,7 +1147,7 @@ watch(
 }
 
 .join-icon {
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 .join-title {
@@ -1159,13 +1159,13 @@ watch(
 .join-sub {
   margin: 0;
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 .join-note {
   margin: 0;
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 .member-chip {
@@ -1175,7 +1175,7 @@ watch(
   padding: 3px 8px;
   border-radius: 999px;
   font-size: 11px;
-  color: var(--text-2);
+  color: var(--text-secondary);
   background: var(--surface-2);
 }
 
@@ -1187,7 +1187,7 @@ watch(
   border-radius: 999px;
   font-size: 11px;
   font-family: monospace;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   background: var(--surface-2);
 }
 
@@ -1267,7 +1267,7 @@ watch(
 
 .now-meta {
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 .now-progress {
@@ -1288,7 +1288,7 @@ watch(
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  color: var(--text-3);
+  color: var(--text-tertiary);
   font-size: 13px;
 }
 
@@ -1303,7 +1303,7 @@ watch(
   padding: var(--space-2) var(--space-3);
   font-size: 11px;
   font-weight: 600;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   border-bottom: 1px solid var(--line-hair);
 }
 
@@ -1318,7 +1318,7 @@ watch(
 
 .empty {
   margin: auto;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   font-size: 13px;
 }
 
@@ -1335,7 +1335,7 @@ watch(
 }
 
 .qrow-icon {
-  color: var(--text-3);
+  color: var(--text-tertiary);
   flex: none;
 }
 
@@ -1350,7 +1350,7 @@ watch(
 
 .qrow-meta {
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   flex: none;
 }
 
@@ -1392,7 +1392,7 @@ watch(
   margin: 0 0 8px;
   font-size: 11px;
   line-height: 1.5;
-  color: var(--text-3);
+  color: var(--text-tertiary);
 }
 
 .picker-list {
@@ -1433,7 +1433,7 @@ watch(
 
 .pick-meta {
   font-size: 11px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   flex: none;
 }
 

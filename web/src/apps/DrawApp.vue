@@ -1809,7 +1809,7 @@ function chatTextOf(msg: DrawChatMsg): string {
   flex: 1;
   padding: 6px 8px;
   font-size: 12px;
-  color: var(--text-3);
+  color: var(--text-tertiary);
   text-align: center;
 }
 
