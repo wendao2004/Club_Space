@@ -2920,7 +2920,7 @@ app.get('/api/assets/export/loans.csv', async (req, reply) => {
  */
 function pushXiangqiRoom(
   roomId: string,
-  event: 'game' | 'game-move' = 'game',
+  event: 'game' | 'game-move',
   extra: Record<string, unknown> = {},
 ): void {
   for (const userId of connectedUserIds()) {
@@ -3619,7 +3619,7 @@ app.post('/api/admin/docker/execute', async (req, reply) => {
  * 他的手牌是具体的，别人的只有张数。观战者不推送（他们的界面是只读的，
  * 靠主动拉取即可）。
  */
-function pushDoudizhuRoom(roomId: string, event: 'game' | 'game-play' = 'game'): void {
+function pushDoudizhuRoom(roomId: string, event: 'game' | 'game-play'): void {
   const playerIds = doudizhuMembers(roomId)
   if (playerIds.length === 0) return
   const online = onlineUserIds()
@@ -3649,7 +3649,7 @@ app.post('/api/games/doudizhu/rooms', async (req) => {
     title: body.title || `${user.display_name} 的牌局`,
     creatorId: user.id,
   })
-  pushDoudizhuRoom(room.id)
+  pushDoudizhuRoom(room.id, 'game')
   audit({
     actorId: user.id,
     actorIp: actorIp(req),
@@ -3671,7 +3671,7 @@ app.post('/api/games/doudizhu/rooms/:id/join', async (req) => {
   const user = requireUser(req)
   const { id } = req.params as { id: string }
   const room = joinDoudizhuRoom(id, user.id, onlineUserIds())
-  pushDoudizhuRoom(id)
+  pushDoudizhuRoom(id, 'game')
   audit({
     actorId: user.id,
     actorIp: actorIp(req),
@@ -3688,7 +3688,7 @@ app.post('/api/games/doudizhu/rooms/:id/bid', async (req) => {
   const { id } = req.params as { id: string }
   const body = z.object({ call: z.boolean() }).parse(req.body)
   const room = bidLandlord(id, user.id, body.call, onlineUserIds())
-  pushDoudizhuRoom(id)
+  pushDoudizhuRoom(id, 'game')
   return { room }
 })
 
@@ -3728,7 +3728,7 @@ app.post('/api/games/doudizhu/rooms/:id/leave', async (req) => {
   const user = requireUser(req)
   const { id } = req.params as { id: string }
   const { view, abandoned } = leaveDoudizhuRoom(id, user.id, onlineUserIds())
-  pushDoudizhuRoom(id)
+  pushDoudizhuRoom(id, 'game')
   if (abandoned) {
     audit({
       actorId: user.id,
@@ -3756,7 +3756,7 @@ app.post('/api/games/doudizhu/rooms/:id/leave', async (req) => {
  */
 function pushWerewolfRoom(
   roomId: string,
-  event: 'game' | 'game-werewolf' | 'game-werewolf-chat' = 'game',
+  event: 'game-werewolf' | 'game-werewolf-chat',
 ): void {
   const online = onlineUserIds()
   for (const userId of werewolfMembers(roomId)) {
@@ -3789,7 +3789,7 @@ app.post('/api/games/werewolf/rooms', async (req) => {
     creatorId: user.id,
     playerCount: body.playerCount,
   })
-  pushWerewolfRoom(room.id)
+  pushWerewolfRoom(room.id, 'game-werewolf')
   // 大厅信号：别人也能看到新房间冒出来，不用手动刷新（载荷里没有房间详情）
   broadcast({ type: 'game-werewolf-lobby', data: { roomId: room.id } })
   audit({
@@ -3814,7 +3814,7 @@ app.post('/api/games/werewolf/rooms/:id/join', async (req) => {
   const room = joinWerewolfRoom(id, user.id, onlineUserIds())
   // 最后一个人坐下时房间会自动开局（见 joinWerewolfRoom），
   // 所以这一次推送里可能已经带着各自的身份了
-  pushWerewolfRoom(id)
+  pushWerewolfRoom(id, 'game-werewolf')
   // 让大厅里的其他人看到"人又多了/开局了"
   broadcast({ type: 'game-werewolf-lobby', data: { roomId: id } })
   return { room }
@@ -3836,7 +3836,7 @@ app.post('/api/games/werewolf/rooms/:id/leave', async (req) => {
       // 推送失败不影响退房本身
     }
   }
-  pushWerewolfRoom(id)
+  pushWerewolfRoom(id, 'game-werewolf')
   broadcast({ type: 'game-werewolf-lobby', data: { roomId: id } })
   if (dissolved) {
     audit({
@@ -3867,7 +3867,7 @@ app.post('/api/games/werewolf/rooms/:id/leave', async (req) => {
  */
 function werewolfAction(
   handler: (roomId: string, userId: string, body: Record<string, unknown>, online: Set<string>) => unknown,
-  event: 'game' | 'game-werewolf' | 'game-werewolf-chat' = 'game',
+  event: 'game-werewolf' | 'game-werewolf-chat',
 ) {
   return async (req: FastifyRequest): Promise<{ room: unknown }> => {
     const user = requireUser(req)
@@ -3885,15 +3885,17 @@ const seatNum = z.number().int().min(0).max(11)
 
 app.post(
   '/api/games/werewolf/rooms/:id/kill',
-  werewolfAction((roomId, userId, body, online) =>
-    werewolfKill(roomId, userId, seatNum.parse(body.target), online),
+  werewolfAction(
+    (roomId, userId, body, online) => werewolfKill(roomId, userId, seatNum.parse(body.target), online),
+    'game-werewolf',
   ),
 )
 
 app.post(
   '/api/games/werewolf/rooms/:id/check',
-  werewolfAction((roomId, userId, body, online) =>
-    werewolfCheck(roomId, userId, seatNum.parse(body.target), online),
+  werewolfAction(
+    (roomId, userId, body, online) => werewolfCheck(roomId, userId, seatNum.parse(body.target), online),
+    'game-werewolf',
   ),
 )
 
@@ -3913,20 +3915,23 @@ app.post(
         .parse(body),
       online,
     ),
+    'game-werewolf',
   ),
 )
 
 app.post(
   '/api/games/werewolf/rooms/:id/vote',
-  werewolfAction((roomId, userId, body, online) =>
-    werewolfVote(roomId, userId, seatNum.nullable().parse(body.target ?? null), online),
+  werewolfAction(
+    (roomId, userId, body, online) => werewolfVote(roomId, userId, seatNum.nullable().parse(body.target ?? null), online),
+    'game-werewolf',
   ),
 )
 
 app.post(
   '/api/games/werewolf/rooms/:id/shoot',
-  werewolfAction((roomId, userId, body, online) =>
-    werewolfShoot(roomId, userId, seatNum.nullable().parse(body.target ?? null), online),
+  werewolfAction(
+    (roomId, userId, body, online) => werewolfShoot(roomId, userId, seatNum.nullable().parse(body.target ?? null), online),
+    'game-werewolf',
   ),
 )
 
@@ -4089,7 +4094,7 @@ setInterval(
 setInterval(() => {
   try {
     for (const roomId of processWerewolfTimeouts()) {
-      pushWerewolfRoom(roomId)
+      pushWerewolfRoom(roomId, 'game-werewolf')
     }
   } catch (err) {
     app.log.error({ err }, '狼人杀超时推进失败')
